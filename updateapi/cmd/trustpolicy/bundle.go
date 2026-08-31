@@ -1,31 +1,33 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-const bundleMarkerName = ".gift-panel-trustpolicy-staging-v1"
+const stagingTokenBytes = 32
 
 type bundleCheckpoint string
 
 const (
-	bundleAfterRecovery      bundleCheckpoint = "after-recovery"
 	bundleAfterCreateStaging bundleCheckpoint = "after-create-staging"
-	bundleAfterWriteMarker   bundleCheckpoint = "after-write-marker"
 	bundleAfterWritePolicy   bundleCheckpoint = "after-write-policy"
 	bundleAfterWriteAudit    bundleCheckpoint = "after-write-audit"
-	bundleAfterRemoveMarker  bundleCheckpoint = "after-remove-marker"
 	bundleAfterSyncStaging   bundleCheckpoint = "after-sync-staging"
-	bundleAfterRename        bundleCheckpoint = "after-rename"
+	bundleAfterCommit        bundleCheckpoint = "after-commit"
 	bundleAfterVerifyFinal   bundleCheckpoint = "after-verify-final"
 	bundleAfterSyncParent    bundleCheckpoint = "after-sync-parent"
 )
 
-func (checkpoint bundleCheckpoint) beforeRename() bool {
+func (checkpoint bundleCheckpoint) beforeCommit() bool {
 	switch checkpoint {
-	case bundleAfterRecovery, bundleAfterCreateStaging, bundleAfterWriteMarker, bundleAfterWritePolicy, bundleAfterWriteAudit, bundleAfterRemoveMarker, bundleAfterSyncStaging:
+	case bundleAfterCreateStaging, bundleAfterWritePolicy, bundleAfterWriteAudit, bundleAfterSyncStaging:
 		return true
 	default:
 		return false
@@ -33,14 +35,16 @@ func (checkpoint bundleCheckpoint) beforeRename() bool {
 }
 
 type bundleHooks struct {
-	checkpoint func(bundleCheckpoint) error
+	checkpoint          func(bundleCheckpoint, string) error
+	entropy             io.Reader
+	beforeCleanupRemove func(int) error
 }
 
-func (hooks bundleHooks) reach(checkpoint bundleCheckpoint) error {
+func (hooks bundleHooks) reach(checkpoint bundleCheckpoint, staging string) error {
 	if hooks.checkpoint == nil {
 		return nil
 	}
-	return hooks.checkpoint(checkpoint)
+	return hooks.checkpoint(checkpoint, staging)
 }
 
 type outputBundlePaths struct {
@@ -49,8 +53,20 @@ type outputBundlePaths struct {
 	policyName string
 	auditName  string
 	final      string
-	staging    string
 	parent     string
+}
+
+type bundleFileIdentity struct {
+	volume uint64
+	file   uint64
+}
+
+type stagingClaim struct {
+	paths    outputBundlePaths
+	path     string
+	token    [stagingTokenBytes]byte
+	identity bundleFileIdentity
+	files    map[string]bundleFileIdentity
 }
 
 func validateOutputBundlePaths(policyPath, auditPath string) (outputBundlePaths, error) {
@@ -68,7 +84,7 @@ func validateOutputBundlePaths(policyPath, auditPath string) (outputBundlePaths,
 	auditParent := filepath.Dir(audit)
 	policyName := filepath.Base(policy)
 	auditName := filepath.Base(audit)
-	if samePath(policy, audit) || !samePath(policyParent, auditParent) || policyName == bundleMarkerName || auditName == bundleMarkerName {
+	if samePath(policy, audit) || !samePath(policyParent, auditParent) || policyName == "." || auditName == "." {
 		return outputBundlePaths{}, errCommand
 	}
 	parent := filepath.Dir(policyParent)
@@ -84,12 +100,8 @@ func validateOutputBundlePaths(policyPath, auditPath string) (outputBundlePaths,
 	}
 	return outputBundlePaths{
 		policy: policy, audit: audit, policyName: policyName, auditName: auditName,
-		final: policyParent, staging: stagingPathFor(policyParent), parent: parent,
+		final: policyParent, parent: parent,
 	}, nil
-}
-
-func stagingPathFor(finalParent string) string {
-	return filepath.Join(filepath.Dir(finalParent), "."+filepath.Base(finalParent)+".trustpolicy-staging")
 }
 
 func writeOutputBundle(policyPath string, policy []byte, auditPath string, audit []byte, hooks bundleHooks) (resultErr error) {
@@ -97,79 +109,197 @@ func writeOutputBundle(policyPath string, policy []byte, auditPath string, audit
 	if err != nil {
 		return errCommand
 	}
-	if err := recoverOwnedStaging(paths); err != nil {
+	claim, err := createUniqueStagingClaim(paths, hooks.entropy)
+	if err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterRecovery); err != nil {
-		return errCommand
-	}
-
-	created := false
-	renamed := false
+	committed := false
 	defer func() {
-		if !renamed && created {
-			if cleanupErr := removeCreatedStaging(paths); cleanupErr != nil {
+		if !committed {
+			if cleanupErr := cleanupStagingClaim(claim, hooks); cleanupErr != nil {
 				resultErr = errCommand
 			}
 		}
 	}()
-	if err := createPrivateDirectory(paths.staging); err != nil {
+	if err := hooks.reach(bundleAfterCreateStaging, claim.path); err != nil {
 		return errCommand
 	}
-	created = true
-	if err := hooks.reach(bundleAfterCreateStaging); err != nil {
+	if err := writePrivateBundleFile(filepath.Join(claim.path, paths.policyName), policy); err != nil {
 		return errCommand
 	}
-	if err := writePrivateBundleFile(filepath.Join(paths.staging, bundleMarkerName), nil); err != nil {
+	if err := recordStagingFile(&claim, paths.policyName); err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterWriteMarker); err != nil {
+	if err := hooks.reach(bundleAfterWritePolicy, claim.path); err != nil {
 		return errCommand
 	}
-	if err := writePrivateBundleFile(filepath.Join(paths.staging, paths.policyName), policy); err != nil {
+	if err := writePrivateBundleFile(filepath.Join(claim.path, paths.auditName), audit); err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterWritePolicy); err != nil {
+	if err := recordStagingFile(&claim, paths.auditName); err != nil {
 		return errCommand
 	}
-	if err := writePrivateBundleFile(filepath.Join(paths.staging, paths.auditName), audit); err != nil {
+	if err := hooks.reach(bundleAfterWriteAudit, claim.path); err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterWriteAudit); err != nil {
+	if err := syncBundleDirectory(claim.path); err != nil {
 		return errCommand
 	}
-	if err := os.Remove(filepath.Join(paths.staging, bundleMarkerName)); err != nil {
+	if err := hooks.reach(bundleAfterSyncStaging, claim.path); err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterRemoveMarker); err != nil {
+	if err := renameBundleDirectory(claim.path, paths.final); err != nil {
 		return errCommand
 	}
-	if err := syncBundleDirectory(paths.staging); err != nil {
-		return errCommand
-	}
-	if err := hooks.reach(bundleAfterSyncStaging); err != nil {
-		return errCommand
-	}
-	if err := renameBundleDirectory(paths.staging, paths.final); err != nil {
-		return errCommand
-	}
-	renamed = true
-	if err := hooks.reach(bundleAfterRename); err != nil {
+	committed = true
+	if err := hooks.reach(bundleAfterCommit, claim.path); err != nil {
 		return errCommand
 	}
 	if err := verifyPrivateDirectory(paths.final); err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterVerifyFinal); err != nil {
+	if err := hooks.reach(bundleAfterVerifyFinal, claim.path); err != nil {
 		return errCommand
 	}
 	if err := syncBundleDirectory(paths.parent); err != nil {
 		return errCommand
 	}
-	if err := hooks.reach(bundleAfterSyncParent); err != nil {
+	if err := hooks.reach(bundleAfterSyncParent, claim.path); err != nil {
 		return errCommand
 	}
 	return nil
+}
+
+func createUniqueStagingClaim(paths outputBundlePaths, entropy io.Reader) (stagingClaim, error) {
+	if entropy == nil {
+		entropy = rand.Reader
+	}
+	for range 8 {
+		var token [stagingTokenBytes]byte
+		if _, err := io.ReadFull(entropy, token[:]); err != nil {
+			return stagingClaim{}, errCommand
+		}
+		staging := stagingPathForToken(paths, token)
+		if err := createPrivateDirectory(staging); err != nil {
+			if _, statErr := os.Lstat(staging); statErr == nil {
+				continue
+			}
+			return stagingClaim{}, errCommand
+		}
+		identity, err := readBundleFileIdentity(staging)
+		if err != nil {
+			return stagingClaim{}, errCommand
+		}
+		return stagingClaim{paths: paths, path: staging, token: token, identity: identity, files: make(map[string]bundleFileIdentity, 2)}, nil
+	}
+	return stagingClaim{}, errCommand
+}
+
+func stagingPathForToken(paths outputBundlePaths, token [stagingTokenBytes]byte) string {
+	name := "." + filepath.Base(paths.final) + ".trustpolicy-staging-" + hex.EncodeToString(token[:])
+	return filepath.Join(paths.parent, name)
+}
+
+func cleanupStagingClaim(claim stagingClaim, hooks bundleHooks) error {
+	if !stagingClaimDirectoryMatches(claim) {
+		return errCommand
+	}
+	entries, err := os.ReadDir(claim.path)
+	if err != nil {
+		return errCommand
+	}
+	allowed := map[string]struct{}{claim.paths.policyName: {}, claim.paths.auditName: {}}
+	for _, entry := range entries {
+		if _, ok := allowed[entry.Name()]; !ok || entry.Type()&os.ModeSymlink != 0 {
+			return errCommand
+		}
+		entryInfo, err := entry.Info()
+		if err != nil || !entryInfo.Mode().IsRegular() {
+			return errCommand
+		}
+		expectedIdentity, ok := claim.files[entry.Name()]
+		if !ok {
+			return errCommand
+		}
+		identity, err := readBundleFileIdentity(filepath.Join(claim.path, entry.Name()))
+		if err != nil || identity != expectedIdentity {
+			return errCommand
+		}
+	}
+	for index, entry := range entries {
+		if hooks.beforeCleanupRemove != nil {
+			if err := hooks.beforeCleanupRemove(index); err != nil {
+				return errCommand
+			}
+		}
+		if !stagingClaimDirectoryMatches(claim) {
+			return errCommand
+		}
+		expectedIdentity, ok := claim.files[entry.Name()]
+		if !ok {
+			return errCommand
+		}
+		identity, err := readBundleFileIdentity(filepath.Join(claim.path, entry.Name()))
+		if err != nil || identity != expectedIdentity {
+			return errCommand
+		}
+		if err := os.Remove(filepath.Join(claim.path, entry.Name())); err != nil {
+			return errCommand
+		}
+	}
+	if hooks.beforeCleanupRemove != nil {
+		if err := hooks.beforeCleanupRemove(len(entries)); err != nil {
+			return errCommand
+		}
+	}
+	if !stagingClaimDirectoryMatches(claim) {
+		return errCommand
+	}
+	remaining, err := os.ReadDir(claim.path)
+	if err != nil || len(remaining) != 0 {
+		return errCommand
+	}
+	if err := os.Remove(claim.path); err != nil {
+		return errCommand
+	}
+	return syncBundleDirectory(claim.paths.parent)
+}
+
+func recordStagingFile(claim *stagingClaim, name string) error {
+	identity, err := readBundleFileIdentity(filepath.Join(claim.path, name))
+	if err != nil {
+		return errCommand
+	}
+	claim.files[name] = identity
+	return nil
+}
+
+func stagingClaimDirectoryMatches(claim stagingClaim) bool {
+	if !claimTokenMatchesPath(claim) {
+		return false
+	}
+	info, err := os.Lstat(claim.path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	if err := verifyPrivateDirectory(claim.path); err != nil {
+		return false
+	}
+	identity, err := readBundleFileIdentity(claim.path)
+	return err == nil && identity == claim.identity
+}
+
+func claimTokenMatchesPath(claim stagingClaim) bool {
+	prefix := "." + filepath.Base(claim.paths.final) + ".trustpolicy-staging-"
+	base := filepath.Base(claim.path)
+	if !strings.HasPrefix(base, prefix) || !samePath(filepath.Dir(claim.path), claim.paths.parent) {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(base, prefix))
+	if err != nil || len(decoded) != stagingTokenBytes {
+		return false
+	}
+	return subtle.ConstantTimeCompare(decoded, claim.token[:]) == 1
 }
 
 func writePrivateBundleFile(path string, data []byte) error {
@@ -210,92 +340,6 @@ func syncBundleDirectory(path string) error {
 		return errCommand
 	}
 	if closeErr != nil {
-		return errCommand
-	}
-	return nil
-}
-
-func recoverOwnedStaging(paths outputBundlePaths) error {
-	info, err := os.Lstat(paths.staging)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errCommand
-	}
-	if err := verifyPrivateDirectory(paths.staging); err != nil {
-		return errCommand
-	}
-	entries, err := os.ReadDir(paths.staging)
-	if err != nil {
-		return errCommand
-	}
-	if len(entries) == 0 {
-		if err := os.Remove(paths.staging); err != nil {
-			return errCommand
-		}
-		return syncBundleDirectory(paths.parent)
-	}
-	markerFound := false
-	policyFound := false
-	auditFound := false
-	allowed := map[string]struct{}{bundleMarkerName: {}, paths.policyName: {}, paths.auditName: {}}
-	for _, entry := range entries {
-		if _, ok := allowed[entry.Name()]; !ok || entry.Type()&os.ModeSymlink != 0 {
-			return errCommand
-		}
-		entryInfo, err := entry.Info()
-		if err != nil || !entryInfo.Mode().IsRegular() {
-			return errCommand
-		}
-		if entry.Name() == bundleMarkerName {
-			if entryInfo.Size() != 0 {
-				return errCommand
-			}
-			markerFound = true
-		} else if entry.Name() == paths.policyName {
-			policyFound = true
-		} else if entry.Name() == paths.auditName {
-			auditFound = true
-		}
-	}
-	if !markerFound && !(policyFound && auditFound && len(entries) == 2) {
-		return errCommand
-	}
-	if err := removeStagingEntries(paths, entries); err != nil {
-		return errCommand
-	}
-	return syncBundleDirectory(paths.parent)
-}
-
-func removeCreatedStaging(paths outputBundlePaths) error {
-	entries, err := os.ReadDir(paths.staging)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return errCommand
-	}
-	allowed := map[string]struct{}{bundleMarkerName: {}, paths.policyName: {}, paths.auditName: {}}
-	for _, entry := range entries {
-		if _, ok := allowed[entry.Name()]; !ok || entry.Type()&os.ModeSymlink != 0 {
-			return errCommand
-		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
-			return errCommand
-		}
-	}
-	return removeStagingEntries(paths, entries)
-}
-
-func removeStagingEntries(paths outputBundlePaths, entries []os.DirEntry) error {
-	for _, entry := range entries {
-		if err := os.Remove(filepath.Join(paths.staging, entry.Name())); err != nil {
-			return errCommand
-		}
-	}
-	if err := os.Remove(paths.staging); err != nil {
 		return errCommand
 	}
 	return nil

@@ -34,11 +34,16 @@ func verifyPrivateDirectory(path string) error {
 	return nil
 }
 
-func renameBundleDirectory(source, target string) error {
-	if err := os.Rename(source, target); err != nil {
-		return errCommand
+func readBundleFileIdentity(path string) (bundleFileIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		return bundleFileIdentity{}, errCommand
 	}
-	return nil
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return bundleFileIdentity{}, errCommand
+	}
+	return bundleFileIdentity{volume: uint64(stat.Dev), file: uint64(stat.Ino)}, nil
 }
 
 func isUnsupportedBundleDirectorySyncError(error) bool { return false }

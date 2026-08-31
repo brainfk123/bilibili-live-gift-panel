@@ -22,14 +22,12 @@ const (
 	bundleObjectInheritACE         = 0x01
 	bundleContainerInheritACE      = 0x02
 	bundleFileAllAccess            = 0x001f01ff
-	bundleMoveFileWriteThrough     = 0x00000008
 )
 
 var (
 	bundleKernel32             = syscall.NewLazyDLL("kernel32.dll")
 	bundleCreateDirectoryW     = bundleKernel32.NewProc("CreateDirectoryW")
 	bundleLocalFree            = bundleKernel32.NewProc("LocalFree")
-	bundleMoveFileExW          = bundleKernel32.NewProc("MoveFileExW")
 	bundleAdvapi32             = syscall.NewLazyDLL("advapi32.dll")
 	bundleConvertSDDL          = bundleAdvapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
 	bundleGetNamedSecurityInfo = bundleAdvapi32.NewProc("GetNamedSecurityInfoW")
@@ -170,6 +168,23 @@ func verifyPrivateDirectory(path string) error {
 	return nil
 }
 
+func readBundleFileIdentity(path string) (bundleFileIdentity, error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return bundleFileIdentity{}, errCommand
+	}
+	var information syscall.ByHandleFileInformation
+	identityErr := syscall.GetFileInformationByHandle(syscall.Handle(directory.Fd()), &information)
+	closeErr := directory.Close()
+	if identityErr != nil || closeErr != nil {
+		return bundleFileIdentity{}, errCommand
+	}
+	return bundleFileIdentity{
+		volume: uint64(information.VolumeSerialNumber),
+		file:   uint64(information.FileIndexHigh)<<32 | uint64(information.FileIndexLow),
+	}, nil
+}
+
 func currentBundleUserSID() (string, error) {
 	token, err := syscall.OpenCurrentProcessToken()
 	if err != nil {
@@ -220,26 +235,6 @@ func createWindowsBundleDirectory(path string, attributes *syscall.SecurityAttri
 func localFreeBundlePointer(pointer uintptr) error {
 	result, _, _ := bundleLocalFree.Call(pointer)
 	if result != 0 {
-		return errCommand
-	}
-	return nil
-}
-
-func renameBundleDirectory(source, target string) error {
-	sourcePointer, err := syscall.UTF16PtrFromString(windowsBundlePath(source))
-	if err != nil {
-		return errCommand
-	}
-	targetPointer, err := syscall.UTF16PtrFromString(windowsBundlePath(target))
-	if err != nil {
-		return errCommand
-	}
-	result, _, _ := bundleMoveFileExW.Call(
-		uintptr(unsafe.Pointer(sourcePointer)),
-		uintptr(unsafe.Pointer(targetPointer)),
-		bundleMoveFileWriteThrough,
-	)
-	if result == 0 {
 		return errCommand
 	}
 	return nil

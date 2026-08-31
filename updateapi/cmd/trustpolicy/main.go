@@ -74,8 +74,7 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err != nil {
 		return errCommand
 	}
-	bundlePaths, err := validateOutputBundlePaths(policyAbsolute, auditAbsolute)
-	if err != nil || recoverOwnedStaging(bundlePaths) != nil {
+	if _, err := validateOutputBundlePaths(policyAbsolute, auditAbsolute); err != nil {
 		return errCommand
 	}
 
