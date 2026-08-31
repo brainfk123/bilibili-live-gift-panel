@@ -962,3 +962,29 @@ func TestDefaultStateEnablesAutomaticUpdates(t *testing.T) {
 		t.Fatal("missing legacy setting should migrate to enabled")
 	}
 }
+
+func TestAutoUpdaterTrustEnrollmentOptionsAreDisabledByDefault(t *testing.T) {
+	updater := newAutoUpdater(autoUpdaterOptions{CurrentVersion: "1.0.0"})
+	if updater.trustStore != nil || len(updater.trustSources) != 0 {
+		t.Fatalf("default trust enrollment = store %v, sources %#v; want disabled", updater.trustStore, updater.trustSources)
+	}
+}
+
+func TestAutoUpdaterPinsTrustStoreClockAndCopiesSources(t *testing.T) {
+	pinned := time.Date(2029, 2, 3, 4, 5, 6, 0, time.UTC)
+	store := &updateTrustStore{}
+	sources := []updateTrustSource{{Name: "domestic", URL: "https://updates.example.invalid/policy"}}
+	updater := newAutoUpdater(autoUpdaterOptions{
+		CurrentVersion: "1.0.0",
+		Now:            func() time.Time { return pinned },
+		TrustStore:     store,
+		TrustSources:   sources,
+	})
+	sources[0].Name = "mutated"
+	if updater.trustStore != store || len(updater.trustSources) != 1 || updater.trustSources[0].Name != "domestic" {
+		t.Fatalf("trust enrollment options were not retained safely: store=%v sources=%#v", updater.trustStore, updater.trustSources)
+	}
+	if got := updater.trustStore.Now(); !got.Equal(pinned) {
+		t.Fatalf("trust clock = %s, want %s", got, pinned)
+	}
+}

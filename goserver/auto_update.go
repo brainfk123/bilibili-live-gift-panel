@@ -108,6 +108,8 @@ type autoUpdaterOptions struct {
 	UpdatesDir              string
 	ReleaseURL              string
 	ReleaseSources          []updateReleaseSource
+	TrustSources            []updateTrustSource
+	TrustStore              *updateTrustStore
 	AssetName               string
 	CheckPeriod             time.Duration
 	Now                     func() time.Time
@@ -124,6 +126,8 @@ type autoUpdater struct {
 	executablePath          string
 	updatesDir              string
 	releaseSources          []updateReleaseSource
+	trustSources            []updateTrustSource
+	trustStore              *updateTrustStore
 	assetName               string
 	checkPeriod             time.Duration
 	now                     func() time.Time
@@ -286,6 +290,11 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	if len(releaseSources) == 0 {
 		releaseSources = defaultUpdateReleaseSources()
 	}
+	trustSources := append([]updateTrustSource(nil), options.TrustSources...)
+	trustStore := options.TrustStore
+	if trustStore != nil && trustStore.Now == nil {
+		trustStore.Now = now
+	}
 	updater := &autoUpdater{
 		store:                   options.Store,
 		client:                  client,
@@ -293,6 +302,8 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		executablePath:          options.ExecutablePath,
 		updatesDir:              options.UpdatesDir,
 		releaseSources:          releaseSources,
+		trustSources:            trustSources,
+		trustStore:              trustStore,
 		assetName:               options.AssetName,
 		checkPeriod:             period,
 		now:                     now,
