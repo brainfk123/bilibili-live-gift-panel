@@ -92,7 +92,7 @@ Stage C may begin only after migration and parity evidence is complete and users
 - [ ] user notification, support owner, and support policy:
 - [ ] archived signed EXE, SHA-256, signer subject, and source commit:
 - [ ] reproducible build instructions and migration instructions:
-- [ ] explicit old-package distribution, update, and rollback policy:
+- [ ] explicit old-package distribution, update, and rollback policy (old migration-package policy):
 
 ### Windows policy after entry
 
