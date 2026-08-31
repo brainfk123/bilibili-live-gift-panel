@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +16,64 @@ import (
 	"time"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 )
+
+func TestBridgePublishCannotMutateStable(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"0.4.11"}]}`)
+	input.Channel = release.ChannelLegacyRushRush
+	input.Tag = "v0.4.11"
+	store := newMemoryStore()
+
+	outcome, err := Publish(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeLegacyPromoted {
+		t.Fatalf("Publish() outcome = %q, want %q", outcome, OutcomeLegacyPromoted)
+	}
+	if store.hasStablePut() {
+		t.Fatal("bridge wrote stable pointer")
+	}
+	if !containsOperation(store.operations, "PUT channels/legacy-rushrush/latest.json") {
+		t.Fatal("legacy pointer was not written")
+	}
+	var manifest release.ChannelManifest
+	if err := json.Unmarshal(store.objects["channels/legacy-rushrush/latest.json"].body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.SchemaVersion != 2 || manifest.Channel != release.ChannelLegacyRushRush {
+		t.Fatalf("legacy manifest = %#v, want schema 2 legacy channel", manifest)
+	}
+}
+
+func TestStablePublishCannotMutateLegacyOrUseBridgeTag(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"0.4.11"}]}`)
+	input.Tag = "v0.4.11"
+	store := newMemoryStore()
+
+	if _, err := Publish(context.Background(), store, input); err == nil {
+		t.Fatal("stable publisher accepted reserved bridge tag")
+	}
+	if len(store.operations) != 0 {
+		t.Fatalf("stable bridge rejection touched COS: %v", store.operations)
+	}
+	if _, exists := store.objects["channels/legacy-rushrush/latest.json"]; exists {
+		t.Fatal("stable publisher wrote legacy pointer")
+	}
+}
+
+func TestPublishRejectsUnknownChannelBeforeCOS(t *testing.T) {
+	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
+	input.Channel = release.Channel("preview")
+	store := newMemoryStore()
+	if _, err := Publish(context.Background(), store, input); err == nil {
+		t.Fatal("Publish() accepted unknown channel")
+	}
+	if len(store.operations) != 0 {
+		t.Fatalf("unknown channel touched COS: %v", store.operations)
+	}
+}
 
 func TestRunPublishesAndVerifiesVersionedObjectsBeforeStablePointer(t *testing.T) {
 	input := writeInput(t, "windows executable", `{"schemaVersion":1,"releases":[{"version":"1.2.3"}]}`)
@@ -365,6 +423,7 @@ func TestPublishPreparedReleaseUsesAnImmutableCopiedSnapshot(t *testing.T) {
 	store := newMemoryStore()
 
 	outcome, err := Publish(context.Background(), store, Input{
+		Channel:     release.ChannelStable,
 		Tag:         "v1.2.3",
 		PublishedAt: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
 		Prepared:    prepared,
@@ -414,7 +473,7 @@ func writeInput(t *testing.T, asset, changelog string) Input {
 	if err := os.WriteFile(changelogPath, []byte(changelog), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return Input{Tag: "v1.2.3", AssetPath: assetPath, ChecksumPath: checksumPath, ChangelogPath: changelogPath, PublishedAt: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+	return Input{Channel: release.ChannelStable, Tag: "v1.2.3", AssetPath: assetPath, ChecksumPath: checksumPath, ChangelogPath: changelogPath, PublishedAt: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
 }
 
 type storedObject struct {

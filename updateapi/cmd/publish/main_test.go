@@ -48,7 +48,7 @@ func TestPublishFailureMessageKeepsLocalFailuresGeneric(t *testing.T) {
 func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	called := false
-	err := run([]string{"--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		called = true
 		return nil, errors.New("must not create store")
 	}, io.Discard)
@@ -60,10 +60,53 @@ func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
 	}
 }
 
+func TestRunRequiresClosedChannelBeforeCreatingStore(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
+	for _, args := range [][]string{
+		{"--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog},
+		{"--channel", "preview", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog},
+		{"--channel", "stable", "--tag", "v0.4.11", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog},
+		{"--channel", "legacy-rushrush", "--tag", "v0.4.10", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog},
+	} {
+		called := false
+		err := run(args, func() (publish.Store, error) {
+			called = true
+			return nil, errors.New("must not create store")
+		}, io.Discard)
+		if err == nil {
+			t.Fatalf("run(%v) error = nil, want channel rejection", args)
+		}
+		if called {
+			t.Fatalf("run(%v) created store before channel validation", args)
+		}
+	}
+}
+
+func TestRunLegacyPublishesOnlyLegacyPointer(t *testing.T) {
+	asset, checksum, changelog := commandInputs(t)
+	store := newCommandStore()
+	var output bytes.Buffer
+	err := run([]string{"--channel", "legacy-rushrush", "--tag", "v0.4.11", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+		return store, nil
+	}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.objects["channels/stable/latest.json"]; ok {
+		t.Fatal("legacy CLI wrote stable pointer")
+	}
+	if _, ok := store.objects["channels/legacy-rushrush/latest.json"]; !ok {
+		t.Fatal("legacy CLI did not write legacy pointer")
+	}
+	if !strings.Contains(output.String(), "channels/legacy-rushrush/latest.json") {
+		t.Fatalf("output = %q, want legacy pointer", output.String())
+	}
+}
+
 func TestRunRejectsInvalidPublishedTimestampBeforeCreatingStore(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	called := false
-	err := run([]string{"--tag", "v1.2.3", "--published-at", "yesterday", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "yesterday", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		called = true
 		return nil, errors.New("must not create store")
 	}, io.Discard)
@@ -79,7 +122,7 @@ func TestRunRejectsInvalidTagWithoutPublishing(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
-	err := run([]string{"--tag", "v1.2.3+extra/path", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3+extra/path", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		return store, nil
 	}, &output)
 	if err == nil {
@@ -97,7 +140,7 @@ func TestRunPrintsOnlyVerifiedIdentifiersAndOutcome(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
-	err := run([]string{"--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		return store, nil
 	}, &output)
 	if err != nil {
@@ -121,7 +164,7 @@ func TestRunReportsStableUnchangedWhenRepairingAnOlderRelease(t *testing.T) {
 	store.objects["channels/stable/latest.json"] = commandObject{body: prior, digest: hex.EncodeToString(digest[:])}
 	var output bytes.Buffer
 
-	err := run([]string{"--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
 		return store, nil
 	}, &output)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/mirror"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 )
 
 const (
@@ -120,22 +121,31 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 
 	dryRun := false
 	showBuildCommit := false
+	channelValue := ""
+	tag := ""
 	stateDirectory := defaultStateDirectory
 	flags := flag.NewFlagSet("gift-panel-release-mirror", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.BoolVar(&dryRun, "dry-run", false, "validate the latest release without COS publication")
 	flags.BoolVar(&showBuildCommit, "build-commit", false, "print the embedded source commit")
+	flags.StringVar(&channelValue, "channel", "", "update channel: stable or legacy-rushrush")
+	flags.StringVar(&tag, "tag", "", "exact legacy bridge release tag")
 	flags.StringVar(&stateDirectory, "state-dir", defaultStateDirectory, "absolute mirror state directory")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !isAbsoluteCleanStateDirectory(stateDirectory) {
 		return finishFailure(commandFailure(stageArguments, errors.New("command arguments are invalid")))
 	}
 	if showBuildCommit {
-		if dryRun || stateDirectory != defaultStateDirectory {
+		if dryRun || channelValue != "" || tag != "" || stateDirectory != defaultStateDirectory {
 			return finishFailure(commandFailure(stageArguments, errors.New("command arguments are invalid")))
 		}
 		fmt.Fprintln(output, buildCommit)
 		return nil
 	}
+	channel, err := parseMirrorChannel(channelValue, tag)
+	if err != nil {
+		return finishFailure(commandFailure(stageArguments, err))
+	}
+	channelStateDirectory := channelStatePath(stateDirectory, channel)
 	if !dryRun && !isReviewedBuildCommit(buildCommit) {
 		return finishFailure(commandFailure(stageConfiguration, errors.New("mirror build identity is not reviewed")))
 	}
@@ -169,11 +179,10 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 	}
 	constructed := make(chan constructionResult, 1)
 	go func() {
-		runner, err := factory(stateDirectory, configuration)
+		runner, err := factory(channelStateDirectory, configuration)
 		constructed <- constructionResult{runner: runner, err: err}
 	}()
 	var runner commandRunner
-	var err error
 	select {
 	case <-ctx.Done():
 		return finishFailure(commandFailure(stageInvocation, ctx.Err()))
@@ -189,13 +198,37 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 		}
 		return finishFailure(commandFailure(stageConfiguration, err))
 	}
-	result, err := runner.Run(ctx, mirror.RunOptions{DryRun: dryRun})
+	result, err := runner.Run(ctx, mirror.RunOptions{DryRun: dryRun, Channel: channel, Tag: tag})
 	if err != nil {
 		return finishFailure(err)
 	}
 	elapsed := now().Sub(startedAt)
 	writeSuccessSummary(output, result, elapsed)
 	return nil
+}
+
+func parseMirrorChannel(value, tag string) (release.Channel, error) {
+	switch release.Channel(value) {
+	case release.ChannelStable:
+		if tag != "" {
+			return "", errors.New("stable channel does not accept --tag")
+		}
+		return release.ChannelStable, nil
+	case release.ChannelLegacyRushRush:
+		if tag != "v0.4.11" {
+			return "", errors.New("legacy-rushrush requires --tag v0.4.11")
+		}
+		return release.ChannelLegacyRushRush, nil
+	default:
+		return "", errors.New("--channel must be stable or legacy-rushrush")
+	}
+}
+
+func channelStatePath(base string, channel release.Channel) string {
+	if strings.HasPrefix(base, "/") {
+		return path.Join(base, string(channel))
+	}
+	return filepath.Join(base, string(channel))
 }
 
 func isReviewedBuildCommit(value string) bool {
@@ -288,6 +321,10 @@ func writeSuccessSummary(output io.Writer, result mirror.RunResult, elapsed time
 		outcome = "stable-promoted"
 	case result.Outcome == publish.OutcomeStableUnchanged:
 		outcome = "stable-unchanged"
+	case result.Outcome == publish.OutcomeLegacyPromoted:
+		outcome = "legacy-promoted"
+	case result.Outcome == publish.OutcomeLegacyUnchanged:
+		outcome = "legacy-unchanged"
 	}
 	if result.Tag != "" {
 		fmt.Fprintf(output, "tag=%s outcome=%s elapsed=%s\n", result.Tag, outcome, elapsed)

@@ -59,9 +59,11 @@ type LatestResult struct {
 	Release     RemoteRelease
 }
 
-// ReleaseSource obtains the latest public release, conditionally by ETag.
+// ReleaseSource obtains either the latest public release or one exact tag,
+// conditionally by the ETag owned by that channel.
 type ReleaseSource interface {
 	Latest(context.Context, string) (LatestResult, error)
+	ByTag(context.Context, string, string) (LatestResult, error)
 }
 
 // GitHubReleaseSource reads the latest release from the fixed public repository.
@@ -83,7 +85,19 @@ func newGitHubReleaseSource(client *http.Client, apiBase string) *GitHubReleaseS
 }
 
 func (source *GitHubReleaseSource) Latest(ctx context.Context, etag string) (LatestResult, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.apiBase+"/repos/"+githubRepository+"/releases/latest", nil)
+	return source.get(ctx, "/repos/"+githubRepository+"/releases/latest", etag)
+}
+
+// ByTag retrieves one exact canonical GitHub release tag and never consults latest.
+func (source *GitHubReleaseSource) ByTag(ctx context.Context, tag, etag string) (LatestResult, error) {
+	if _, err := release.ParseStableTag(tag); err != nil {
+		return LatestResult{}, errors.New("GitHub release tag is not canonical")
+	}
+	return source.get(ctx, "/repos/"+githubRepository+"/releases/tags/"+url.PathEscape(tag), etag)
+}
+
+func (source *GitHubReleaseSource) get(ctx context.Context, endpoint, etag string) (LatestResult, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.apiBase+endpoint, nil)
 	if err != nil {
 		return LatestResult{}, errors.New("could not create GitHub release request")
 	}

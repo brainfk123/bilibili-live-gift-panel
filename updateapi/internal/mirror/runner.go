@@ -29,7 +29,9 @@ type Publisher interface {
 type PublisherFactory func() (Publisher, error)
 
 type RunOptions struct {
-	DryRun bool
+	DryRun  bool
+	Channel release.Channel
+	Tag     string
 }
 
 type RunResult struct {
@@ -108,6 +110,14 @@ type Runner struct {
 // completed artifact on return and reports cleanup failures explicitly; the
 // downloader alone owns any resumable EXE partial state.
 func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunResult, runErr error) {
+	// Preserve the pre-channel internal API as stable; the production CLI still
+	// requires an explicit closed channel flag.
+	if options.Channel == "" {
+		options.Channel = release.ChannelStable
+	}
+	if err := validateRunOptions(options); err != nil {
+		return RunResult{}, runnerFailure(StageConfiguration, "", err)
+	}
 	if runner == nil || runner.Source == nil || runner.Fetcher == nil || runner.State == nil {
 		return RunResult{}, runnerFailure(StageConfiguration, "", errors.New("runner dependencies are incomplete"))
 	}
@@ -119,9 +129,17 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		stateInvalid = true
 	} else if err != nil {
 		return RunResult{}, runnerFailure(StageState, "", err)
+	} else if !stateBelongsToChannel(options.Channel, prior) {
+		prior = MirrorState{}
+		stateInvalid = true
 	}
 
-	latest, err := runner.Source.Latest(ctx, prior.ETag)
+	var latest LatestResult
+	if options.Channel == release.ChannelStable {
+		latest, err = runner.Source.Latest(ctx, prior.ETag)
+	} else {
+		latest, err = runner.Source.ByTag(ctx, options.Tag, prior.ETag)
+	}
 	if err != nil {
 		return RunResult{StateInvalid: stateInvalid}, runnerFailure(StageDiscovery, "", err)
 	}
@@ -130,7 +148,9 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 	}
 
 	candidate := latest.Release
-	if _, err := release.ParseStableTag(candidate.Tag); err != nil || candidate.PublishedAt.IsZero() || !isConditionalETag(latest.ETag) {
+	if _, err := release.ParseStableTag(candidate.Tag); err != nil || candidate.PublishedAt.IsZero() || !isConditionalETag(latest.ETag) ||
+		(options.Channel == release.ChannelStable && candidate.Tag == "v0.4.11") ||
+		(options.Channel == release.ChannelLegacyRushRush && candidate.Tag != options.Tag) {
 		return RunResult{StateInvalid: stateInvalid}, runnerFailure(StageValidation, candidate.Tag, errors.New("release identity is invalid"))
 	}
 	tag := candidate.Tag
@@ -238,6 +258,7 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublisher, tag, err)
 	}
 	outcome, err := publisher.Publish(ctx, publish.Input{
+		Channel:     options.Channel,
 		Tag:         tag,
 		PublishedAt: candidate.PublishedAt.UTC(),
 		Prepared:    prepared,
@@ -245,7 +266,7 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 	if err != nil {
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublish, tag, err)
 	}
-	if outcome != publish.OutcomeStablePromoted && outcome != publish.OutcomeStableUnchanged {
+	if !validPublishOutcome(options.Channel, outcome) {
 		return RunResult{Tag: tag, StateInvalid: stateInvalid}, runnerFailure(StagePublish, tag, errors.New("publisher outcome is invalid"))
 	}
 	cleanupAttempted = true
@@ -269,6 +290,47 @@ func (runner *Runner) Run(ctx context.Context, options RunOptions) (result RunRe
 		return RunResult{Tag: tag, Outcome: outcome, StateInvalid: stateInvalid}, runnerFailure(StageStateSave, tag, err)
 	}
 	return RunResult{Tag: tag, Outcome: outcome, StateInvalid: stateInvalid}, nil
+}
+
+func validateRunOptions(options RunOptions) error {
+	switch options.Channel {
+	case release.ChannelStable:
+		if options.Tag != "" {
+			return errors.New("stable mirror does not accept a tag")
+		}
+	case release.ChannelLegacyRushRush:
+		if options.Tag != "v0.4.11" {
+			return errors.New("legacy mirror requires exact tag v0.4.11")
+		}
+	default:
+		return fmt.Errorf("unsupported mirror channel %q", options.Channel)
+	}
+	return nil
+}
+
+func validPublishOutcome(channel release.Channel, outcome publish.Outcome) bool {
+	switch channel {
+	case release.ChannelStable:
+		return outcome == publish.OutcomeStablePromoted || outcome == publish.OutcomeStableUnchanged
+	case release.ChannelLegacyRushRush:
+		return outcome == publish.OutcomeLegacyPromoted || outcome == publish.OutcomeLegacyUnchanged
+	default:
+		return false
+	}
+}
+
+func stateBelongsToChannel(channel release.Channel, state MirrorState) bool {
+	if state == (MirrorState{}) {
+		return true
+	}
+	switch channel {
+	case release.ChannelStable:
+		return state.Tag != "v0.4.11"
+	case release.ChannelLegacyRushRush:
+		return state.Tag == "v0.4.11"
+	default:
+		return false
+	}
 }
 
 func sameReleaseIdentity(prior MirrorState, candidate RemoteRelease) bool {

@@ -21,12 +21,13 @@ import (
 
 const (
 	stableKey       = "channels/stable/latest.json"
+	legacyKey       = "channels/legacy-rushrush/latest.json"
 	assetName       = "gift-panel-windows-x64.exe"
 	checksumName    = assetName + ".sha256"
 	changelogName   = "gift-panel-changelog.json"
 	releaseName     = "release.json"
 	maxChecksumSize = 16 << 10
-	maxStableBytes  = 1 << 20
+	maxPointerBytes = 1 << 20
 )
 
 // Store is the COS subset required by a publisher transaction.
@@ -37,9 +38,9 @@ type Store interface {
 	Get(context.Context, string, int64) ([]byte, string, error)
 }
 
-// ErrPromotionIndeterminate means the stable pointer may have advanced and
+// ErrPromotionIndeterminate means the selected channel pointer may have advanced and
 // automatic restoration could not be verified. Operators must inspect COS.
-var ErrPromotionIndeterminate = errors.New("stable promotion outcome is indeterminate")
+var ErrPromotionIndeterminate = errors.New("channel promotion outcome is indeterminate")
 
 // Outcome reports whether this transaction advanced the stable pointer.
 type Outcome string
@@ -47,10 +48,13 @@ type Outcome string
 const (
 	OutcomeStablePromoted  Outcome = "stable promoted"
 	OutcomeStableUnchanged Outcome = "stable unchanged"
+	OutcomeLegacyPromoted  Outcome = "legacy promoted"
+	OutcomeLegacyUnchanged Outcome = "legacy unchanged"
 )
 
 // Input identifies the locally built release materials.
 type Input struct {
+	Channel       release.Channel
 	Tag           string
 	AssetPath     string
 	ChecksumPath  string
@@ -121,8 +125,9 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 	if store == nil {
 		return "", errors.New("COS store is required")
 	}
-	if _, err := release.ParseStableTag(input.Tag); err != nil {
-		return "", fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", input.Tag)
+	pointerKey, promoted, unchanged, err := publicationChannel(input.Channel, input.Tag)
+	if err != nil {
+		return "", err
 	}
 	materials, err := readInputMaterials(input)
 	if err != nil {
@@ -137,7 +142,8 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 
 	prefix := "releases/" + input.Tag + "/"
 	manifest := release.ChannelManifest{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
+		Channel:       input.Channel,
 		TagName:       input.Tag,
 		PublishedAt:   input.PublishedAt.UTC().Format(time.RFC3339),
 		Asset: release.AssetManifest{
@@ -148,7 +154,7 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 		},
 		ChangelogObjectKey: prefix + changelogName,
 	}
-	if err := manifest.Validate(); err != nil {
+	if err := manifest.ValidateForChannel(input.Channel); err != nil {
 		return "", fmt.Errorf("validate release manifest: %w", err)
 	}
 	manifestBody, err := json.Marshal(manifest)
@@ -159,16 +165,18 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 		withKey(materials.asset, prefix+assetName),
 		newObject(prefix+checksumName, materials.checksum, "text/plain; charset=utf-8"),
 		newObject(prefix+changelogName, materials.changelog, "application/json"),
-		newObject(prefix+releaseName, manifestBody, "application/json"),
 	}
 	for _, candidate := range objects {
 		if err := publishImmutable(ctx, store, candidate); err != nil {
 			return "", err
 		}
 	}
+	if err := publishImmutableManifest(ctx, store, newObject(prefix+releaseName, manifestBody, "application/json"), manifest); err != nil {
+		return "", err
+	}
 
-	stable := newObject(stableKey, manifestBody, "application/json")
-	prior, err := readPriorStable(ctx, store)
+	pointer := newObject(pointerKey, manifestBody, "application/json")
+	prior, err := readPriorPointer(ctx, store, input.Channel, pointerKey)
 	if err != nil {
 		return "", err
 	}
@@ -178,44 +186,67 @@ func Publish(ctx context.Context, store Store, input Input) (Outcome, error) {
 			return "", fmt.Errorf("compare stable release tags: %w", err)
 		}
 		if comparison <= 0 {
-			return OutcomeStableUnchanged, nil
+			return unchanged, nil
 		}
 	}
-	if err := store.Put(ctx, stable.key, strings.NewReader(string(stable.body)), int64(len(stable.body)), stable.contentType, stable.digest); err != nil {
-		return "", recoverPriorStable(ctx, store, priorObject(prior), fmt.Errorf("write stable pointer: %w", err))
+	if err := store.Put(ctx, pointer.key, strings.NewReader(string(pointer.body)), int64(len(pointer.body)), pointer.contentType, pointer.digest); err != nil {
+		return "", recoverPriorPointer(ctx, store, input.Channel, pointerKey, priorObject(prior), fmt.Errorf("write channel pointer: %w", err))
 	}
-	readback, _, err := store.Get(ctx, stableKey, maxStableBytes)
+	readback, _, err := store.Get(ctx, pointerKey, maxPointerBytes)
 	if err != nil {
-		return "", recoverPriorStable(ctx, store, priorObject(prior), fmt.Errorf("read stable pointer: %w", err))
+		return "", recoverPriorPointer(ctx, store, input.Channel, pointerKey, priorObject(prior), fmt.Errorf("read channel pointer: %w", err))
 	}
-	if err := verifyStableReadback(stable, readback); err != nil {
-		return "", recoverPriorStable(ctx, store, priorObject(prior), err)
+	if err := verifyPointerReadback(input.Channel, pointer, readback); err != nil {
+		return "", recoverPriorPointer(ctx, store, input.Channel, pointerKey, priorObject(prior), err)
 	}
-	return OutcomeStablePromoted, nil
+	return promoted, nil
 }
 
-type priorStable struct {
+func publicationChannel(channel release.Channel, tag string) (string, Outcome, Outcome, error) {
+	if _, err := release.ParseStableTag(tag); err != nil {
+		return "", "", "", fmt.Errorf("release tag %q must use canonical vMAJOR.MINOR.PATCH syntax", tag)
+	}
+	switch channel {
+	case release.ChannelStable:
+		if tag == "v0.4.11" {
+			return "", "", "", errors.New("stable channel cannot publish the legacy bridge tag")
+		}
+		return stableKey, OutcomeStablePromoted, OutcomeStableUnchanged, nil
+	case release.ChannelLegacyRushRush:
+		if tag != "v0.4.11" {
+			return "", "", "", errors.New("legacy channel requires exact bridge tag v0.4.11")
+		}
+		return legacyKey, OutcomeLegacyPromoted, OutcomeLegacyUnchanged, nil
+	default:
+		return "", "", "", fmt.Errorf("unsupported publication channel %q", channel)
+	}
+}
+
+type priorPointer struct {
 	object   object
 	manifest release.ChannelManifest
 }
 
-func readPriorStable(ctx context.Context, store Store) (*priorStable, error) {
-	body, _, err := store.Get(ctx, stableKey, maxStableBytes)
+func readPriorPointer(ctx context.Context, store Store, channel release.Channel, pointerKey string) (*priorPointer, error) {
+	body, _, err := store.Get(ctx, pointerKey, maxPointerBytes)
 	if errors.Is(err, cosstore.ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read prior stable pointer: %w", err)
+		return nil, fmt.Errorf("read prior channel pointer: %w", err)
 	}
 	manifest, err := release.ParseChannelManifest(body)
 	if err != nil {
-		return nil, fmt.Errorf("validate prior stable pointer: %w", err)
+		return nil, fmt.Errorf("validate prior channel pointer: %w", err)
 	}
-	prior := newObject(stableKey, body, "application/json")
-	return &priorStable{object: prior, manifest: manifest}, nil
+	if err := manifest.ValidateForChannel(channel); err != nil {
+		return nil, fmt.Errorf("validate prior channel pointer: %w", err)
+	}
+	prior := newObject(pointerKey, body, "application/json")
+	return &priorPointer{object: prior, manifest: manifest}, nil
 }
 
-func priorObject(prior *priorStable) *object {
+func priorObject(prior *priorPointer) *object {
 	if prior == nil {
 		return nil
 	}
@@ -242,31 +273,35 @@ func compareTags(left, right string) (int, error) {
 	return 0, nil
 }
 
-func verifyStableReadback(want object, got []byte) error {
+func verifyPointerReadback(channel release.Channel, want object, got []byte) error {
 	if !bytes.Equal(got, want.body) {
-		return errors.New("stable pointer exact readback does not match published release")
+		return errors.New("channel pointer exact readback does not match published release")
 	}
-	if _, err := release.ParseChannelManifest(got); err != nil {
-		return fmt.Errorf("validate stable pointer readback: %w", err)
+	manifest, err := release.ParseChannelManifest(got)
+	if err != nil {
+		return fmt.Errorf("validate channel pointer readback: %w", err)
+	}
+	if err := manifest.ValidateForChannel(channel); err != nil {
+		return fmt.Errorf("validate channel pointer readback: %w", err)
 	}
 	return nil
 }
 
-func recoverPriorStable(ctx context.Context, store Store, prior *object, promotionErr error) error {
+func recoverPriorPointer(ctx context.Context, store Store, channel release.Channel, pointerKey string, prior *object, promotionErr error) error {
 	if prior == nil {
-		return fmt.Errorf("%w: %v; no prior stable pointer is available for restoration", ErrPromotionIndeterminate, promotionErr)
+		return fmt.Errorf("%w: %v; no prior channel pointer is available for restoration", ErrPromotionIndeterminate, promotionErr)
 	}
 	if err := store.Put(ctx, prior.key, strings.NewReader(string(prior.body)), int64(len(prior.body)), prior.contentType, prior.digest); err != nil {
-		return fmt.Errorf("%w: %v; restore prior stable pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
+		return fmt.Errorf("%w: %v; restore prior channel pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
 	}
-	readback, _, err := store.Get(ctx, stableKey, maxStableBytes)
+	readback, _, err := store.Get(ctx, pointerKey, maxPointerBytes)
 	if err != nil {
-		return fmt.Errorf("%w: %v; verify restored stable pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
+		return fmt.Errorf("%w: %v; verify restored channel pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
 	}
-	if err := verifyStableReadback(*prior, readback); err != nil {
-		return fmt.Errorf("%w: %v; verify restored stable pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
+	if err := verifyPointerReadback(channel, *prior, readback); err != nil {
+		return fmt.Errorf("%w: %v; verify restored channel pointer: %v", ErrPromotionIndeterminate, promotionErr, err)
 	}
-	return fmt.Errorf("stable promotion failed; prior stable pointer restored and verified: %w", promotionErr)
+	return fmt.Errorf("channel promotion failed; prior pointer restored and verified: %w", promotionErr)
 }
 
 func readAsset(path string) (object, error) {
@@ -370,6 +405,51 @@ func publishImmutable(ctx context.Context, store Store, candidate object) error 
 		return fmt.Errorf("verify %q: %w", candidate.key, err)
 	}
 	return verifyObject(candidate, info)
+}
+
+func publishImmutableManifest(ctx context.Context, store Store, candidate object, want release.ChannelManifest) error {
+	info, err := store.Head(ctx, candidate.key)
+	if err == nil {
+		return verifyManifestObject(ctx, store, candidate, want, info)
+	}
+	if !errors.Is(err, cosstore.ErrNotFound) {
+		return fmt.Errorf("head %q: %w", candidate.key, err)
+	}
+	if err := store.PutImmutable(ctx, candidate.key, strings.NewReader(string(candidate.body)), int64(len(candidate.body)), candidate.contentType, candidate.digest); err != nil {
+		if !errors.Is(err, cosstore.ErrAlreadyExists) {
+			return fmt.Errorf("create immutable %q: %w", candidate.key, err)
+		}
+	}
+	info, err = store.Head(ctx, candidate.key)
+	if err != nil {
+		return fmt.Errorf("verify %q: %w", candidate.key, err)
+	}
+	return verifyManifestObject(ctx, store, candidate, want, info)
+}
+
+func verifyManifestObject(ctx context.Context, store Store, candidate object, want release.ChannelManifest, info cosstore.ObjectInfo) error {
+	if verifyObject(candidate, info) == nil {
+		return nil
+	}
+	// Existing schema-1 stable release manifests remain reusable. They are
+	// immutable, so compatibility is verified by exact semantic fields rather
+	// than overwriting the object with schema 2.
+	if want.Channel != release.ChannelStable {
+		return fmt.Errorf("immutable object %q does not match local release", candidate.key)
+	}
+	body, _, err := store.Get(ctx, candidate.key, maxPointerBytes)
+	if err != nil {
+		return fmt.Errorf("read immutable manifest %q: %w", candidate.key, err)
+	}
+	existing, err := release.ParseChannelManifest(body)
+	if err != nil || existing.SchemaVersion != 1 || existing.Channel != release.ChannelStable {
+		return fmt.Errorf("immutable object %q does not match local release", candidate.key)
+	}
+	existing.SchemaVersion = 2
+	if existing != want {
+		return fmt.Errorf("immutable object %q does not match local release", candidate.key)
+	}
+	return nil
 }
 
 func verifyObject(candidate object, info cosstore.ObjectInfo) error {

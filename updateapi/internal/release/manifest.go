@@ -21,6 +21,7 @@ const (
 
 type ChannelManifest struct {
 	SchemaVersion      int           `json:"schemaVersion"`
+	Channel            Channel       `json:"channel,omitempty"`
 	TagName            string        `json:"tagName"`
 	PublishedAt        string        `json:"publishedAt"`
 	Asset              AssetManifest `json:"asset"`
@@ -58,6 +59,7 @@ type ValidationCode string
 const (
 	ValidationManifestJSON         ValidationCode = "manifest_json"
 	ValidationManifestSchema       ValidationCode = "manifest_schema"
+	ValidationManifestChannel      ValidationCode = "manifest_channel"
 	ValidationManifestTag          ValidationCode = "manifest_tag"
 	ValidationManifestPublishedAt  ValidationCode = "manifest_published_at"
 	ValidationManifestAssetName    ValidationCode = "manifest_asset_name"
@@ -93,7 +95,7 @@ func ValidationCodeOf(err error) ValidationCode {
 
 func IsValidationCode(value string) bool {
 	switch ValidationCode(value) {
-	case ValidationManifestJSON, ValidationManifestSchema, ValidationManifestTag, ValidationManifestPublishedAt,
+	case ValidationManifestJSON, ValidationManifestSchema, ValidationManifestChannel, ValidationManifestTag, ValidationManifestPublishedAt,
 		ValidationManifestAssetName, ValidationManifestAssetSize, ValidationManifestAssetSHA256,
 		ValidationManifestAssetKey, ValidationManifestChangelogKey, ValidationChangelogSize,
 		ValidationChangelogJSON, ValidationChangelogSchema:
@@ -111,13 +113,79 @@ func ParseChannelManifest(data []byte) (ChannelManifest, error) {
 	if err := manifest.Validate(); err != nil {
 		return ChannelManifest{}, err
 	}
+	if manifest.SchemaVersion == 1 {
+		manifest.Channel = ChannelStable
+	}
 	return manifest, nil
 }
 
 func (manifest ChannelManifest) Validate() error {
-	if manifest.SchemaVersion != 1 {
-		return validationFailure(ValidationManifestSchema, fmt.Errorf("unsupported manifest schema version %d", manifest.SchemaVersion))
+	channel, err := manifest.validatedChannel()
+	if err != nil {
+		return err
 	}
+	if err := validateChannelTag(channel, manifest.TagName); err != nil {
+		return validationFailure(ValidationManifestTag, err)
+	}
+	return manifest.validateFields()
+}
+
+// ValidateForChannel binds a manifest to the pointer channel from which it was read.
+func (manifest ChannelManifest) ValidateForChannel(channel Channel) error {
+	if channel != ChannelStable && channel != ChannelLegacyRushRush {
+		return validationFailure(ValidationManifestChannel, fmt.Errorf("unsupported manifest channel %q", channel))
+	}
+	manifestChannel, err := manifest.validatedChannel()
+	if err != nil {
+		return err
+	}
+	if manifestChannel != channel {
+		return validationFailure(ValidationManifestChannel, fmt.Errorf("manifest channel %q does not match pointer channel %q", manifestChannel, channel))
+	}
+	if err := validateChannelTag(channel, manifest.TagName); err != nil {
+		return validationFailure(ValidationManifestTag, err)
+	}
+	return manifest.validateFields()
+}
+
+func (manifest ChannelManifest) validatedChannel() (Channel, error) {
+	switch manifest.SchemaVersion {
+	case 1:
+		if manifest.Channel != "" && manifest.Channel != ChannelStable {
+			return "", validationFailure(ValidationManifestChannel, errors.New("schema 1 manifest cannot declare a non-stable channel"))
+		}
+		return ChannelStable, nil
+	case 2:
+		if manifest.Channel != ChannelStable && manifest.Channel != ChannelLegacyRushRush {
+			return "", validationFailure(ValidationManifestChannel, fmt.Errorf("unsupported manifest channel %q", manifest.Channel))
+		}
+		return manifest.Channel, nil
+	default:
+		return "", validationFailure(ValidationManifestSchema, fmt.Errorf("unsupported manifest schema version %d", manifest.SchemaVersion))
+	}
+
+}
+
+func validateChannelTag(channel Channel, tag string) error {
+	if _, err := ParseStableTag(tag); err != nil {
+		return fmt.Errorf("invalid release tag: %w", err)
+	}
+	switch channel {
+	case ChannelStable:
+		if tag == "v0.4.11" {
+			return errors.New("stable channel cannot use the legacy bridge tag")
+		}
+	case ChannelLegacyRushRush:
+		if tag != "v0.4.11" {
+			return errors.New("legacy channel requires exact bridge tag v0.4.11")
+		}
+	default:
+		return fmt.Errorf("unsupported manifest channel %q", channel)
+	}
+	return nil
+}
+
+func (manifest ChannelManifest) validateFields() error {
 	if _, err := ParseStableTag(manifest.TagName); err != nil {
 		return validationFailure(ValidationManifestTag, fmt.Errorf("invalid release tag: %w", err))
 	}

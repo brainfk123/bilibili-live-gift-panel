@@ -16,7 +16,70 @@ import (
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 )
+
+func TestRunnerBridgeDiscoveryUsesByTagAndForwardsLegacyChannel(t *testing.T) {
+	fixture := newRunnerFixture(t)
+	fixture.source.result = LatestResult{NotModified: true}
+	fixture.state.loaded = validRunnerMirrorState(fixture)
+	fixture.state.loaded.Tag = "v0.4.11"
+
+	result, err := fixture.runner().Run(context.Background(), RunOptions{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.11"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.NotModified || fixture.source.method != "by-tag" || fixture.source.tag != "v0.4.11" {
+		t.Fatalf("bridge discovery result=%+v method=%q tag=%q", result, fixture.source.method, fixture.source.tag)
+	}
+	if fixture.source.etag != fixture.state.loaded.ETag {
+		t.Fatalf("ByTag ETag = %q, want channel-local %q", fixture.source.etag, fixture.state.loaded.ETag)
+	}
+}
+
+func TestRunnerChannelNeverConsumesOtherChannelStateETag(t *testing.T) {
+	tests := []struct {
+		name    string
+		options RunOptions
+		prior   string
+	}{
+		{name: "legacy ignores stable state", options: RunOptions{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.11"}, prior: "v1.2.3"},
+		{name: "stable ignores legacy state", options: RunOptions{Channel: release.ChannelStable}, prior: "v0.4.11"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRunnerFixture(t)
+			fixture.source.result = LatestResult{NotModified: true}
+			fixture.state.loaded = validRunnerMirrorState(fixture)
+			fixture.state.loaded.Tag = test.prior
+
+			result, err := fixture.runner().Run(context.Background(), test.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fixture.source.etag != "" || !result.StateInvalid {
+				t.Fatalf("cross-channel discovery ETag=%q result=%+v", fixture.source.etag, result)
+			}
+		})
+	}
+}
+
+func TestRunnerRejectsCrossChannelOptionsBeforeStateOrDiscovery(t *testing.T) {
+	for _, options := range []RunOptions{
+		{Channel: release.ChannelStable, Tag: "v0.4.11"},
+		{Channel: release.ChannelLegacyRushRush},
+		{Channel: release.ChannelLegacyRushRush, Tag: "v0.4.10"},
+		{Channel: release.Channel("preview")},
+	} {
+		fixture := newRunnerFixture(t)
+		if _, err := fixture.runner().Run(context.Background(), options); err == nil {
+			t.Fatalf("Run(%+v) error = nil, want rejection", options)
+		}
+		if fixture.source.method != "" {
+			t.Fatalf("Run(%+v) performed discovery via %q", options, fixture.source.method)
+		}
+	}
+}
 
 // Mutation caught: forwarding an untrusted ETag after corrupt state, or doing work after a 304 response.
 func TestRunnerTreatsCorruptStateAsEmptyCacheAndStopsOnNotModified(t *testing.T) {
@@ -702,12 +765,22 @@ func validRunnerMirrorState(fixture *runnerFixture) MirrorState {
 }
 
 type fakeReleaseSource struct {
+	method string
+	tag    string
 	etag   string
 	result LatestResult
 	err    error
 }
 
 func (source *fakeReleaseSource) Latest(_ context.Context, etag string) (LatestResult, error) {
+	source.method = "latest"
+	source.etag = etag
+	return source.result, source.err
+}
+
+func (source *fakeReleaseSource) ByTag(_ context.Context, tag, etag string) (LatestResult, error) {
+	source.method = "by-tag"
+	source.tag = tag
 	source.etag = etag
 	return source.result, source.err
 }

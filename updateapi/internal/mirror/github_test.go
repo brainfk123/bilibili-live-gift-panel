@@ -89,6 +89,52 @@ func TestGitHubReleaseSourceLatest304ReturnsNoMetadata(t *testing.T) {
 	}
 }
 
+func TestGitHubReleaseSourceByTagUsesExactEndpointAndConditionalETag(t *testing.T) {
+	const bridgeTag = "v0.4.11"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.EscapedPath() != "/repos/brainfk123/bilibili-live-gift-panel/releases/tags/v0.4.11" {
+			t.Fatalf("path = %q, want exact tag endpoint", request.URL.EscapedPath())
+		}
+		if got := request.Header.Get("If-None-Match"); got != `W/"bridge"` {
+			t.Fatalf("If-None-Match = %q", got)
+		}
+		payload := validReleaseJSON()
+		payload["tag_name"] = bridgeTag
+		for _, asset := range payload["assets"].([]map[string]any) {
+			asset["browser_download_url"] = strings.Replace(asset["browser_download_url"].(string), testTag, bridgeTag, 1)
+		}
+		writer.Header().Set("ETag", `"bridge-current"`)
+		writeReleaseJSON(t, writer, payload)
+	}))
+	defer server.Close()
+
+	result, err := newGitHubReleaseSource(server.Client(), server.URL).ByTag(context.Background(), bridgeTag, `W/"bridge"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Release.Tag != bridgeTag || result.ETag != `"bridge-current"` || result.NotModified {
+		t.Fatalf("ByTag() = %#v", result)
+	}
+}
+
+func TestGitHubReleaseSourceByTag304ReturnsNoMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/repos/brainfk123/bilibili-live-gift-panel/releases/latest" {
+			t.Fatal("ByTag called latest endpoint")
+		}
+		writer.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	result, err := newGitHubReleaseSource(server.Client(), server.URL).ByTag(context.Background(), "v0.4.11", `"prior"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.NotModified || result.ETag != "" || result.Release.Tag != "" {
+		t.Fatalf("304 result = %#v", result)
+	}
+}
+
 func TestGitHubReleaseSourceLatestRejectsUntrustedRelease(t *testing.T) {
 	tests := []struct {
 		name   string
