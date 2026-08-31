@@ -66,10 +66,59 @@ func TestInspectAuthenticodeRunnerReceivesLiteralPath(t *testing.T) {
 	})
 }
 
-func TestVerifyAuthenticodePublisherFailsClosedPendingStructuredPolicyAuthorization(t *testing.T) {
+func TestVerifyAuthenticodePublisherFailsClosedForUnreviewedConfiguration(t *testing.T) {
 	err := verifyAuthenticodePublisher(`C:\download\candidate.exe`, "CN=Expected Publisher")
-	if err == nil || !strings.Contains(err.Error(), "结构化") {
-		t.Fatalf("error = %v, want structured authorization error", err)
+	if err == nil || !strings.Contains(err.Error(), "未审查") {
+		t.Fatalf("error = %v, want unreviewed publisher error", err)
+	}
+}
+
+func TestVerifyAuthenticodePublisherWithRunnerAcceptsReviewedLegalIdentities(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected string
+		fixture  updateCertificateFixture
+	}{
+		{name: "NaisNet", expected: legacyExpectedNaisNetPublisher, fixture: updateCertificateFixture{OrganizationID: "91210103MA7CJ3C094"}},
+		{name: "RushRush", expected: legacyExpectedRushRushPublisher, fixture: updateCertificateFixture{Organizations: []string{"RushRush Network Technology Ltd"}, OrganizationID: "91450900MADM3GLG5P"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			der := makeUpdateSigningCertificateDER(t, test.fixture)
+			err := verifyAuthenticodePublisherWithRunner(`C:\download\candidate.exe`, test.expected, func(string) ([]byte, error) {
+				return []byte(`{"status":"Valid","certificateDerBase64":"` + base64.StdEncoding.EncodeToString(der) + `"}`), nil
+			})
+			if err != nil {
+				t.Fatalf("reviewed %s certificate rejected: %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestVerifyAuthenticodePublisherWithRunnerRejectsUnknownOrMismatchedIdentity(t *testing.T) {
+	naisNetDER := makeUpdateSigningCertificateDER(t, updateCertificateFixture{OrganizationID: "91210103MA7CJ3C094"})
+	rushRushDER := makeUpdateSigningCertificateDER(t, updateCertificateFixture{
+		Organizations: []string{"RushRush Network Technology Ltd"}, OrganizationID: "91450900MADM3GLG5P",
+	})
+	tests := []struct {
+		name      string
+		expected  string
+		der       []byte
+		wantError string
+	}{
+		{name: "unknown configured publisher", expected: "CN=Unreviewed Publisher", der: naisNetDER, wantError: "未审查"},
+		{name: "reviewed NaisNet configuration with RushRush certificate", expected: legacyExpectedNaisNetPublisher, der: rushRushDER, wantError: "不匹配"},
+		{name: "reviewed RushRush configuration with NaisNet certificate", expected: legacyExpectedRushRushPublisher, der: naisNetDER, wantError: "不匹配"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := verifyAuthenticodePublisherWithRunner(`C:\download\candidate.exe`, test.expected, func(string) ([]byte, error) {
+				return []byte(`{"status":"Valid","certificateDerBase64":"` + base64.StdEncoding.EncodeToString(test.der) + `"}`), nil
+			})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want message containing %q", err, test.wantError)
+			}
+		})
 	}
 }
 

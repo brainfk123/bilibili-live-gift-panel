@@ -23,6 +23,11 @@ const authenticodePowerShellScript = `& { [Console]::OutputEncoding = [System.Te
 const authenticodeVerificationTimeout = 30 * time.Second
 const authenticodeOutputMaxBytes = 16 << 10
 
+const (
+	legacyExpectedNaisNetPublisher  = "NaisNet Technology Co., Ltd."
+	legacyExpectedRushRushPublisher = "RushRush Network Technology Ltd"
+)
+
 type powershellRunner func(string) ([]byte, error)
 
 type authenticodeInspection struct {
@@ -55,29 +60,29 @@ func (output *boundedAuthenticodeOutput) Write(data []byte) (int, error) {
 }
 
 func verifyAuthenticodePublisher(path, expectedSubject string) error {
-	_ = path
-	_ = expectedSubject
-	return errors.New("旧版发布者 Subject 比对已停用：需要结构化签名策略授权")
+	return verifyAuthenticodePublisherWithRunner(path, expectedSubject, runAuthenticodePowerShell)
 }
 
 func inspectAuthenticode(path string) (inspectedUpdateCertificate, error) {
+	return inspectAuthenticodeWithRunner(path, runAuthenticodePowerShell)
+}
+
+func runAuthenticodePowerShell(path string) ([]byte, error) {
 	powershell, err := systemWindowsPowerShellPath()
 	if err != nil {
-		return inspectedUpdateCertificate{}, err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), authenticodeVerificationTimeout)
 	defer cancel()
-	return inspectAuthenticodeWithRunner(path, func(path string) ([]byte, error) {
-		return runAuthenticodeCommand(
-			ctx,
-			powershell,
-			"-NoProfile",
-			"-NonInteractive",
-			"-ExecutionPolicy", "Bypass",
-			"-Command", authenticodePowerShellScript,
-			path,
-		)
-	})
+	return runAuthenticodeCommand(
+		ctx,
+		powershell,
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy", "Bypass",
+		"-Command", authenticodePowerShellScript,
+		path,
+	)
 }
 
 func systemWindowsPowerShellPath() (string, error) {
@@ -124,6 +129,32 @@ func inspectAuthenticodeWithRunner(path string, run powershellRunner) (inspected
 		return inspectedUpdateCertificate{}, fmt.Errorf("解析 Authenticode 证书 Base64 失败：%w", err)
 	}
 	return parseUpdateSigningCertificate(der)
+}
+
+func verifyAuthenticodePublisherWithRunner(path, expectedPublisher string, run powershellRunner) error {
+	expectedIdentity, err := reviewedLegacyPublisherIdentity(expectedPublisher)
+	if err != nil {
+		return err
+	}
+	certificate, err := inspectAuthenticodeWithRunner(path, run)
+	if err != nil {
+		return err
+	}
+	if normalizeUpdateCertificateIdentity(certificate.LegalIdentity) != expectedIdentity {
+		return errors.New("Authenticode 发布者结构化身份不匹配")
+	}
+	return nil
+}
+
+func reviewedLegacyPublisherIdentity(expectedPublisher string) (updateCertificateIdentity, error) {
+	switch expectedPublisher {
+	case legacyExpectedNaisNetPublisher:
+		return updateCertificateIdentity{Country: "CN", Organization: legacyExpectedNaisNetPublisher, OrganizationID: "91210103MA7CJ3C094"}, nil
+	case legacyExpectedRushRushPublisher:
+		return updateCertificateIdentity{Country: "CN", Organization: legacyExpectedRushRushPublisher, OrganizationID: "91450900MADM3GLG5P"}, nil
+	default:
+		return updateCertificateIdentity{}, errors.New("预期 Authenticode 发布者未审查")
+	}
 }
 
 func newAuthenticodeCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
