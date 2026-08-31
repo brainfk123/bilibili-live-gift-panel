@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -633,6 +634,103 @@ func TestEnrollmentWindowsLaunchArtifactFailureClearsPending(t *testing.T) {
 			}
 			if _, statErr := os.Stat(pendingUpdateEnrollmentFloorPath(filepath.Join(fixture.UpdatesDir, "pending-update.json"))); statErr != nil {
 				t.Fatalf("launch cleanup removed enrollment floor: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestEnrollmentLaunchCleanupFailuresKeepPrimaryTrustCodeAndAllowRedownload(t *testing.T) {
+	const sensitive = `recognizable-cleanup-error C:\Users\private-user\stale-update.exe`
+	tests := []struct {
+		name        string
+		primaryCode string
+		fail        []string
+	}{
+		{name: "pending executable", primaryCode: "artifact_verification_failed", fail: []string{"pending"}},
+		{name: "metadata", primaryCode: "pending_policy_context_changed", fail: []string{"metadata"}},
+		{name: "new executable", primaryCode: "artifact_verification_failed", fail: []string{"new"}},
+		{name: "multiple artifacts", primaryCode: "pending_policy_context_changed", fail: []string{"pending", "metadata", "new"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			binary := []byte("redownloadable policy-authorized executable")
+			digest := sha256.Sum256(binary)
+			rule := stableTestRule("naisnet-primary", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094")
+			rule.ManifestSHA256 = hex.EncodeToString(digest[:])
+			updater, _, _ := newPolicyUpdater(t, policyUpdaterFixture{
+				CurrentVersion: "0.4.11", Tag: "v0.4.12", ChannelHeaders: []string{string(updateChannelStable)}, Binary: binary,
+				Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+				Rules:       []updatePublisherRule{rule},
+			})
+			assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+
+			pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+			metadataPath := updater.metadataPath()
+			oldPath := updater.executablePath + ".old"
+			newPath := updater.executablePath + ".new"
+			paths := map[string]string{
+				"pending":  pendingPath,
+				"metadata": metadataPath,
+				"old":      oldPath,
+				"new":      newPath,
+			}
+			failedPaths := make(map[string]bool, len(test.fail))
+			for _, name := range test.fail {
+				failedPaths[filepath.Clean(paths[name])] = true
+			}
+
+			cleanupStarted := false
+			attempts := make(map[string]int)
+			updater.removeFile = func(path string) error {
+				path = filepath.Clean(path)
+				if cleanupStarted {
+					attempts[path]++
+					if failedPaths[path] && attempts[path] <= updateCleanupAttempts {
+						return fmt.Errorf("%s at %s", sensitive, path)
+					}
+				}
+				return os.Remove(path)
+			}
+			updater.launchInstaller = func(string, int, bool) error {
+				for _, path := range []string{oldPath, newPath} {
+					if err := os.WriteFile(path, []byte("stale transaction artifact"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cleanupStarted = true
+				return updateResultError(test.primaryCode)
+			}
+
+			var installErr error
+			diagnostics := captureAutoUpdateStderr(t, func() { installErr = updater.InstallOnExit(false) })
+			assertUpdateCode(t, installErr, test.primaryCode)
+			if strings.Contains(diagnostics, "recognizable-cleanup-error") || strings.Contains(diagnostics, "private-user") {
+				t.Fatalf("launch cleanup diagnostics leaked sensitive detail: %q", diagnostics)
+			}
+			for _, code := range []string{test.primaryCode, "artifact_cleanup_failed"} {
+				if !strings.Contains(diagnostics, "update_result="+code) {
+					t.Fatalf("launch cleanup diagnostics = %q, want %s", diagnostics, code)
+				}
+			}
+			for name, path := range paths {
+				wantAttempts := 1
+				if failedPaths[filepath.Clean(path)] {
+					wantAttempts = updateCleanupAttempts
+				}
+				if attempts[filepath.Clean(path)] != wantAttempts {
+					t.Fatalf("cleanup attempts for %s = %d, want %d", name, attempts[filepath.Clean(path)], wantAttempts)
+				}
+			}
+			if updater.HasPending() {
+				t.Fatal("definitive launch failure retained in-memory pending after cleanup failure")
+			}
+			if _, err := os.Stat(pendingUpdateEnrollmentFloorPath(metadataPath)); err != nil {
+				t.Fatalf("launch cleanup removed enrollment floor: %v", err)
+			}
+
+			assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+			if !updater.HasPending() || updater.Status().State != "ready" {
+				t.Fatalf("redownload state = status %#v, pending %v; want ready", updater.Status(), updater.HasPending())
 			}
 		})
 	}

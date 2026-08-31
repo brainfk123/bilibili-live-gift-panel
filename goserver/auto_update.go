@@ -686,7 +686,7 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	}
 	if verificationErr != nil {
 		logPendingUpdateDiagnostic(*pending, "待安装更新执行前安全校验失败", verificationErr, "artifact_verification_failed")
-		cleanupErr := updater.cleanupPendingUpdate(*pending)
+		cleanupErr := updater.cleanupPendingUpdateForRetry(*pending)
 		if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
 			updater.mu.Lock()
 			updater.pending = nil
@@ -713,16 +713,16 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 		resultErr := boundedUpdateResult(err, "installer_launch_failed")
 		if pendingFailureRequiresRedownload(resultErr) {
 			cleanupErr := updater.cleanupPendingUpdate(*pending)
-			if cleanupErr != nil {
-				logPendingUpdateDiagnostic(*pending, "更新验证上下文变化后的清理诊断", cleanupErr, "artifact_cleanup_failed")
-				updater.setStatus("error", pending.Version, "更新验证上下文已变化，待安装文件清理失败。", 0, false)
-				return updateResultError("artifact_cleanup_failed")
-			}
 			updater.mu.Lock()
 			updater.pending = nil
 			updater.mu.Unlock()
-			updater.setStatus("error", pending.Version, "更新验证上下文已变化，需要重新下载。", 0, false)
 			logUpdateResult(resultErr)
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(*pending, "更新验证上下文变化后的清理诊断", cleanupErr, "artifact_cleanup_failed")
+				updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载；残留文件清理失败。", 0, false)
+				return resultErr
+			}
+			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载。", 0, false)
 			return resultErr
 		}
 		logPendingUpdateDiagnostic(*pending, "启动更新替换器诊断", err, "installer_launch_failed")
@@ -1691,6 +1691,14 @@ func (updater *autoUpdater) cleanupRestoredPending(pending pendingUpdate) {
 }
 
 func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
+	return updater.cleanupPendingUpdateWithRetryPolicy(pending, false)
+}
+
+func (updater *autoUpdater) cleanupPendingUpdateForRetry(pending pendingUpdate) error {
+	return updater.cleanupPendingUpdateWithRetryPolicy(pending, true)
+}
+
+func (updater *autoUpdater) cleanupPendingUpdateWithRetryPolicy(pending pendingUpdate, preserveMetadataOnPendingFailure bool) error {
 	knownPendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
 	pendingPath := ""
 	if pending.PendingPath == "" || filepath.Clean(pending.PendingPath) == filepath.Clean(knownPendingPath) {
@@ -1698,16 +1706,20 @@ func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
 	} else if filepath.Dir(pending.PendingPath) == filepath.Clean(updater.updatesDir) {
 		pendingPath = pending.PendingPath
 	}
+	var cleanupErr error
 	if pendingPath != "" {
 		if err := updater.removeUpdateArtifact(pendingPath); err != nil {
-			return errors.Join(errPendingExecutableCleanup, err)
+			pendingCleanupErr := errors.Join(errPendingExecutableCleanup, err)
+			if preserveMetadataOnPendingFailure {
+				return pendingCleanupErr
+			}
+			cleanupErr = errors.Join(cleanupErr, pendingCleanupErr)
 		}
 	}
 	paths := []string{updater.metadataPath()}
 	if updater.executablePath != "" {
 		paths = append(paths, updater.executablePath+".old", updater.executablePath+".new")
 	}
-	var cleanupErr error
 	for _, path := range paths {
 		cleanupErr = errors.Join(cleanupErr, updater.removeUpdateArtifact(path))
 	}
