@@ -69,13 +69,13 @@ func TestLatestCachesManifestButPresignsEveryResponse(t *testing.T) {
 		},
 	}
 
-	sut := service.New(store, channelKey, func() time.Time { return clock })
-	first, err := sut.Latest(context.Background())
+	sut := service.New(store, func() time.Time { return clock })
+	first, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(30 * time.Second)
-	second, err := sut.Latest(context.Background())
+	second, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +105,13 @@ func TestLatestUsesLastValidManifestWhenRefreshFails(t *testing.T) {
 		},
 		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/signed", nil },
 	}
-	sut := service.New(store, channelKey, func() time.Time { return clock })
-	if _, err := sut.Latest(context.Background()); err != nil {
+	sut := service.New(store, func() time.Time { return clock })
+	if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
 		t.Fatal(err)
 	}
 
 	clock = clock.Add(61 * time.Second)
-	got, err := sut.Latest(context.Background())
+	got, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatalf("Latest after refresh failure: %v", err)
 	}
@@ -136,13 +136,13 @@ func TestLatestUsesLastValidManifestWhenRefreshIsInvalid(t *testing.T) {
 		},
 		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/signed", nil },
 	}
-	sut := service.New(store, channelKey, func() time.Time { return clock })
-	if _, err := sut.Latest(context.Background()); err != nil {
+	sut := service.New(store, func() time.Time { return clock })
+	if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
 		t.Fatal(err)
 	}
 
 	clock = clock.Add(61 * time.Second)
-	got, err := sut.Latest(context.Background())
+	got, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatalf("Latest after invalid refresh: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 				return "", nil
 			},
 		}
-		_, err := service.New(store, channelKey, time.Now).Latest(context.Background())
+		_, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 		if !errors.Is(err, service.ErrReleaseUnavailable) {
 			t.Fatalf("Latest() error = %v, want ErrReleaseUnavailable", err)
 		}
@@ -174,7 +174,7 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 				return "", nil
 			},
 		}
-		_, err := service.New(store, channelKey, time.Now).Latest(context.Background())
+		_, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 		if !errors.Is(err, service.ErrReleaseInvalid) {
 			t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
 		}
@@ -185,7 +185,7 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 			get:     func(string, int64) ([]byte, string, error) { return validManifest(t), "etag", nil },
 			presign: func(string, time.Duration) (string, error) { return "", errors.New("signer unavailable") },
 		}
-		_, err := service.New(store, channelKey, time.Now).Latest(context.Background())
+		_, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 		if !errors.Is(err, service.ErrDownloadUnavailable) {
 			t.Fatalf("Latest() error = %v, want ErrDownloadUnavailable", err)
 		}
@@ -233,7 +233,7 @@ func TestInvalidManifestErrorsExposeSanitizedReasonCodes(t *testing.T) {
 				},
 			}
 
-			_, err = service.New(store, channelKey, time.Now).Latest(context.Background())
+			_, err = service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 			if !errors.Is(err, service.ErrReleaseInvalid) {
 				t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
 			}
@@ -247,18 +247,82 @@ func TestInvalidManifestErrorsExposeSanitizedReasonCodes(t *testing.T) {
 	}
 }
 
-func TestLatestRejectsChannelKeysOtherThanStableLatest(t *testing.T) {
+func TestLatestReadsOnlySelectedChannelPointer(t *testing.T) {
+	store := &fakeStore{
+		get: func(key string, maxBytes int64) ([]byte, string, error) {
+			if key != "channels/legacy-rushrush/latest.json" || maxBytes != 64<<10 {
+				t.Fatalf("Get(%q, %d), want legacy pointer and 64 KiB", key, maxBytes)
+			}
+			return validManifest(t), "legacy-etag", nil
+		},
+		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/legacy", nil },
+	}
+
+	got, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelLegacyRushRush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TagName != "v0.4.4" || len(store.gets) != 1 {
+		t.Fatalf("Latest() = %#v, reads=%#v", got, store.gets)
+	}
+}
+
+func TestLatestRejectsUnknownTypedChannelWithoutStorageAccess(t *testing.T) {
 	store := &fakeStore{
 		get: func(string, int64) ([]byte, string, error) {
-			t.Fatal("Get should not be called for an untrusted channel key")
+			t.Fatal("unknown channel reached Store.Get")
 			return nil, "", nil
+		},
+		presign: func(string, time.Duration) (string, error) {
+			t.Fatal("unknown channel reached Store.PresignGet")
+			return "", nil
+		},
+	}
+
+	_, err := service.New(store, time.Now).Latest(context.Background(), release.Channel("private/arbitrary-key"))
+	if !errors.Is(err, service.ErrReleaseInvalid) || service.InvalidReason(err) != "unsupported_channel_key" {
+		t.Fatalf("Latest() error = %v reason=%q", err, service.InvalidReason(err))
+	}
+}
+
+func TestPublisherPolicyReadsCompleteBoundedEnvelope(t *testing.T) {
+	policy := []byte(`{"signed":{"epoch":7},"signatures":[{"algorithm":"ecdsa-p256-sha256","signature":"opaque"}]}`)
+	store := &fakeStore{
+		get: func(key string, maxBytes int64) ([]byte, string, error) {
+			if key != "trust/publisher/latest.json" || maxBytes != 256<<10 {
+				t.Fatalf("Get(%q, %d), want publisher policy key and 256 KiB", key, maxBytes)
+			}
+			return policy, "policy-etag", nil
+		},
+		presign: func(string, time.Duration) (string, error) {
+			t.Fatal("PublisherPolicy must not presign an object")
+			return "", nil
+		},
+	}
+
+	got, err := service.New(store, time.Now).PublisherPolicy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(policy) {
+		t.Fatalf("PublisherPolicy() = %s, want complete envelope %s", got, policy)
+	}
+	got[0] = 'x'
+	if policy[0] == 'x' {
+		t.Fatal("PublisherPolicy returned aliased storage bytes")
+	}
+}
+
+func TestPublisherPolicyRejectsOversizedEnvelope(t *testing.T) {
+	store := &fakeStore{
+		get: func(string, int64) ([]byte, string, error) {
+			return []byte(strings.Repeat("x", (256<<10)+1)), "", nil
 		},
 		presign: func(string, time.Duration) (string, error) { return "", nil },
 	}
-
-	_, err := service.New(store, "channels/beta/latest.json", time.Now).Latest(context.Background())
-	if !errors.Is(err, service.ErrReleaseInvalid) {
-		t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
+	_, err := service.New(store, time.Now).PublisherPolicy(context.Background())
+	if !errors.Is(err, service.ErrReleaseInvalid) || service.InvalidReason(err) != "publisher_policy_size" {
+		t.Fatalf("PublisherPolicy() error=%v reason=%q", err, service.InvalidReason(err))
 	}
 }
 
@@ -283,7 +347,7 @@ func TestChangelogReturnsBodyAndUpstreamETag(t *testing.T) {
 		presign: func(string, time.Duration) (string, error) { return "", nil },
 	}
 
-	document, err := service.New(store, channelKey, time.Now).Changelog(context.Background())
+	document, err := service.New(store, time.Now).Changelog(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +378,7 @@ func TestChangelogRejectsOversizedAndInvalidDocuments(t *testing.T) {
 				presign: func(string, time.Duration) (string, error) { return "", nil },
 			}
 
-			_, err := service.New(store, channelKey, time.Now).Changelog(context.Background())
+			_, err := service.New(store, time.Now).Changelog(context.Background())
 			if !errors.Is(err, service.ErrReleaseInvalid) {
 				t.Fatalf("Changelog() error = %v, want ErrReleaseInvalid", err)
 			}

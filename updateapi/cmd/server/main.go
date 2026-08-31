@@ -18,7 +18,6 @@ import (
 )
 
 const defaultListenAddress = "127.0.0.1:12450"
-const defaultChannelKey = "channels/stable/latest.json"
 
 type config struct {
 	listenAddress string
@@ -26,13 +25,18 @@ type config struct {
 	region        string
 	secretID      string
 	secretKey     string
-	channelKey    string
 }
 
 type standardLogger struct{ logger *log.Logger }
 
 func (logger standardLogger) Error(requestID, code string, cause error) {
 	logger.logger.Printf("request_id=%s code=%s cause=%v", requestID, code, cause)
+}
+
+type standardMetrics struct{ logger *log.Logger }
+
+func (metrics standardMetrics) Observe(observation httpapi.Observation) {
+	metrics.logger.Printf("metric=update_route version=%s channel=%s outcome=%s latency=%s", observation.Version, observation.Channel, observation.Outcome, observation.Latency)
 }
 
 func main() {
@@ -48,7 +52,13 @@ func main() {
 		logger.Printf("startup cause=%v", err)
 		os.Exit(1)
 	}
-	handler := httpapi.New(service.New(store, configuration.channelKey, time.Now), nil, standardLogger{logger})
+	handler := httpapi.New(
+		service.New(store, time.Now),
+		service.ChannelRouter{LegacyActive: legacyChannelActive},
+		nil,
+		standardLogger{logger},
+		standardMetrics{logger},
+	)
 	server := &http.Server{
 		Addr:              configuration.listenAddress,
 		Handler:           handler,
@@ -66,6 +76,10 @@ func main() {
 	if status := serve(server, signals, logger); status != 0 {
 		os.Exit(status)
 	}
+}
+
+func legacyChannelActive(context.Context) (bool, error) {
+	return false, nil
 }
 
 func serve(server *http.Server, signals <-chan os.Signal, logger *log.Logger) int {
@@ -99,7 +113,6 @@ func loadConfig() (config, error) {
 		region:        os.Getenv("COS_REGION"),
 		secretID:      os.Getenv("COS_SECRET_ID"),
 		secretKey:     os.Getenv("COS_SECRET_KEY"),
-		channelKey:    defaultChannelKey,
 	}
 	if err := validateLoopbackAddress(configuration.listenAddress); err != nil {
 		return config{}, err

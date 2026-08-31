@@ -30,7 +30,18 @@ func TestServeReturnsNonzeroWhenListenFails(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAlwaysUsesStableChannelKey(t *testing.T) {
+func TestLegacyChannelRemainsInactiveByDefault(t *testing.T) {
+	t.Setenv("UPDATE_LEGACY_RUSHRUSH_ACTIVE", "true")
+	active, err := legacyChannelActive(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("legacy channel activated before the deployment task")
+	}
+}
+
+func TestLoadConfigIgnoresArbitraryChannelKey(t *testing.T) {
 	t.Setenv("UPDATE_API_LISTEN", "127.0.0.1:12450")
 	t.Setenv("COS_BUCKET", "private-release-1250000000")
 	t.Setenv("COS_REGION", "ap-shanghai")
@@ -42,7 +53,7 @@ func TestLoadConfigAlwaysUsesStableChannelKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configuration.channelKey != defaultChannelKey {
-		t.Fatalf("channelKey = %q, want fixed %q", configuration.channelKey, defaultChannelKey)
+	if configuration.bucket != "private-release-1250000000" {
+		t.Fatalf("bucket = %q, want configured bucket", configuration.bucket)
 	}
 }

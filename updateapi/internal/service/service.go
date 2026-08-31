@@ -13,10 +13,16 @@ import (
 const (
 	manifestMaxBytes  = int64(64 << 10)
 	changelogMaxBytes = int64(2 << 20)
+	policyMaxBytes    = int64(256 << 10)
 	cacheFreshness    = time.Minute
 	presignTTL        = 10 * time.Minute
-	stableChannelKey  = "channels/stable/latest.json"
+	policyKey         = "trust/publisher/latest.json"
 )
+
+var channelKeys = map[release.Channel]string{
+	release.ChannelStable:         "channels/stable/latest.json",
+	release.ChannelLegacyRushRush: "channels/legacy-rushrush/latest.json",
+}
 
 var (
 	ErrReleaseUnavailable  = errors.New("release unavailable")
@@ -46,7 +52,7 @@ func InvalidReason(err error) string {
 		return ""
 	}
 	reason := reasoned.InvalidReason()
-	if reason == "unsupported_channel_key" || reason == "manifest_size" || release.IsValidationCode(reason) {
+	if reason == "unsupported_channel_key" || reason == "manifest_size" || reason == "publisher_policy_size" || release.IsValidationCode(reason) {
 		return reason
 	}
 	return ""
@@ -63,12 +69,11 @@ type Document struct {
 }
 
 type Service struct {
-	store      Store
-	channelKey string
-	now        func() time.Time
+	store Store
+	now   func() time.Time
 
 	cacheMu sync.RWMutex
-	cache   manifestCache
+	cache   map[release.Channel]manifestCache
 
 	refreshMu sync.Mutex
 }
@@ -79,15 +84,15 @@ type manifestCache struct {
 	valid     bool
 }
 
-func New(store Store, channelKey string, now func() time.Time) *Service {
+func New(store Store, now func() time.Time) *Service {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{store: store, channelKey: channelKey, now: now}
+	return &Service{store: store, now: now, cache: make(map[release.Channel]manifestCache)}
 }
 
-func (service *Service) Latest(ctx context.Context) (release.PublicRelease, error) {
-	manifest, err := service.manifest(ctx)
+func (service *Service) Latest(ctx context.Context, channel release.Channel) (release.PublicRelease, error) {
+	manifest, err := service.manifest(ctx, channel)
 	if err != nil {
 		return release.PublicRelease{}, err
 	}
@@ -100,7 +105,7 @@ func (service *Service) Latest(ctx context.Context) (release.PublicRelease, erro
 }
 
 func (service *Service) Changelog(ctx context.Context) (Document, error) {
-	manifest, err := service.manifest(ctx)
+	manifest, err := service.manifest(ctx, release.ChannelStable)
 	if err != nil {
 		return Document{}, err
 	}
@@ -118,13 +123,25 @@ func (service *Service) Changelog(ctx context.Context) (Document, error) {
 	return Document{Body: append([]byte(nil), body...), ETag: etag}, nil
 }
 
-func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, error) {
-	if service.channelKey != stableChannelKey {
+func (service *Service) PublisherPolicy(ctx context.Context) ([]byte, error) {
+	body, _, err := service.store.Get(ctx, policyKey, policyMaxBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrReleaseUnavailable, err)
+	}
+	if len(body) == 0 || len(body) > int(policyMaxBytes) {
+		return nil, releaseInvalid("publisher_policy_size", errors.New("publisher policy size is invalid"))
+	}
+	return append([]byte(nil), body...), nil
+}
+
+func (service *Service) manifest(ctx context.Context, channel release.Channel) (release.ChannelManifest, error) {
+	channelKey, ok := channelKeys[channel]
+	if !ok {
 		return release.ChannelManifest{}, releaseInvalid("unsupported_channel_key", errors.New("unsupported channel key"))
 	}
 
 	now := service.now()
-	if manifest, ok := service.freshManifest(now); ok {
+	if manifest, ok := service.freshManifest(channel, now); ok {
 		return manifest, nil
 	}
 
@@ -132,19 +149,19 @@ func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, 
 	defer service.refreshMu.Unlock()
 
 	now = service.now()
-	if manifest, ok := service.freshManifest(now); ok {
+	if manifest, ok := service.freshManifest(channel, now); ok {
 		return manifest, nil
 	}
 
-	body, _, err := service.store.Get(ctx, service.channelKey, manifestMaxBytes)
+	body, _, err := service.store.Get(ctx, channelKey, manifestMaxBytes)
 	if err != nil {
-		if manifest, ok := service.lastValidManifest(); ok {
+		if manifest, ok := service.lastValidManifest(channel); ok {
 			return manifest, nil
 		}
 		return release.ChannelManifest{}, fmt.Errorf("%w: %v", ErrReleaseUnavailable, err)
 	}
 	if len(body) > int(manifestMaxBytes) {
-		if manifest, ok := service.lastValidManifest(); ok {
+		if manifest, ok := service.lastValidManifest(channel); ok {
 			return manifest, nil
 		}
 		return release.ChannelManifest{}, releaseInvalid("manifest_size", errors.New("channel manifest exceeds 64 KiB"))
@@ -152,32 +169,34 @@ func (service *Service) manifest(ctx context.Context) (release.ChannelManifest, 
 
 	manifest, err := release.ParseChannelManifest(body)
 	if err != nil {
-		if cached, ok := service.lastValidManifest(); ok {
+		if cached, ok := service.lastValidManifest(channel); ok {
 			return cached, nil
 		}
 		return release.ChannelManifest{}, releaseInvalid(string(release.ValidationCodeOf(err)), err)
 	}
 
 	service.cacheMu.Lock()
-	service.cache = manifestCache{manifest: manifest, fetchedAt: now, valid: true}
+	service.cache[channel] = manifestCache{manifest: manifest, fetchedAt: now, valid: true}
 	service.cacheMu.Unlock()
 	return manifest, nil
 }
 
-func (service *Service) freshManifest(now time.Time) (release.ChannelManifest, bool) {
+func (service *Service) freshManifest(channel release.Channel, now time.Time) (release.ChannelManifest, bool) {
 	service.cacheMu.RLock()
 	defer service.cacheMu.RUnlock()
-	if !service.cache.valid || now.Sub(service.cache.fetchedAt) >= cacheFreshness {
+	cached := service.cache[channel]
+	if !cached.valid || now.Sub(cached.fetchedAt) >= cacheFreshness {
 		return release.ChannelManifest{}, false
 	}
-	return service.cache.manifest, true
+	return cached.manifest, true
 }
 
-func (service *Service) lastValidManifest() (release.ChannelManifest, bool) {
+func (service *Service) lastValidManifest(channel release.Channel) (release.ChannelManifest, bool) {
 	service.cacheMu.RLock()
 	defer service.cacheMu.RUnlock()
-	if !service.cache.valid {
+	cached := service.cache[channel]
+	if !cached.valid {
 		return release.ChannelManifest{}, false
 	}
-	return service.cache.manifest, true
+	return cached.manifest, true
 }
