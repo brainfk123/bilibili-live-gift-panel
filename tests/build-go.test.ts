@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { resolveGoLdflags } from '../scripts/build-go.mjs';
+import { resolveGoLdflags, runGoCompilerCandidates } from '../scripts/build-go.mjs';
 import { resolveUpdateAPIBaseURLHex } from '../scripts/update-api-build-config.mjs';
 
 const testTrustRootSPKIBase64 = readFileSync(
@@ -116,6 +116,26 @@ describe('build-go update trust configuration', () => {
     expect(output).not.toContain(recognizablePolicyBase64);
     expect(output).toContain('WORK=');
   }, 15_000);
+
+  it('sanitizes every compiler failure attempt before returning the final error', () => {
+    const secretRoot = 'recognizable-root-input';
+    const secretPolicy = 'recognizable-policy-input';
+    let output = '';
+    expect(() => runGoCompilerCandidates({
+      candidates: ['first-go', 'second-go'],
+      args: ['build'],
+      cwd: fileURLToPath(new URL('../goserver', import.meta.url)),
+      trustInputs: { rootSPKIBase64: secretRoot, bootstrapPolicyBase64: secretPolicy },
+      spawn: (candidate: string) => ({ status: 2, stdout: `${candidate}:${secretRoot}`, stderr: `${candidate}:${secretPolicy}` }),
+      writeStdout: (value: string) => { output += value; },
+      writeStderr: (value: string) => { output += value; },
+    })).toThrow(/Go compiler failed/);
+    expect(output).toContain('first-go');
+    expect(output).toContain('second-go');
+    expect(output).not.toContain(secretRoot);
+    expect(output).not.toContain(secretPolicy);
+    expect(output.match(/\[redacted update trust input\]/g)).toHaveLength(4);
+  });
 
   it('does not require trust material for ordinary local builds', async () => {
     const resolved = await resolveGoLdflags({});

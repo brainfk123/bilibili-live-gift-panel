@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +36,32 @@ func TestVerifyBoundArtifactAcceptsOnlyTheBuiltSignedEnrollmentClosure(t *testin
 	if evidence.OuterIdentity.Organization != "RushRush Network Technology Ltd" || evidence.FFmpegIdentity.Organization != "NaisNet Technology Co., Ltd." {
 		t.Fatalf("identities = %#v / %#v", evidence.OuterIdentity, evidence.FFmpegIdentity)
 	}
+}
+
+func TestExtractSingleFFmpegEnforcesOwnPerEntryAndTotalUncompressedCap(t *testing.T) {
+	const oversized = int64(40<<20 + 1)
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	entry, err := writer.Create("ffmpeg.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(entry, zeroByteReader{}, oversized); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractSingleFFmpeg(archive.Bytes(), oversized); err == nil {
+		t.Fatal("artifact inspector accepted an FFmpeg entry over 40 MiB")
+	}
+}
+
+type zeroByteReader struct{}
+
+func (zeroByteReader) Read(buffer []byte) (int, error) {
+	clear(buffer)
+	return len(buffer), nil
 }
 
 func TestVerifyBoundArtifactRejectsSignedBinarySubstitutionAndModifiedPESection(t *testing.T) {

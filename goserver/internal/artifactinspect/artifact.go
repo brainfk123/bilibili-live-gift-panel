@@ -24,6 +24,8 @@ var (
 	naisNetIdentity  = certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
 )
 
+const maximumArtifactUncompressedBytes int64 = 40 << 20
+
 type VerifyArtifactOptions struct {
 	UnsignedPath, SignedPath              string
 	SealedDirectory                       string
@@ -336,9 +338,22 @@ func VerifyStableArtifactPolicy(options StablePolicyOptions) (StablePolicyEviden
 }
 
 func extractSingleFFmpeg(archive []byte, expectedSize int64) ([]byte, error) {
+	if expectedSize <= 0 || expectedSize > maximumArtifactUncompressedBytes {
+		return nil, errors.New("FFmpeg archive uncompressed size exceeds policy")
+	}
 	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil || len(reader.File) != 1 {
 		return nil, errors.New("invalid FFmpeg archive")
+	}
+	var total uint64
+	for _, candidate := range reader.File {
+		if candidate.UncompressedSize64 > uint64(maximumArtifactUncompressedBytes) || total > uint64(maximumArtifactUncompressedBytes)-candidate.UncompressedSize64 {
+			return nil, errors.New("FFmpeg archive uncompressed size exceeds policy")
+		}
+		total += candidate.UncompressedSize64
+	}
+	if total > uint64(maximumArtifactUncompressedBytes) {
+		return nil, errors.New("FFmpeg archive total uncompressed size exceeds policy")
 	}
 	entry := reader.File[0]
 	if entry.Name != "ffmpeg.exe" || entry.FileInfo().IsDir() || int64(entry.UncompressedSize64) != expectedSize {

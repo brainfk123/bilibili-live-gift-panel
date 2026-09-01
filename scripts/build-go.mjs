@@ -58,7 +58,7 @@ function resolveUpdateTrust(environment) {
   };
 }
 
-function relaySanitizedGoOutput(result, trustInputs) {
+function relaySanitizedGoOutput(result, trustInputs, writeStdout = (value) => process.stdout.write(value), writeStderr = (value) => process.stderr.write(value)) {
   const redact = (value) => {
     let output = value || '';
     for (const input of [trustInputs?.rootSPKIBase64, trustInputs?.bootstrapPolicyBase64]) {
@@ -68,8 +68,29 @@ function relaySanitizedGoOutput(result, trustInputs) {
   };
   const stdout = redact(result.stdout);
   const stderr = redact(result.stderr);
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
+  if (stdout) writeStdout(stdout);
+  if (stderr) writeStderr(stderr);
+}
+
+export function runGoCompilerCandidates(options) {
+  const candidates = options?.candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0 || !Array.isArray(options.args) || typeof options.cwd !== 'string') {
+    throw new Error('Go compiler configuration is invalid.');
+  }
+  const spawn = options.spawn || spawnSync;
+  let lastError;
+  for (const go of candidates) {
+    const result = spawn(go, options.args, {
+      cwd: options.cwd,
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    relaySanitizedGoOutput(result, options.trustInputs, options.writeStdout, options.writeStderr);
+    if (!result.error && result.status === 0) return;
+    lastError = result;
+  }
+  const status = Number.isInteger(lastError?.status) ? ` (exit ${lastError.status})` : '';
+  throw new Error(`Go compiler failed${status}; inspect the compiler output above.`);
 }
 
 export async function resolveGoLdflags(environment = process.env) {
@@ -134,25 +155,12 @@ async function runBuild() {
 
   const out = join(root, 'dist', 'gift-panel.exe');
   const candidates = [process.env.GO_BIN, 'go', 'C:\\Program Files\\Go\\bin\\go.exe'].filter(Boolean);
-  let built = false;
-  let lastError;
-  for (const go of candidates) {
-    const result = spawnSync(go, ['build', '-ldflags', build.ldflags, '-o', out, '.'], {
-      cwd: join(root, 'goserver'),
-      encoding: 'utf8',
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    relaySanitizedGoOutput(result, build.trustInputs);
-    if (!result.error && result.status === 0) {
-      built = true;
-      break;
-    }
-    lastError = result;
-  }
-  if (!built) {
-    const status = Number.isInteger(lastError?.status) ? ` (exit ${lastError.status})` : '';
-    throw new Error(`Go compiler failed${status}; inspect the compiler output above.`);
-  }
+  runGoCompilerCandidates({
+    candidates,
+    args: ['build', '-ldflags', build.ldflags, '-o', out, '.'],
+    cwd: join(root, 'goserver'),
+    trustInputs: build.trustInputs,
+  });
   console.log(`built ${out} (${build.appVersion}, ${build.appCommit})`);
 }
 
