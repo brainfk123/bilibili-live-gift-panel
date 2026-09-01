@@ -321,6 +321,63 @@ jobs:
           [IO.File]::WriteAllBytes("$trustRoot/bootstrap-policy.json", $bootstrap)
           "RELEASE_COMMIT=$commit" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "CANDIDATE_TRUST_ROOT=$trustRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build canonical candidate changelog
+        id: changelog
+        working-directory: source
+        shell: pwsh
+        env:
+          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+          STABLE_CHANGELOG_HISTORY_SHA256: ${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}
+        run: |
+          $maximum=262144
+          if($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Reviewed changelog provenance is malformed'}
+          $toolingHead=git -C "$env:RELEASE_TOOL_ROOT" rev-parse HEAD
+          if($LASTEXITCODE -ne 0 -or $toolingHead -cne $env:RELEASE_TOOLING_COMMIT_SHA){throw 'Reviewed changelog tooling commit mismatch'}
+          function Read-Changelog([byte[]]$bytes,[string]$kind){
+            if($null -eq $bytes -or $bytes.Length -le 0 -or $bytes.Length -gt $maximum){throw "$kind changelog is missing or exceeds 262144 bytes"}
+            try{$raw=[Text.UTF8Encoding]::new($false,$true).GetString($bytes);$json=[System.Text.Json.JsonDocument]::Parse($raw)}catch{throw "$kind changelog schema is invalid"}
+            try{
+              $root=$json.RootElement;$names=@($root.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object);[int64]$schema=0
+              if($root.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object @('releases','schemaVersion') $names) -or $root.GetProperty('schemaVersion').ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $root.GetProperty('schemaVersion').TryGetInt64([ref]$schema) -or $schema -ne 1 -or $root.GetProperty('releases').ValueKind -ne [System.Text.Json.JsonValueKind]::Array){throw "$kind changelog schema is invalid"}
+              $entries=$root.GetProperty('releases');if($entries.GetArrayLength() -le 0 -or $entries.GetArrayLength() -gt 512){throw "$kind changelog schema is invalid"}
+              $expectedReleaseNames=@('date','highlights','summary','title','version','visuals');$expectedHighlightNames=@('description','label','title');$seen=@{};$prior=$null;$releases=@()
+              foreach($entry in $entries.EnumerateArray()){
+                if($entry.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object $expectedReleaseNames @($entry.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object))){throw "$kind changelog schema is invalid"}
+                foreach($field in @('version','date','title','summary')){$value=$entry.GetProperty($field);if($value.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or [string]::IsNullOrWhiteSpace($value.GetString()) -or $value.GetString() -cne $value.GetString().Trim()){throw "$kind changelog schema is invalid"}}
+                $version=$entry.GetProperty('version').GetString();if($version -cnotmatch '^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'){throw 'changelog version is invalid'}
+                if($seen.ContainsKey($version)){throw 'duplicate changelog version'};$seen[$version]=$true;$parsed=[Version]$version;if($null -ne $prior -and $parsed -ge $prior){throw 'changelog version order is invalid'};$prior=$parsed
+                if($entry.GetProperty('date').GetString() -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or $entry.GetProperty('highlights').ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $entry.GetProperty('highlights').GetArrayLength() -gt 64 -or $entry.GetProperty('visuals').ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $entry.GetProperty('visuals').GetArrayLength() -gt 8){throw "$kind changelog schema is invalid"}
+                $highlights=@();foreach($highlight in $entry.GetProperty('highlights').EnumerateArray()){
+                  if($highlight.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object $expectedHighlightNames @($highlight.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object))){throw "$kind changelog schema is invalid"}
+                  foreach($field in $expectedHighlightNames){$value=$highlight.GetProperty($field);if($value.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or [string]::IsNullOrWhiteSpace($value.GetString()) -or $value.GetString() -cne $value.GetString().Trim()){throw "$kind changelog schema is invalid"}}
+                  $highlights+=[ordered]@{label=$highlight.GetProperty('label').GetString();title=$highlight.GetProperty('title').GetString();description=$highlight.GetProperty('description').GetString()}
+                }
+                $visuals=@();foreach($visual in $entry.GetProperty('visuals').EnumerateArray()){if($visual.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $visual.GetString() -cnotin @('scene','broadcast','training')){throw "$kind changelog schema is invalid"};$visuals+=$visual.GetString()}
+                $releases+=[pscustomobject][ordered]@{version=$version;date=$entry.GetProperty('date').GetString();title=$entry.GetProperty('title').GetString();summary=$entry.GetProperty('summary').GetString();highlights=$highlights;visuals=$visuals}
+              }
+              return $releases
+            }finally{$json.Dispose()}
+          }
+          $targetItem=Get-Item -LiteralPath gift-panel-changelog.json -Force -ErrorAction Stop
+          if(-not($targetItem -is [IO.FileInfo]) -or ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $targetItem.Length -le 0 -or $targetItem.Length -gt $maximum){throw 'Target changelog file is invalid'}
+          $current=@(Read-Changelog ([IO.File]::ReadAllBytes($targetItem.FullName)) 'target')
+          if($current.Count -ne 1 -or [string]$current[0].version -cne $env:RELEASE_VERSION){throw 'Target changelog must contain exactly the current release'}
+          $historyPath=Join-Path $env:RELEASE_TOOL_ROOT '.github/changelog-history.json'
+          $historyItem=Get-Item -LiteralPath $historyPath -Force -ErrorAction Stop
+          if(-not($historyItem -is [IO.FileInfo]) -or ($historyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $historyItem.Length -le 0 -or $historyItem.Length -gt $maximum){throw 'Reviewed changelog history file is invalid'}
+          $historyBytes=[IO.File]::ReadAllBytes($historyItem.FullName);$historyHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($historyBytes)).ToLowerInvariant()
+          if($historyHash -cne $env:STABLE_CHANGELOG_HISTORY_SHA256){throw 'Reviewed changelog history digest mismatch'}
+          $history=@(Read-Changelog $historyBytes 'reviewed history');$currentVersion=[Version]$env:RELEASE_VERSION
+          foreach($release in $history){if([Version]$release.version -ge $currentVersion){throw 'Reviewed changelog history collides with or exceeds the current version'}}
+          $merged=@($current)+@($history);if($merged.Count -gt 512){throw 'Canonical changelog contains too many releases'}
+          $canonicalJSON=[ordered]@{schemaVersion=1;releases=$merged}|ConvertTo-Json -Depth 12
+          $canonicalBytes=[Text.UTF8Encoding]::new($false).GetBytes($canonicalJSON)
+          if($canonicalBytes.Length -le 0 -or $canonicalBytes.Length -gt $maximum){throw 'Canonical changelog exceeds 262144 bytes'}
+          [IO.File]::WriteAllBytes((Join-Path (Get-Location) 'dist/canonical-gift-panel-changelog.json'),$canonicalBytes)
+          $canonicalHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($canonicalBytes)).ToLowerInvariant()
+          "sha256=$canonicalHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "history_sha256=$historyHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tooling_commit=$env:RELEASE_TOOLING_COMMIT_SHA"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Set up Node.js for candidate tests
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -391,70 +448,6 @@ jobs:
           Copy-Item dist/gift-panel.exe dist/gift-panel-windows-x64.unsigned.exe
           node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
           if ($LASTEXITCODE -ne 0) { throw 'Stable candidate signing failed.' }
-      - name: Build canonical candidate changelog
-        working-directory: source
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $maximum=262144
-          function Read-Changelog([string]$path){
-            if(-not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item $path).Length -le 0 -or (Get-Item $path).Length -gt $maximum){throw 'changelog input is missing or exceeds 262144 bytes'}
-            $raw=Get-Content $path -Raw
-            try{$json=[System.Text.Json.JsonDocument]::Parse($raw)}catch{throw 'changelog schema is invalid'}
-            try{
-              $root=$json.RootElement;$names=@($root.EnumerateObject()|ForEach-Object{$_.Name});[int64]$schema=0
-              if($root.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or $names.Count -ne 2 -or @($names|Where-Object{$_ -ceq 'schemaVersion'}).Count -ne 1 -or @($names|Where-Object{$_ -ceq 'releases'}).Count -ne 1 -or $root.GetProperty('schemaVersion').ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $root.GetProperty('schemaVersion').TryGetInt64([ref]$schema) -or $schema -ne 1 -or $root.GetProperty('releases').ValueKind -ne [System.Text.Json.JsonValueKind]::Array){throw 'changelog schema is invalid'}
-              $entries=$root.GetProperty('releases');if($entries.GetArrayLength() -le 0 -or $entries.GetArrayLength() -gt 512){throw 'changelog schema is invalid'}
-              $expectedReleaseNames=@('date','highlights','summary','title','version','visuals');$expectedHighlightNames=@('description','label','title');$sourceSeen=@{};$sourcePrior=$null
-              foreach($entry in $entries.EnumerateArray()){
-                if($entry.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object $expectedReleaseNames @($entry.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object))){throw 'changelog schema is invalid'}
-                foreach($field in @('version','date','title','summary')){$value=$entry.GetProperty($field);if($value.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or [string]::IsNullOrWhiteSpace($value.GetString()) -or $value.GetString() -cne $value.GetString().Trim()){throw 'changelog schema is invalid'}}
-                $version=$entry.GetProperty('version').GetString();if($version -cnotmatch '^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'){throw 'changelog version is invalid'}
-                if($sourceSeen.ContainsKey($version)){throw 'duplicate changelog version'};$sourceSeen[$version]=$true;$parsed=[Version]$version;if($null -ne $sourcePrior -and $parsed -ge $sourcePrior){throw 'changelog version order is invalid'};$sourcePrior=$parsed
-                if($entry.GetProperty('date').GetString() -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or $entry.GetProperty('highlights').ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $entry.GetProperty('highlights').GetArrayLength() -gt 64 -or $entry.GetProperty('visuals').ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $entry.GetProperty('visuals').GetArrayLength() -gt 8){throw 'changelog schema is invalid'}
-                foreach($highlight in $entry.GetProperty('highlights').EnumerateArray()){
-                  if($highlight.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object $expectedHighlightNames @($highlight.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object))){throw 'changelog schema is invalid'}
-                  foreach($field in $expectedHighlightNames){$value=$highlight.GetProperty($field);if($value.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or [string]::IsNullOrWhiteSpace($value.GetString()) -or $value.GetString() -cne $value.GetString().Trim()){throw 'changelog schema is invalid'}}
-                }
-                foreach($visual in $entry.GetProperty('visuals').EnumerateArray()){if($visual.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $visual.GetString() -cnotin @('scene','broadcast','training')){throw 'changelog schema is invalid'}}
-              }
-            }finally{$json.Dispose()}
-            $document=$raw|ConvertFrom-Json
-            return @($document.releases)
-          }
-          $current=Read-Changelog 'gift-panel-changelog.json'
-          $previous=@();$previousTag=git tag --sort=-version:refname|Where-Object{$_ -and $_ -cne $env:RELEASE_TAG}|Select-Object -First 1
-          if($previousTag){
-            New-Item -ItemType Directory -Path dist/changelog-history -ErrorAction Stop|Out-Null
-            try{
-              $encoded=[Uri]::EscapeDataString($previousTag);$headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
-              $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encoded" -Headers $headers
-              $assets=@($release.assets|Where-Object{$_.name -ceq 'gift-panel-changelog.json'})
-              if($assets.Count -ne 1 -or [int64]$assets[0].size -le 0 -or [int64]$assets[0].size -gt $maximum){throw 'previous hosted changelog metadata is invalid'}
-              gh release download $previousTag --dir dist/changelog-history --pattern gift-panel-changelog.json
-              if($LASTEXITCODE -ne 0){throw 'previous hosted changelog download failed'}
-              $previous=Read-Changelog 'dist/changelog-history/gift-panel-changelog.json'
-            }catch{
-              $previousJSON=git show "${previousTag}:gift-panel-changelog.json" 2>$null
-              if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($previousJSON)){throw 'reviewed previous hosted/tag history is unavailable'}
-              $previousPath='dist/changelog-history/tag-gift-panel-changelog.json';$previousJSON|Set-Content -NoNewline -Encoding utf8 $previousPath
-              $previous=Read-Changelog $previousPath
-            }
-          }
-          $seed=@();if(Test-Path -LiteralPath '.github/changelog-history.json'){$seed=Read-Changelog '.github/changelog-history.json'}
-          $seen=@{};$merged=@()
-          foreach($release in @($current)+@($previous)+@($seed)){
-            $version=[string]$release.version
-            if($version -cnotmatch '^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'){throw 'changelog version is invalid'}
-            if($seen.ContainsKey($version)){continue}
-            $seen[$version]=$true;$merged+=$release
-          }
-          $merged=@($merged|Sort-Object {[Version]$_.version} -Descending)
-          $outputSeen=@{};$prior=$null
-          foreach($release in $merged){$version=[string]$release.version;if($outputSeen.ContainsKey($version)){throw 'duplicate changelog version'};$outputSeen[$version]=$true;$parsed=[Version]$version;if($null -ne $prior -and $parsed -ge $prior){throw 'changelog version order is invalid'};$prior=$parsed}
-          [ordered]@{schemaVersion=1;releases=$merged}|ConvertTo-Json -Depth 12|Set-Content -NoNewline -Encoding utf8 dist/canonical-gift-panel-changelog.json
-          if((Get-Item dist/canonical-gift-panel-changelog.json).Length -gt $maximum){throw 'canonical changelog exceeds 262144 bytes'}
       - name: Prepare signed stable candidate
         working-directory: source
         id: candidate
@@ -463,6 +456,9 @@ jobs:
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
+          STABLE_CANDIDATE_CHANGELOG_SHA256: ${{ steps.changelog.outputs.sha256 }}
+          STABLE_CHANGELOG_HISTORY_SHA256: ${{ steps.changelog.outputs.history_sha256 }}
+          RELEASE_TOOLING_COMMIT_SHA: ${{ steps.changelog.outputs.tooling_commit }}
         run: |
           New-Item -ItemType Directory -Path dist/stable-candidate/sealed -ErrorAction Stop | Out-Null
           & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/stable-candidate/sealed --version $env:RELEASE_VERSION --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/stable-artifact-inspection.json
@@ -472,7 +468,12 @@ jobs:
           & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-candidate --artifact $sealed --pe-content-sha256 $inspection.peContentSha256 --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --root-spki "$env:CANDIDATE_TRUST_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$env:CANDIDATE_TRUST_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/candidate-evidence.json
           if ($LASTEXITCODE -ne 0) { throw 'Candidate enrollment verification failed.' }
           $candidateEvidence = Get-Content dist/stable-candidate/candidate-evidence.json -Raw | ConvertFrom-Json
-          if ($candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256" -or $candidateEvidence.signedFileSha256 -cne $inspection.signedFileSha256) { throw 'Candidate evidence cross-binding failed.' }
+          $changelogHash=(Get-FileHash dist/canonical-gift-panel-changelog.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($changelogHash -cne $env:STABLE_CANDIDATE_CHANGELOG_SHA256 -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $null -ne $candidateEvidence.changelog){throw 'Candidate changelog provenance binding failed.'}
+          $candidateEvidence|Add-Member -NotePropertyName changelog -NotePropertyValue ([pscustomobject][ordered]@{sha256=$changelogHash;historySha256=$env:STABLE_CHANGELOG_HISTORY_SHA256;toolingCommit=$env:RELEASE_TOOLING_COMMIT_SHA})
+          $candidateEvidence|ConvertTo-Json -Depth 12|Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/candidate-evidence.json
+          $candidateEvidence = Get-Content dist/stable-candidate/candidate-evidence.json -Raw | ConvertFrom-Json
+          if ($candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256" -or $candidateEvidence.signedFileSha256 -cne $inspection.signedFileSha256 -or $candidateEvidence.changelog.sha256 -cne $changelogHash -or $candidateEvidence.changelog.historySha256 -cne $env:STABLE_CHANGELOG_HISTORY_SHA256 -or $candidateEvidence.changelog.toolingCommit -cne $env:RELEASE_TOOLING_COMMIT_SHA) { throw 'Candidate evidence cross-binding failed.' }
           "$($inspection.signedFileSha256)  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/gift-panel-windows-x64.exe.sha256
           [ordered]@{ tag_name=$env:RELEASE_TAG; draft=$false; prerelease=$false; assets=@([ordered]@{ name='gift-panel-windows-x64.exe'; browser_download_url="https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"; size=[int64]$inspection.signedFileSize; digest="sha256:$($inspection.signedFileSha256)" }) } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/gift-panel-update.json
           Copy-Item dist/canonical-gift-panel-changelog.json dist/stable-candidate/gift-panel-changelog.json
@@ -566,8 +567,10 @@ jobs:
           STABLE_AUTHORIZATION_POLICY_SHA256: ${{ vars.STABLE_AUTHORIZATION_POLICY_SHA256 }}
           STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
           STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
+          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+          STABLE_CHANGELOG_HISTORY_SHA256: ${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}
         run: |
-          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { throw 'Reviewed candidate publication input is missing or malformed.' }
+          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Reviewed candidate publication input is missing or malformed.' }
           "STABLE_CANDIDATE_RUN_ID=$env:STABLE_CANDIDATE_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_WORKFLOW_ID=$env:STABLE_CANDIDATE_WORKFLOW_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_RUN_ATTEMPT=$env:STABLE_CANDIDATE_RUN_ATTEMPT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -578,6 +581,8 @@ jobs:
           "STABLE_CANDIDATE_SHA256=$env:STABLE_CANDIDATE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_SIZE=$env:STABLE_CANDIDATE_SIZE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_COMMIT_SHA=$env:STABLE_CANDIDATE_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOLING_COMMIT_SHA=$env:RELEASE_TOOLING_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CHANGELOG_HISTORY_SHA256=$env:STABLE_CHANGELOG_HISTORY_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Set up publish verifier runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -643,7 +648,8 @@ jobs:
           $candidate='candidate/sealed/'+$env:STABLE_CANDIDATE_SHA256+'.exe'
           if ((Get-FileHash $candidate -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_SHA256 -or (Get-Item $candidate).Length -ne [int64]$env:STABLE_CANDIDATE_SIZE) { throw 'Reviewed candidate bytes mismatch.' }
           $candidateEvidence=Get-Content candidate/candidate-evidence.json -Raw | ConvertFrom-Json
-          if ($candidateEvidence.tag -cne $env:RELEASE_TAG -or $candidateEvidence.commit -cne $env:STABLE_CANDIDATE_COMMIT_SHA -or $candidateEvidence.signedFileSha256 -cne $env:STABLE_CANDIDATE_SHA256 -or $candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256") { throw 'Candidate evidence mismatch.' }
+          $candidateChangelogHash=(Get-FileHash candidate/gift-panel-changelog.json -Algorithm SHA256).Hash.ToLowerInvariant();$changelogKeys=@($candidateEvidence.changelog.PSObject.Properties.Name|Sort-Object)
+          if ($candidateEvidence.tag -cne $env:RELEASE_TAG -or $candidateEvidence.commit -cne $env:STABLE_CANDIDATE_COMMIT_SHA -or $candidateEvidence.signedFileSha256 -cne $env:STABLE_CANDIDATE_SHA256 -or $candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256" -or (Compare-Object @('historySha256','sha256','toolingCommit') $changelogKeys) -or $candidateEvidence.changelog.sha256 -cne $candidateChangelogHash -or $candidateEvidence.changelog.historySha256 -cne $env:STABLE_CHANGELOG_HISTORY_SHA256 -or $candidateEvidence.changelog.toolingCommit -cne $env:RELEASE_TOOLING_COMMIT_SHA) { throw 'Candidate evidence mismatch.' }
           $candidateRoot=(Resolve-Path candidate).Path
           $allowed=@("sealed/$env:STABLE_CANDIDATE_SHA256.exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
           $actual=@(Get-ChildItem $candidateRoot -File -Recurse|ForEach-Object{$_.FullName.Substring($candidateRoot.Length+1).Replace('\','/')}|Sort-Object)
@@ -654,6 +660,12 @@ jobs:
           if ((Get-FileHash "$trust/root.der" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or (Get-FileHash "$trust/bootstrap.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or (Get-FileHash "$trust/authorization.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_AUTHORIZATION_POLICY_SHA256) { throw 'Publish trust digest mismatch.' }
           node $verifier --inspector $inspector --artifact $candidate --artifact-inspection candidate/stable-artifact-inspection.json --artifact-sidecar candidate/gift-panel-windows-x64.exe.sha256 --standalone-ffmpeg candidate/ffmpeg-windows-x64.exe --ffmpeg-sidecar candidate/ffmpeg-windows-x64.exe.sha256 --ffmpeg-archive candidate/ffmpeg.zip --ffmpeg-manifest candidate/manifest.json --ffmpeg-manifest-sha256 $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 --root-spki "$trust/root.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$trust/bootstrap.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --authorization-policy "$trust/authorization.json" --authorization-policy-sha256 $env:STABLE_AUTHORIZATION_POLICY_SHA256 --authorization-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:STABLE_CANDIDATE_COMMIT_SHA --output candidate/stable-release-evidence.json
           if ($LASTEXITCODE -ne 0) { throw 'Final candidate authorization verification failed.' }
+          $releaseEvidence=Get-Content candidate/stable-release-evidence.json -Raw|ConvertFrom-Json
+          if($null -ne $releaseEvidence.changelog){throw 'Final evidence changelog field already exists.'}
+          $releaseEvidence|Add-Member -NotePropertyName changelog -NotePropertyValue ([pscustomobject][ordered]@{sha256=$candidateChangelogHash;historySha256=$env:STABLE_CHANGELOG_HISTORY_SHA256;toolingCommit=$env:RELEASE_TOOLING_COMMIT_SHA})
+          $releaseEvidence|ConvertTo-Json -Depth 12|Set-Content -NoNewline -Encoding utf8 candidate/stable-release-evidence.json
+          $releaseEvidence=Get-Content candidate/stable-release-evidence.json -Raw|ConvertFrom-Json
+          if($releaseEvidence.changelog.sha256 -cne $candidateChangelogHash -or $releaseEvidence.changelog.historySha256 -cne $env:STABLE_CHANGELOG_HISTORY_SHA256 -or $releaseEvidence.changelog.toolingCommit -cne $env:RELEASE_TOOLING_COMMIT_SHA){throw 'Final evidence changelog binding failed.'}
           "PUBLISH_INSPECTOR=$inspector" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Create expected-name stable asset
         shell: pwsh

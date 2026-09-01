@@ -16,6 +16,8 @@ signing, preparation requires:
 - a signed bootstrap policy, digest, and epoch that authorizes the exact
   NaisNet structured identity for the stable channel and tag;
 - the reviewed signed FFmpeg component-manifest SHA-256; and
+- the reviewed tooling commit plus the protected SHA-256 of that checkout's
+  `.github/changelog-history.json`; and
 - the closed stable EVSign certificate and structured NaisNet identity.
 
 Preparation runs target tests, signs once, and seals those exact Authenticode
@@ -33,7 +35,8 @@ Task 9 then signs a strictly higher authorization policy for that already
 sealed candidate SHA-256. A separate manual **candidate publication** approval
 must provide the exact protected preparation run ID, artifact ID/digest,
 candidate SHA-256/size/tag/commit, raw tag object, tool hashes, root/bootstrap
-inputs, and final authorization policy. Publication downloads that artifact;
+inputs, reviewed changelog-history/tooling provenance, and final authorization
+policy. Publication downloads that artifact;
 it never rebuilds, reruns EVSign/RFC3161, executes target code, or receives
 signer credentials. Any mismatch fails before a draft exists.
 
@@ -77,10 +80,16 @@ pre-enrollment tag inherits a signer rule.
 
 Candidate extraction rejects reparse points, symlinks/junctions, unexpected
 or empty directories, and files outside the exact closed set before downloaded
-tools execute. Candidate changelog generation restores the bounded canonical
-merge of tag-local release data, reviewed prior hosted/tag history, and
-`.github/changelog-history.json`, with strict schema, descending versions, and
-no duplicate version.
+tools execute. The target `gift-panel-changelog.json` must contain exactly one
+strict release entry matching the current tag/version. History comes only from
+the reviewed tooling checkout's `.github/changelog-history.json`; its exact
+bytes must match the protected lowercase SHA-256 and the checkout must match the
+reviewed tooling commit. There is no tag enumeration, hosted Release download,
+or fallback source. History is strict, bounded to 256 KiB, descending,
+duplicate-free, and entirely older than the current release. Candidate and
+published evidence expose only the canonical changelog hash, reviewed history
+hash, and tooling commit—never paths. The deterministic merge fails on missing,
+malformed, mismatched, duplicate, current-colliding, or future history.
 
 ## Action-time approvals
 

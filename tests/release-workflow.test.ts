@@ -95,6 +95,78 @@ function stepIndex(steps: ReleaseStep[], name: string): number {
   return index;
 }
 
+interface ChangelogReleaseFixture {
+  version: string;
+  date: string;
+  title: string;
+  summary: string;
+  highlights: Array<{ label: string; title: string; description: string }>;
+  visuals: string[];
+}
+
+function changelogRelease(version: string): ChangelogReleaseFixture {
+  return {
+    version,
+    date: '2026-09-01',
+    title: `Release ${version}`,
+    summary: `Summary ${version}`,
+    highlights: [],
+    visuals: [],
+  };
+}
+
+function runCandidateChangelogStep(options: {
+  target: readonly ChangelogReleaseFixture[];
+  history?: readonly ChangelogReleaseFixture[] | Buffer;
+  sourceHistory?: readonly ChangelogReleaseFixture[];
+  expectedHistorySHA256?: string;
+}) {
+  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+  const steps = jobSteps(jobs['prepare-candidate']);
+  const step = steps[stepIndex(steps, 'Build canonical candidate changelog')];
+  const root = mkdtempSync(join(tmpdir(), 'canonical-changelog-'));
+  try {
+    const tooling = join(root, 'tooling');
+    mkdirSync(join(root, '.github'), { recursive: true });
+    mkdirSync(join(root, 'dist'));
+    mkdirSync(join(tooling, '.github'), { recursive: true });
+    writeFileSync(join(root, 'gift-panel-changelog.json'), JSON.stringify({ schemaVersion: 1, releases: options.target }));
+    const historyBytes = Buffer.isBuffer(options.history)
+      ? options.history
+      : Buffer.from(JSON.stringify({ schemaVersion: 1, releases: options.history ?? [] }));
+    if (options.history !== undefined) writeFileSync(join(tooling, '.github', 'changelog-history.json'), historyBytes);
+    writeFileSync(join(root, '.github', 'changelog-history.json'), JSON.stringify({
+      schemaVersion: 1,
+      releases: options.sourceHistory ?? (Array.isArray(options.history) ? options.history : [changelogRelease('0.3.0')]),
+    }));
+    const outputPath = join(root, 'dist', 'canonical-gift-panel-changelog.json');
+    const githubOutput = join(root, 'github-output.txt');
+    const expectedHistorySHA256 = options.expectedHistorySHA256
+      ?? createHash('sha256').update(historyBytes).digest('hex');
+    const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', '-'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: githubOutput,
+        RELEASE_TAG: 'v0.4.12',
+        RELEASE_VERSION: '0.4.12',
+        RELEASE_TOOL_ROOT: tooling,
+        RELEASE_TOOLING_COMMIT_SHA: 'a'.repeat(40),
+        STABLE_CHANGELOG_HISTORY_SHA256: expectedHistorySHA256,
+      },
+      input: `$ErrorActionPreference='Stop'\ntrap { Write-Error $_; exit 1 }\nfunction git { if($args.Count -eq 4 -and $args[0] -eq '-C' -and $args[2] -eq 'rev-parse' -and $args[3] -eq 'HEAD'){$env:RELEASE_TOOLING_COMMIT_SHA;$global:LASTEXITCODE=0;return};throw 'dynamic git changelog selection is forbidden' }\nfunction gh { throw 'dynamic GitHub changelog access is forbidden' }\nfunction Invoke-RestMethod { throw 'dynamic GitHub changelog access is forbidden' }\n${step?.run ?? ''}\n`,
+      timeout: 30_000,
+    });
+    return {
+      result,
+      output: existsSync(outputPath) ? readFileSync(outputPath) : undefined,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function publishedManifestFixture(): Record<string, unknown> {
   const asset = Buffer.from('signed-executable-fixture');
   return {
@@ -370,33 +442,56 @@ describe('release workflow supply-chain contract', () => {
 	  expect(semanticCommands(jobs['historical-verify']).join('\n')).toContain('--organization $env:HISTORICAL_SIGNER_ORGANIZATION');
 	});
 
-	it('restores canonical bounded changelog history merge before candidate upload', () => {
+	it('uses only digest-bound reviewed-tooling changelog history before target build', () => {
 	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
 	  const steps=jobSteps(jobs['prepare-candidate']);
 	  const merge=steps[stepIndex(steps,'Build canonical candidate changelog')];
 	  const run=merge?.run??'';
+	  expect(stepIndex(steps,'Build canonical candidate changelog')).toBeLessThan(stepIndex(steps,'Install and test candidate source'));
+	  expect(merge?.env).toMatchObject({
+		RELEASE_TOOLING_COMMIT_SHA:'${{ vars.RELEASE_TOOLING_COMMIT_SHA }}',
+		STABLE_CHANGELOG_HISTORY_SHA256:'${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}',
+	  });
 	  expect(run).toContain('gift-panel-changelog.json');
 	  expect(run).toContain('.github/changelog-history.json');
-	  expect(run).toContain('git show');
-	  expect(run).toContain('gh release download');
+	  expect(run).toContain('$env:RELEASE_TOOL_ROOT');
+	  expect(run).toContain('$env:STABLE_CHANGELOG_HISTORY_SHA256');
 	  expect(run).toContain('262144');
 	  expect(run).toContain('duplicate changelog version');
 	  expect(run).toContain('changelog version order');
+	  expect(run).not.toMatch(/\bgit\s+(?:tag|show)\b|\bgh\s+release\s+download\b|Invoke-RestMethod/);
+	  const prepare=steps[stepIndex(steps,'Prepare signed stable candidate')];
+	  expect(prepare?.run).toContain('historySha256');
+	  expect(prepare?.run).toContain('toolingCommit');
+	  const publishSteps=jobSteps(jobs['publish-candidate']);
+	  expect(publishSteps[stepIndex(publishSteps,'Validate reviewed publish inputs')]?.env).toMatchObject({
+		RELEASE_TOOLING_COMMIT_SHA:'${{ vars.RELEASE_TOOLING_COMMIT_SHA }}',
+		STABLE_CHANGELOG_HISTORY_SHA256:'${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}',
+	  });
+	  expect(publishSteps[stepIndex(publishSteps,'Revalidate reviewed stable candidate')]?.run).toContain('historySha256');
 	});
 
-	it('executes canonical changelog merge with hosted history, seed deduplication, and descending order', () => {
-	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;const steps=jobSteps(jobs['prepare-candidate']);const step=steps[stepIndex(steps,'Build canonical candidate changelog')];
-	  const root=mkdtempSync(join(tmpdir(),'canonical-changelog-'));try{
-		mkdirSync(join(root,'.github'),{recursive:true});mkdirSync(join(root,'dist'));const previous=join(root,'previous.json');
-		const entry=(version:string)=>({version,date:'2026-09-01',title:`Release ${version}`,summary:`Summary ${version}`,highlights:[],visuals:[]});
-		writeFileSync(join(root,'gift-panel-changelog.json'),JSON.stringify({schemaVersion:1,releases:[entry('0.4.12')]}));
-		writeFileSync(previous,JSON.stringify({schemaVersion:1,releases:[entry('0.4.10'),entry('0.4.9')]}));
-		writeFileSync(join(root,'.github','changelog-history.json'),JSON.stringify({schemaVersion:1,releases:[entry('0.4.9'),entry('0.4.7')]}));
-		const execute=()=>{rmSync(join(root,'dist','changelog-history'),{recursive:true,force:true});return spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,PREVIOUS_PATH:previous,PREVIOUS_SIZE:String(readFileSync(previous).length),RELEASE_TAG:'v0.4.12',GITHUB_REPOSITORY:'example/repository',GH_TOKEN:'test'},input:`$ErrorActionPreference='Stop'\ntrap { Write-Error $_; exit 1 }\nfunction git { if($args[0] -eq 'tag'){'v0.4.10';$global:LASTEXITCODE=0;return};throw 'unexpected git call' }\nfunction Invoke-RestMethod { [pscustomobject]@{assets=@([pscustomobject]@{name='gift-panel-changelog.json';size=[int64]$env:PREVIOUS_SIZE})} }\nfunction gh { Copy-Item $env:PREVIOUS_PATH dist/changelog-history/gift-panel-changelog.json;$global:LASTEXITCODE=0 }\n${step?.run??''}\n`});};
-		const result=execute();
-		expect(result.status,`${result.stdout}${result.stderr}`).toBe(0);const output=join(root,'dist','canonical-gift-panel-changelog.json');expect(existsSync(output),`${result.stdout}${result.stderr}`).toBe(true);const merged=JSON.parse(readFileSync(output,'utf8'));expect(merged.releases.map((release:{version:string})=>release.version)).toEqual(['0.4.12','0.4.10','0.4.9','0.4.7']);
-		writeFileSync(join(root,'gift-panel-changelog.json'),JSON.stringify({schemaVersion:1,releases:[entry('0.4.12'),entry('0.4.12')]}));const duplicate=execute();expect(duplicate.status,`${duplicate.stdout}${duplicate.stderr}`).not.toBe(0);
-	  }finally{rmSync(root,{recursive:true,force:true});}
+	it('deterministically merges one exact target release with reviewed history', () => {
+	  const history=[changelogRelease('0.4.10'),changelogRelease('0.4.9'),changelogRelease('0.4.7')];
+	  const options={target:[changelogRelease('0.4.12')],history,sourceHistory:[changelogRelease('0.3.0')]};
+	  const first=runCandidateChangelogStep(options);expect(first.result.status,`${first.result.stdout}${first.result.stderr}`).toBe(0);
+	  const second=runCandidateChangelogStep(options);expect(second.result.status,`${second.result.stdout}${second.result.stderr}`).toBe(0);
+	  expect(first.output).toEqual(second.output);
+	  const merged=JSON.parse(first.output!.toString('utf8'));
+	  expect(merged.releases.map((release:{version:string})=>release.version)).toEqual(['0.4.12','0.4.10','0.4.9','0.4.7']);
+	});
+
+	it.each([
+	  ['an extra target entry',{target:[changelogRelease('0.4.12'),changelogRelease('0.4.11')],history:[changelogRelease('0.4.10')]}],
+	  ['reviewed history from a higher moved tag',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.13'),changelogRelease('0.4.10')]}],
+	  ['a reviewed history digest mismatch',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.10')],expectedHistorySHA256:'0'.repeat(64)}],
+	  ['duplicate reviewed history versions',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.10'),changelogRelease('0.4.10')]}],
+	  ['a current-version history collision',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.12'),changelogRelease('0.4.10')]}],
+	  ['missing reviewed history',{target:[changelogRelease('0.4.12')],history:undefined}],
+	  ['malformed reviewed history',{target:[changelogRelease('0.4.12')],history:Buffer.from('{"schemaVersion":1,"releases":') }],
+	] as const)('rejects %s',(_name,options)=>{
+	  const execution=runCandidateChangelogStep(options);
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);
 	});
 
 	it('validates extracted candidate directories before executing downloaded tools', () => {
