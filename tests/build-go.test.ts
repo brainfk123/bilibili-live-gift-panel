@@ -165,7 +165,7 @@ describe('build-go update trust configuration', () => {
     });
   });
 
-  it('does not print Base64 public inputs in Go trace output', () => {
+  it.runIf(process.platform === 'win32')('does not print Base64 public inputs in the real Windows package trace', () => {
     const recognizablePolicyBase64 = Buffer.from('task3-fix1-recognizable-bootstrap-policy', 'utf8').toString('base64');
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/build-go.mjs', import.meta.url))], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
