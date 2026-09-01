@@ -7,8 +7,9 @@ update pointers.
 
 ## New stable Releases
 
-The stable lifecycle is deliberately two-stage. A push of a new canonical
-`v0.4.12` or later tag may enter **candidate preparation only**. Its raw tag
+The stable lifecycle is deliberately split across three fresh capabilities. A
+push of a new canonical `v0.4.12` or later tag may enter **unprivileged
+candidate build only**. Its raw tag
 object and peeled commit must match protected reviewed values. Before build or
 signing, preparation requires:
 
@@ -18,18 +19,19 @@ signing, preparation requires:
 - the reviewed signed FFmpeg component-manifest SHA-256; and
 - the reviewed tooling commit plus the protected SHA-256 of that checkout's
   `.github/changelog-history.json`; and
-- the closed stable EVSign certificate and structured NaisNet identity.
+- no EVSign credential or selector; signer configuration is absent from this
+  runner.
 
-Preparation runs target tests, signs once, and seals those exact Authenticode
-bytes. It uploads a content-addressed Actions artifact containing the sealed
-EXE, sealed FFmpeg closure, sidecars, candidate evidence, and digest-pinned
-credential-free verification tools. It downloads that Actions artifact again
-and requires every file to be byte-identical. Preparation cannot create or edit
-a GitHub Release, attest Release assets, call KMS, or mutate COS/pointers.
-Reviewed tooling and target source use independent `tooling/` and `source/`
-checkout roots, so target cleanup cannot erase the tool root. Target
-npm/Go/tests/build steps receive no EVSign selector, key, password, or
-certificate variable; only the narrow reviewed signing step receives them.
+The unprivileged job runs target tests/build and uploads a closed
+content-addressed unsigned handoff containing data only—never runner state or
+candidate tools. A fresh protected `stable-sign` runner downloads and
+byte-verifies that handoff before checking out/building reviewed signing and
+inspection tools. It executes no target code, receives the closed stable
+EVSign selector/credential only for signing, seals/verifies the exact result,
+uploads a content-addressed signed candidate, reads it back, and requires every
+file to be byte-identical. Separate `stable-publish` receives no signer
+credential. No target-controlled `PATH`, `GITHUB_ENV`, tool, checkout, or
+process survives from build into signing.
 
 Task 9 then signs a strictly higher authorization policy for that already
 sealed candidate SHA-256. A separate manual **candidate publication** approval

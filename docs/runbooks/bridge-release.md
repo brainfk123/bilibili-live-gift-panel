@@ -22,23 +22,34 @@ KMS change.
 - The final outer EXE must have Windows Authenticode status `Valid` and the
   exact structured identity `CN` / `RushRush Network Technology Ltd` /
   `91450900MADM3GLG5P`.
-- The application's embedded enrollment root and bootstrap policy authorize
-  the NaisNet stable identity `CN` / `NaisNet Technology Co., Ltd.` /
-  `91210103MA7CJ3C094`. The historical `APP_UPDATE_PUBLISHER` build value is
-  therefore NaisNet; it is not evidence for the outer RushRush signature.
+- The application embeds the reviewed root and epoch-1 bootstrap policy only.
+  A separate higher immutable authorization policy must advance bootstrap and
+  authorize the actual v0.4.12 signed EXE SHA-256 plus the NaisNet stable
+  identity `CN` / `NaisNet Technology Co., Ltd.` /
+  `91210103MA7CJ3C094` through shared `AuthorizeAt`. The final-hash policy is
+  external and is not required to be embedded. The historical
+  `APP_UPDATE_PUBLISHER` value remains NaisNet; it is not evidence for the
+  outer RushRush signature.
 - Bundled and standalone FFmpeg are the same fixed, reviewed, NaisNet-signed
   component. The bridge workflow verifies the component Release, attestations,
   manifest digest, version, binary hash, size, Authenticode status, and
   structured NaisNet identity before and after packaging. It never signs,
   replaces, or republishes an FFmpeg component.
-- The workflow can create only a draft GitHub Release, upload the closed asset
-  set, read back and hash every byte, then publish it with `latest=false`. It
-  cannot write stable or legacy pointers and has no COS or KMS credentials.
+- `bridge-build` is unprivileged and alone executes target code. It uploads a
+  closed content-addressed unsigned handoff with no tool or runner state.
+  Fresh `bridge-sign` first downloads and byte-verifies that handoff, then
+  checks out/builds reviewed tools, executes no target code, signs and seals,
+  and uploads the exact signed candidate. Separate `bridge-publish` has no
+  EVSign credential; it reads back every Release byte and publishes with
+  `latest=false`. No job writes stable or legacy pointers or has COS/KMS
+  credentials.
 
 ## Required protected configuration
 
-Use the protected `bridge-release` environment. The bridge EVSign credential
-and selector must be distinct from the stable profile.
+Use protected `bridge-sign` only for the bridge EVSign credential/selector and
+protected `bridge-publish` only for GitHub publication approval. `bridge-build`
+has no protected environment. The bridge EVSign credential and selector must
+be distinct from the stable profile.
 
 Required environment secrets:
 
@@ -55,13 +66,17 @@ Required reviewed environment variables:
 - `BRIDGE_BOOTSTRAP_POLICY_B64`
 - `BRIDGE_BOOTSTRAP_POLICY_SHA256`
 - `BRIDGE_BOOTSTRAP_POLICY_EPOCH`
+- `BRIDGE_AUTHORIZATION_POLICY_SHA256`
+- `BRIDGE_AUTHORIZATION_POLICY_EPOCH`, strictly greater than the bootstrap
+  epoch and bound to the actual signed v0.4.12 hash
 - `BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256`
 - `BRIDGE_REVIEWED_COMMIT_SHA`, the independently reviewed lowercase 40-hex
   commit peeled from immutable `refs/tags/v0.4.11`
 - `BRIDGE_REVIEWED_TAG_OBJECT_SHA`, the exact raw tag-object SHA (equal to the
   commit only for a reviewed lightweight tag)
-- `BRIDGE_TOOLING_COMMIT_SHA`, the protected reviewed commit used to prebuild
-  the inspector, readiness verifier, bounded downloader, and EVSign frontend
+- `BRIDGE_TOOLING_COMMIT_SHA`, the reviewed commit used for credential-free
+  build/readiness tools and checked out again only after the unsigned handoff
+  on the fresh signing runner
 - `BRIDGE_OBSERVATION_EVIDENCE_B64` and
   `BRIDGE_OBSERVATION_EVIDENCE_SHA256`
 - `BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64` and
@@ -77,9 +92,10 @@ test fixtures, placeholder digests, or locally generated production claims.
 Protect `v0.4.11` with the repository tag ruleset: creation requires the
 release-maintainer path, update and deletion are forbidden, and bypass is not
 available to the bridge workflow. Record the ruleset ID and reviewed peeled
-commit and raw tag-object SHA in the approval evidence. The workflow checks
-local and remote raw and peeled refs after checkout, immediately before draft
-creation, and immediately before `draft=false`. An annotated tag must have one
+commit and raw tag-object SHA in the approval evidence. `bridge-build` checks
+local and remote raw and peeled refs after target checkout. The signer never
+checks out the target, and the signer-free publisher rechecks the reviewed
+raw/peeled tag through the GitHub API before mutation. An annotated tag must have one
 raw object equal to `BRIDGE_REVIEWED_TAG_OBJECT_SHA` and one peeled commit equal
 to `BRIDGE_REVIEWED_COMMIT_SHA`; a lightweight tag must have one raw ref equal
 to both values and no peeled line. A peeled-only ref, rewrite to a new tag
@@ -97,11 +113,14 @@ Before requesting approval, record read-only evidence for:
   result, and review time; the hash must also match Release asset metadata and
   the bounded-download checksum sidecar;
 - daily bounded updater and policy result counts for the full observation;
-- the immutable `publisher-policy-epoch-00000001` Release and exact
-  `policy.json`/`audit.json`/`commit.json` bytes, with API metadata
-  size/digest/content-type validation before bounded streaming download;
+- a higher immutable `publisher-policy-epoch-%08d` authorization Release and
+  the exact remote assets `gift-panel-publisher-policy.json`,
+  `gift-panel-publisher-policy.audit.json`, and
+  `gift-panel-publisher-policy.commit.json`; bridge import maps those names to
+  local `policy.json`/`audit.json`/`commit.json` only after API
+  size/digest/content-type validation and bounded streaming download;
 - a reviewed production-trust attestation binding root SPKI SHA-256, exact
-  epoch-1 policy bytes/hash/epoch, KMS key ID/request ID/audit digest, immutable
+  higher authorization-policy bytes/hash/epoch, KMS key ID/request ID/audit digest, immutable
   policy Release ID/tag/time/assets, and review time;
 - two-reviewer agreement on all of those digests and the fixed FFmpeg
   component-manifest SHA-256;
@@ -131,8 +150,10 @@ Acceptance evidence must include:
 - RushRush outer structured identity and Authenticode status;
 - NaisNet standalone FFmpeg structured identity, version, hash, size, and
   component-manifest hash;
-- embedded root digest, bootstrap policy epoch/hash, and client-side policy
-  verification authorizing NaisNet stable `v0.4.12`;
+- embedded root digest and bootstrap policy epoch/hash, plus the distinct
+  higher authorization policy epoch/hash, exact policy Release ID, audit and
+  commit-marker digests, and client-side authorization of the actual
+  NaisNet-signed stable `v0.4.12` hash;
 - matching Authenticode PE-content digest between preserved unsigned bytes and
   the signed output, plus final extraction/reverification of embedded trust and
   FFmpeg from the bound signed artifact;
@@ -140,7 +161,8 @@ Acceptance evidence must include:
   and audit, including nonempty KMS request ID and CI actor;
 - the shared production client policy verifier authorizing the exact input
   `{tag:v0.4.12, channel:stable, sha256:<actual Release EXE>, NaisNet identity}`;
-  the epoch-1 stable rule must carry that exact `manifestSha256`.
+  the higher stable rule must carry that exact `manifestSha256`, and its epoch
+  must be strictly greater than bootstrap.
 - proof that stable and legacy pointers did not change.
 
 GitHub acceptance completes Gate A only. Keep legacy routing inactive.
@@ -153,8 +175,9 @@ prove all of the following:
 
 1. a public `v0.4.7` installation downloads and accepts RushRush `v0.4.11`;
 2. `v0.4.11` restarts with canonical User-Agent version `0.4.11`;
-3. `v0.4.11` routes to stable and accepts NaisNet `v0.4.12` through the
-   embedded signed policy;
+3. `v0.4.11` routes to stable, verifies the higher external authorization
+   policy under its embedded root/bootstrap enrollment, and accepts the exact
+   NaisNet `v0.4.12` hash;
 4. public `v0.4.9` and `v0.4.10` clients remain on stable and never receive
    `v0.4.11`;
 5. stable object bytes and `channels/stable/latest.json` are unchanged.

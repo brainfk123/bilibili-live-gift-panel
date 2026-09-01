@@ -10,6 +10,10 @@
 
 **Spec:** [`docs/superpowers/specs/2026-08-30-version-aware-signer-trust-rotation-design.md`](../specs/2026-08-30-version-aware-signer-trust-rotation-design.md)
 
+## Status and non-goals
+
+Tasks 1–13 describe repository implementation and local verification; Task 14 remains approval-gated production work. Root-key rotation is not implemented by any task in this plan. The spec's `rootEpoch+1` paragraph is a future protocol sketch only and requires a separate approved design, implementation plan, client wire/cache changes, tests, and rollout gates. No immediate-rollout status or Task 14 evidence may claim root-rotation support.
+
 ## Global constraints
 
 - Preserve the dirty main worktree. Execute this plan only in an isolated worktree.
@@ -20,6 +24,7 @@
 - Do not log IP addresses, Bilibili identity/gift data, machine IDs, usernames, raw paths containing usernames, credentials, tokens, cookies, or signed URL query strings.
 - KMS provisioning, KMS signing, policy publication, server deployment, tag push, Release publication, COS pointer advancement, and retirement are separate approval gates. Stop before each external mutation and obtain fresh confirmation.
 - Stage order is fixed: prepare trust/routing → publish and observe NaisNet v0.4.12 for at least seven days → publish and activate RushRush v0.4.11 bridge → observe for at least seven days. Do not compress the observation windows.
+- Root-key rotation, root-epoch anti-rollback, and automatic recovery from rotation-root compromise are non-goals for this plan.
 
 ## Task 1: Add the strict publisher-policy domain and canonical form
 
@@ -697,7 +702,7 @@ Run: `npm test -- --run scripts/publish-trust-policy.test.ts scripts/release-wor
 
 ### Step 3: Implement the protected workflow and dry-run publisher
 
-The publisher validates an already KMS-signed envelope, uploads `trust/publisher/epochs/%08d.json` with create-only semantics, creates `publisher-policy-epoch-%08d` with an immutable asset, re-reads both hashes, then conditionally advances discovery pointers. Add `--dry-run` that performs all validation and prints only target keys/hashes.
+The publisher validates an already KMS-signed envelope, uploads `trust/publisher/epochs/%08d.json` with create-only semantics, and creates `publisher-policy-epoch-%08d` with exactly three immutable `application/json` assets: `gift-panel-publisher-policy.json`, `gift-panel-publisher-policy.audit.json`, and the exact bundle marker `gift-panel-publisher-policy.commit.json`. It reads all three assets back and verifies names, sizes, digests, media types, and bytes before conditionally advancing discovery pointers. Add `--dry-run` that performs all validation and prints only target keys/hashes.
 
 The workflow must expose separate jobs:
 
@@ -764,7 +769,7 @@ const profiles = {
 };
 ```
 
-The bridge job must fail unless the final EXE is Windows-valid and its structured identity is exactly RushRush. It must independently verify the bundled FFmpeg as NaisNet, the embedded root SPKI digest, and the bootstrap policy epoch/hash. It may create immutable bridge assets and a GitHub Release only; no stable or legacy pointer mutation occurs in this workflow.
+The bridge workflow uses three fresh runners: an unprivileged `bridge-build` job executes target code and uploads a closed content-addressed unsigned handoff; a protected `bridge-sign` job downloads and byte-verifies that handoff before checking out/building reviewed tools, executes no target code, signs/seals/verifies, and uploads the exact signed candidate; and a signer-free `bridge-publish` job creates the immutable non-latest Release. The final inspector verifies the embedded epoch-1 bootstrap independently from a higher immutable authorization policy that advances the bootstrap and binds the actual NaisNet-signed v0.4.12 EXE hash through shared `AuthorizeAt`. It must never require that final-hash authorization policy to be embedded. No stable or legacy pointer mutation occurs in this workflow.
 
 ### Step 4: Add an approval-gated bridge runbook
 
@@ -790,7 +795,7 @@ Commit: `git add .github/workflows/bridge-release.yml scripts/release-workflow.t
 
 ### Step 1: Write failing stable workflow contract tests
 
-Require `APP_UPDATE_TRUST_REQUIRED=1`, reviewed root SPKI digest, bootstrap policy epoch/hash, structured final NaisNet identity verification, embedded FFmpeg verification, and no KMS/legacy permissions. Assert GitHub latest remains true for stable releases.
+Require `APP_UPDATE_TRUST_REQUIRED=1`, reviewed root SPKI digest, bootstrap policy epoch/hash, a higher exact-hash authorization policy, structured final NaisNet identity verification, embedded FFmpeg verification, and no KMS/legacy permissions. Assert GitHub latest remains true for stable releases. The workflow must split unprivileged target build/test, fresh protected signing, and signer-free publication; the signing runner downloads and validates the unsigned handoff before obtaining reviewed tools and never executes target code.
 
 ```ts
 it("requires enrollment trust for stable release builds", () => {
@@ -965,7 +970,8 @@ Commit only public, privacy-safe evidence:
 **Files:**
 
 - Update after each approved stage: `docs/verification/signer-trust-rotation.md`
-- No other repository file should change unless a defect is found through the same RED/GREEN process
+- Add only after the corresponding explicit gate approves both bytes and exact path: reviewed public SPKI at `publisher/rotation-root-spki.der`; exact candidate at `publisher/policy-candidates/epoch-%08d.json`; a public JSON attestation under `publisher/attestations/` with its complete filename stated in the approved preflight; or privacy-safe Markdown/JSON evidence under `docs/verification/` with its complete filename stated in the approved preflight. An unspecified path is not allowed by this scope
+- No product source, workflow behavior, deployment behavior, or existing trust material may change in Task 14. Any product defect returns to implementation review and a separate RED/GREEN commit before rollout resumes
 
 This task is intentionally a sequence of stops. Never infer authorization for a later stop from an earlier confirmation.
 
@@ -975,7 +981,7 @@ Preflight reports exact region, key usage, algorithm, deletion protection, CAM a
 
 ### Gate 2: Sign and publish epoch 1 policy
 
-First run the policy workflow in validation/dry-run mode. Ask separately to sign epoch 1. Verify locally. Ask separately to publish immutable COS/GitHub epoch objects. Re-read and compare hashes. Ask separately to advance discovery pointers.
+First run the policy workflow in validation/dry-run mode. Ask separately to sign epoch 1 bootstrap. Verify locally. Ask separately to publish immutable COS/GitHub epoch objects and the exact three-asset Release closure. Re-read and compare all hashes. Ask separately to advance discovery pointers. This gate enrolls clients; it does not authorize a not-yet-built final EXE hash.
 
 ### Gate 3: Deploy strict routing with legacy inactive
 
@@ -983,7 +989,7 @@ Show route-matrix, current stable pointer/hash, candidate binary/config diff, re
 
 ### Gate 4: Publish NaisNet v0.4.12 stable
 
-Prepare version/changelog/tag and fully signed artifacts. Record Authenticode identity, asset/sidecar hashes, policy epoch/root key ID, GitHub latest flag, and proposed stable manifest. Ask for confirmation before push/tag/Release/COS promotion. Then verify real v0.4.9 and v0.4.10 upgrades through domestic and GitHub sources.
+Prepare version/changelog/tag and the fully signed candidate without publishing it. Create a higher authorization-policy candidate whose epoch advances bootstrap and whose NaisNet stable rule binds that exact signed EXE SHA-256; use shared `AuthorizeAt` to verify the actual signer/hash. Show and obtain the separate confirmations to sign and publish that higher policy's immutable COS object and exact three-asset GitHub Release closure. The final stable inspector must verify embedded bootstrap plus this external higher policy, and readiness evidence must bind both epochs/hashes and Release/audit IDs. Then record Authenticode identity, asset/sidecar hashes, both policy epochs/root key ID, GitHub latest flag, and proposed stable manifest. Ask separately for confirmation before push/tag/Release/COS promotion. Then verify real v0.4.9 and v0.4.10 upgrades through domestic and GitHub sources.
 
 Observe for at least seven days. Record daily bounded counts for policy and updater result codes. Do not publish or activate the bridge during this window.
 
@@ -1009,4 +1015,3 @@ Observe at least seven days after activation. Verify aggregate convergence/resul
 ### Final verification
 
 Before claiming production completion, use `superpowers:verification-before-completion` and attach current evidence for every gate. The implementation is not complete if any required Windows path, source fallback, pointer, signature, hash, policy epoch, or observation window lacks direct evidence.
-

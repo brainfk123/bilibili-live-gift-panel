@@ -8,7 +8,7 @@ Obtain and record a fresh confirmation immediately before each operation. One co
 
 1. **Provision KMS and CAM.** Create or enable the `ap-shanghai` P-256 asymmetric signing key, deletion protection, CloudAudit coverage, GitHub OIDC provider, and the two separate CAM roles. Stop after public-only preflight.
 2. **Sign one epoch.** Approve only the `sign-policy` deployment for the exact candidate epoch, exact previous epoch, reviewed KMS key ID, and reviewed SPKI SHA-256. This does not authorize upload.
-3. **Publish immutable copies.** After reviewing the public signed bundle and audit, separately approve `publish-immutable`. This creates only `trust/publisher/epochs/%08d.json` and the dedicated `publisher-policy-epoch-%08d` GitHub Release/tag with the policy and public audit assets. This does not authorize discovery changes.
+3. **Publish immutable copies.** After reviewing the public signed bundle and audit, separately approve `publish-immutable`. This creates only `trust/publisher/epochs/%08d.json` and the dedicated `publisher-policy-epoch-%08d` GitHub Release/tag with the exact policy, public audit, and commit-marker assets. This does not authorize discovery changes.
 4. **Advance discovery pointers.** Dispatch with `advance_discovery=true`, verify both immutable readbacks again, then separately approve `advance-discovery`. This is the only approval that may change `trust/publisher/latest.json` and `refs/heads/publisher-trust` / `gift-panel-publisher-policy.json`.
 
 The protected GitHub environment must be named exactly `publisher-rotation` and require reviewers for every protected job. Reject or leave a deployment pending when its separate confirmation is absent.
@@ -96,7 +96,8 @@ After the protected signing job produces the dedicated committed bundle, `trustp
 - checks the marker names, lengths, hashes, filesystem identity, ACLs, and close results;
 - independently verifies the canonical client policy signature against the explicitly supplied reviewed P-256 SPKI and digest;
 - checks the exact previous/current epoch transition and audit cross-binding;
-- emits one captured canonical machine envelope.
+- emits one captured canonical machine envelope including the exact retained
+  commit-marker bytes, size, and SHA-256 in addition to the parsed marker.
 
 `publish-trust-policy.mjs` consumes only that captured envelope; it never reopens policy or audit bundle paths. Its dry-run repeats the public-root signature, epoch, marker, audit, and hash checks and prints only fixed target names and hashes. Review that fixed summary before approving immutable publication.
 
@@ -106,9 +107,11 @@ For epoch `N`, the only immutable targets are:
 
 - COS: `trust/publisher/epochs/%08d.json`;
 - GitHub tag/Release: `publisher-policy-epoch-%08d`;
-- GitHub assets: `gift-panel-publisher-policy.json` and `gift-panel-publisher-policy.audit.json`.
+- GitHub assets: exactly `gift-panel-publisher-policy.json`,
+  `gift-panel-publisher-policy.audit.json`, and
+  `gift-panel-publisher-policy.commit.json`, all `application/json`.
 
-Uploads are create-only. Existing bytes are acceptable only when their exact SHA-256 matches. The publisher downloads the COS policy and both GitHub assets and compares exact bytes and hashes. Any upload error, conflicting existing object/Release, missing audit asset, or readback mismatch ends the job before either discovery pointer is read or written.
+Uploads are create-only. Existing bytes are acceptable only when their exact SHA-256 matches. The publisher downloads the COS policy and all three GitHub assets and compares canonical names, content types, bounded sizes, exact bytes, and hashes. Any upload error, conflicting existing object/Release, missing/extra/renamed asset, or readback mismatch ends the job before either discovery pointer is read or written. Bridge consumers map these remote names to local `policy.json`, `audit.json`, and `commit.json`; the two namespaces must never be conflated.
 
 Every new or existing matching policy Release is patched to non-draft, non-prerelease with GitHub API `make_latest` set to the string value `"false"`. The publisher then reads the repository latest-Release endpoint and fails if the policy tag/Release is latest.
 
@@ -135,4 +138,4 @@ Never log policy contents, signatures, SPKI bytes, credentials, session tokens, 
 - **Bad accepted policy:** rollback is never a lower epoch. Publish a higher corrective epoch signed by the trusted root. Clients that accepted a higher epoch must never be instructed to downgrade.
 - **Suspected KMS compromise:** remove/disable SignByAsymmetricKey permission, preserve CloudAudit, stop all rotation jobs, and follow a separately approved root-recovery design. Do not use pointer edits as root recovery.
 
-Immutable policies, tags, Releases, public audit assets, and CloudAudit evidence are retention records. Deletion, replacement, root rotation, or retirement requires a separate design and confirmation.
+Immutable policies, tags, Releases, public audit/commit assets, and CloudAudit evidence are retention records. Deletion, replacement, or retirement requires a separate design and confirmation. Root-key rotation is not implemented by this rollout; the `rootEpoch+1` idea is only a future protocol sketch and requires its own approved design, client protocol/cache implementation, test matrix, and rollout gates.

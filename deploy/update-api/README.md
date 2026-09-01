@@ -12,11 +12,27 @@ The dedicated bridge workflow has distinct protected certificate/identity/creden
 
 GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.
 
-Store these signing variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. The workflow prebuilds security tooling from `RELEASE_TOOLING_COMMIT_SHA`, then treats the requested tag only as target source/assets. Exact `v0.4.11` is rejected before the protected environment because only the bridge workflow owns it. A validated GitHub Release is the workflow's terminal success condition; the workflow does not hold COS credentials or invoke the COS publisher.
+Store stable signing variables and secrets only in protected `stable-sign`, and
+GitHub publication approval only in signer-free `stable-publish`. The
+unprivileged candidate-build job has no protected environment or EVSign value;
+it executes target code and uploads a closed unsigned handoff. Fresh
+`stable-sign` downloads and byte-verifies that handoff before checking
+out/building reviewed tools, executes no target code, and uploads the exact
+signed candidate. Exact `v0.4.11` is rejected before either protected
+environment because only the bridge workflow owns it. The workflow never holds
+COS credentials or invokes the COS publisher.
 
 Server environment variables are `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`, `UPDATE_STABLE_CHANNEL_KEY`, `UPDATE_LEGACY_CHANNEL_KEY`, `UPDATE_LEGACY_ROUTING_ACTIVE`, and `UPDATE_PUBLISHER_POLICY_KEY`. The last four form a closed typed configuration: the only accepted object keys are `channels/stable/latest.json`, `channels/legacy-rushrush/latest.json`, and `trust/publisher/latest.json`; activation accepts only exact `true` or `false`. Omitted routing variables use those reviewed keys and keep legacy inactive. The production file must nevertheless spell out all four, with `UPDATE_LEGACY_ROUTING_ACTIVE=false`, so the candidate diff is reviewable.
 
 Mirror environment variables are only `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, and `COS_SECRET_KEY`. Stable uses system account `gift-panel-mirror`, CAM identity `lighthouse-cos-publisher`, and root-owned `/etc/gift-panel-release-mirror.env`; legacy uses distinct system account `gift-panel-legacy-mirror`, CAM identity `lighthouse-cos-legacy-publisher`, and root-owned `/etc/gift-panel-legacy-release-mirror.env`. Each file is mode `0600`, contains different credentials, and must not be copied into GitHub. Neither the API nor either mirror receives a KMS provider variable or KMS Sign permission.
+
+The COS client also enforces this split before HTTP: each publisher is
+constructed with exactly one closed mutable-pointer capability (`stable` or
+`legacy-rushrush`), while the update API/read client is constructed with no
+mutable-pointer capability. Cross-pointer and arbitrary pointer writes fail
+locally even if credentials are misconfigured. Immutable `releases/` writes
+remain a separate method and CAM scope; pointer capability does not grant an
+immutable prefix or vice versa.
 
 Rendering variables: `PUBLIC_DOMAIN`, `ICP_NUMBER`, `TLS_CERT_PATH`, `TLS_KEY_PATH`.
 

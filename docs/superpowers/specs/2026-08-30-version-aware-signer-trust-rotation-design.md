@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved design only. This document does not authorize implementation, KMS provisioning, credential creation, server changes, COS writes, Git pushes, tags, or releases.
+Approved immediate-rollout design. Repository implementation and local verification do not authorize KMS provisioning, credential creation, server changes, COS writes, Git pushes, tags, or releases. Root-key rotation is not implemented by this design; the future sketch below requires a separate approved protocol design before any product or rollout claim.
 
 ## Goal
 
@@ -31,6 +31,7 @@ As of 2026-08-30:
 - Do not assign one ordinary latest version to two byte-distinct executables.
 - Do not promise automatic recovery for v0.4.7 when the domestic API is unreachable; its GitHub fallback cannot distinguish signer populations.
 - Do not collect IP addresses, Bilibili identities, machine identifiers, or per-user update histories for migration telemetry.
+- Do not claim root-key rotation, root-epoch anti-rollback, or automatic root-compromise recovery in the immediate v0.4.7 → v0.4.11 → v0.4.12 rollout.
 
 ## Domain language
 
@@ -66,8 +67,8 @@ As of 2026-08-30:
 4. A same-legal-identity certificate renewal may change thumbprint, leaf serial number, validity dates, and issuer chain details without requiring a new policy.
 5. A different legal identity requires a higher publisher-policy epoch signed by the KMS rotation root.
 6. The application server, update API, COS publisher, and ordinary Release workflow have no KMS signing permission.
-7. Policy epochs and root epochs are monotonic. Published epoch objects are immutable and never replaced.
-8. A client never accepts a policy epoch or root epoch lower than the highest it has persisted.
+7. Publisher-policy epochs are monotonic. Published epoch objects are immutable and never replaced.
+8. A client never accepts a publisher-policy epoch lower than the highest it has persisted.
 9. RushRush is authorized only for exact bridge tag `v0.4.11` on `legacy-rushrush`; it can never sign stable artifacts.
 10. Existing Git tags and Releases are immutable. Recovery is forward-only through a higher version or higher policy epoch.
 
@@ -101,37 +102,34 @@ The wire document is a strict envelope:
 ```json
 {
   "signed": {
-    "schemaVersion": 1,
-    "epoch": 1,
-    "issuedAt": "2026-09-01T00:00:00Z",
+    "epoch": 2,
     "expiresAt": "2027-03-01T00:00:00Z",
-    "minimumClientVersion": "0.4.11",
     "publishers": [
       {
-        "id": "naisnet-cn-91210103ma7cj3c094",
+        "id": "naisnet-primary",
+        "role": "primary",
         "country": "CN",
         "organization": "NaisNet Technology Co., Ltd.",
         "organizationId": "91210103MA7CJ3C094",
-        "role": "stable",
-        "allowedChannel": "stable"
+        "allowedChannel": "stable",
+        "allowedTags": ["v0.4.12"],
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       {
         "id": "rushrush-bridge",
+        "role": "bridge",
         "country": "CN",
         "organization": "RushRush Network Technology Ltd",
         "organizationId": "91450900MADM3GLG5P",
-        "role": "bridge",
         "allowedChannel": "legacy-rushrush",
-        "allowedTags": ["v0.4.11"],
-        "validUntil": "2027-03-01T00:00:00Z"
+        "allowedTags": ["v0.4.11"]
       }
     ]
   },
   "signatures": [
     {
-      "keyId": "sha256-of-kms-spki",
-      "algorithm": "ECDSA_P256_SHA256",
-      "value": "base64-der-ecdsa-signature"
+      "algorithm": "ecdsa-p256-sha256",
+      "signature": "base64-der-ecdsa-signature"
     }
   ]
 }
@@ -147,6 +145,8 @@ Rules:
 - Verify locally with the embedded SPKI public key and Go `ecdsa.VerifyASN1`.
 - Bind authorization to publisher identity, artifact role, channel, tag, policy time window, and the update manifest's asset SHA-256.
 - Keep RushRush authorization exact and temporary. A syntactically valid RushRush policy entry for any other tag or channel is invalid.
+
+This schema is the authoritative client-compatible v1 wire contract for the immediate rollout. Fields such as `schemaVersion`, `issuedAt`, `minimumClientVersion`, signature `keyId`, or per-rule `validUntil` are not accepted by deployed v1 parsers; adding them requires a coordinated schema-v2 client, signer, publisher, cache, and bridge migration. The non-secret KMS key ID belongs in the separate audit document and readiness evidence, not in this signature object.
 
 ## Certificate identity verification
 
@@ -174,6 +174,8 @@ Publish every epoch to immutable keys:
 - COS: `trust/publisher/epochs/00000001.json`;
 - GitHub: immutable asset attached to a dedicated `publisher-policy-epoch-00000001` Release.
 
+Every immutable policy Release has one exact three-asset contract: `gift-panel-publisher-policy.json`, `gift-panel-publisher-policy.audit.json`, and `gift-panel-publisher-policy.commit.json`, all `application/json`, with bounded sizes and GitHub digests. The commit asset contains the exact canonical bundle-marker bytes. Bridge tooling maps only those remote names into the retained local `policy.json`, `audit.json`, and `commit.json` triplet and rejects missing, duplicate, renamed, or extra Release assets.
+
 Mutable discovery endpoints contain the complete signed policy, not an unsigned authorization:
 
 - domestic: `/api/v1/trust/publisher-policy` backed by `trust/publisher/latest.json`;
@@ -192,7 +194,7 @@ Clients:
 7. use an unexpired cached policy when both sources are unavailable;
 8. after policy expiry, continue accepting only already-authorized current legal identities and never a new legal identity.
 
-Root-key rotation uses separate strict root metadata. `rootEpoch+1` contains the new SPKI key and must be signed by the currently trusted root. A server response alone cannot replace the root.
+**Future protocol sketch — not implemented or approved for this rollout:** a later root-key-rotation design may define strict root metadata in which `rootEpoch+1` contains a new SPKI and is signed by the currently trusted root. That sketch has no current client wire format, persistence contract, recovery semantics, workflow, test matrix, or Task 14 gate. A server response alone can never replace the root. Until a separate design is approved and implemented, suspected root compromise requires stopping policy rotation and using a separately approved manual recovery path.
 
 ## Version-aware channel selection
 
@@ -248,6 +250,8 @@ It adds:
 - structured certificate identity matching;
 - version-aware update status diagnostics.
 
+The embedded epoch-1 document is bootstrap/enrollment policy only. Final release acceptance also requires a separately published higher authorization policy whose epoch advances the bootstrap and whose NaisNet stable rule binds the actual signed v0.4.12 EXE SHA-256 through the shared `AuthorizeAt` matcher. That exact-hash authorization policy remains external and is never required to be embedded in the already-built EXE.
+
 Gates:
 
 - real v0.4.9 and v0.4.10 to v0.4.12 updates succeed from domestic and GitHub;
@@ -265,7 +269,7 @@ v0.4.11 uses a separate Bridge Release workflow and is published only after the 
 - exact tag `v0.4.11`;
 - GitHub Release `latest=false`;
 - outer EXE signed by the reviewed RushRush certificate;
-- embedded application update publisher determined by KMS policy, with NaisNet stable authorized;
+- embedded bootstrap policy enrolls the root/client, while a separate higher immutable authorization policy binds the actual NaisNet-signed v0.4.12 EXE hash;
 - embedded FFmpeg remains the independently verified NaisNet-signed fixed component;
 - no normal stable pointer mutation;
 - immutable bridge asset mirrored only under the bridge release prefix;
@@ -286,7 +290,10 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 
 ### Ordinary Release workflow
 
-- resolves the active normal signer profile;
+- runs target checkout/build/test in an unprivileged job with no EVSign secret, selector, protected environment, or mutable publication capability and uploads a closed content-addressed unsigned handoff;
+- uses a fresh protected signing runner that first downloads and byte-verifies that handoff, then checks out/builds reviewed signing and inspection tools, executes no target code, signs/seals/verifies, and uploads the exact signed candidate;
+- publishes in a separate signer-free job;
+- resolves the active normal signer profile only on the protected signing runner;
 - requires actual outer signer legal identity authorized for `stable` by the current policy;
 - verifies embedded FFmpeg independently;
 - publishes GitHub latest and stable-compatible assets;
@@ -295,9 +302,12 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 ### Bridge Release workflow
 
 - hard-codes exact allowed tag `v0.4.11`;
+- runs target checkout/build/test in an unprivileged job and hands off only a closed content-addressed unsigned artifact plus public readiness data;
+- uses a fresh protected bridge-signing runner that downloads and verifies the handoff before obtaining reviewed tools, executes no target code, and signs/seals/verifies the exact bridge;
+- uses a separate bridge publisher with no EVSign credential;
 - resolves the reviewed RushRush artifact signer separately from the future NaisNet update trust;
 - verifies the final outer signature is RushRush;
-- verifies application-embedded policy root and baseline policy authorize future NaisNet stable updates;
+- verifies the embedded bootstrap policy independently from an external higher authorization policy that binds the actual v0.4.12 signed EXE hash and NaisNet signer;
 - creates a complete immutable GitHub Release with `latest=false`;
 - cannot write stable or mark itself latest;
 - produces reviewed sidecar metadata for the legacy mirror.
@@ -308,7 +318,7 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 - requires a reviewed complete candidate policy and expected previous epoch;
 - canonicalizes and validates before KMS signing;
 - uses only short-lived, separately scoped KMS authorization;
-- records non-secret KeyId, epoch, policy SHA-256, approver, KMS request ID, and CloudAudit event;
+- records non-secret audit `keyId`, epoch, policy SHA-256, approver, KMS request ID, and CloudAudit event;
 - publishes immutable epoch objects before advancing discovery pointers;
 - never signs an EXE or modifies a Release.
 
@@ -333,7 +343,7 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 : Use the other independently verified source or an unexpired cached policy. Never convert source failure into trust of server configuration.
 
 **KMS unavailable**
-: Ordinary same-identity NaisNet releases remain possible under the current unexpired policy. Cross-identity rotation and root rotation pause.
+: Ordinary same-identity NaisNet releases remain possible under the current unexpired policy. Cross-identity rotation pauses; root-key recovery is outside this rollout and follows a separately approved design or manual recovery.
 
 **KMS key compromise suspected**
 : Disable signing permission, preserve CloudAudit, stop publisher rotation, and issue no new identity authorization. Root recovery follows a separately approved root-rotation or manual-client recovery procedure.
@@ -362,7 +372,7 @@ Forbidden data:
 
 - strict policy JSON and deterministic canonical bytes;
 - KMS ECDSA signature golden vectors;
-- epoch and root-epoch monotonicity;
+- publisher-policy epoch monotonicity;
 - timestamp and expiry boundaries with a pinned clock;
 - structured X.509 legal identity extraction;
 - same-identity renewal with different leaf certificate;
