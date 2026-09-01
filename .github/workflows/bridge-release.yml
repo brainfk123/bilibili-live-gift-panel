@@ -59,6 +59,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Reviewed bridge artifact inspector build failed.' }
           go -C release-tools/updateapi build -o "$env:RUNNER_TEMP/trustpolicy.exe" ./cmd/trustpolicy
           if ($LASTEXITCODE -ne 0) { throw 'Reviewed trustpolicy verifier build failed.' }
+          go -C release-tools/updateapi build -o "$env:RUNNER_TEMP/release-closure.exe" ./cmd/release-closure
+          if ($LASTEXITCODE -ne 0) { throw 'Reviewed Release closure verifier build failed.' }
           Copy-Item -LiteralPath release-tools/scripts/sign-evsign.mjs -Destination "$env:RUNNER_TEMP/sign-evsign.mjs"
           Copy-Item -LiteralPath release-tools/scripts/bridge-release-inputs.mjs -Destination "$env:RUNNER_TEMP/bridge-release-inputs.mjs"
           Copy-Item -LiteralPath release-tools/scripts/bounded-github-asset.mjs -Destination "$env:RUNNER_TEMP/bounded-github-asset.mjs"
@@ -67,6 +69,7 @@ jobs:
           "BRIDGE_READINESS_SCRIPT_PATH=$env:RUNNER_TEMP/bridge-release-inputs.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BOUNDED_GITHUB_ASSET_SCRIPT_PATH=$env:RUNNER_TEMP/bounded-github-asset.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TRUSTPOLICY_INSPECTOR_PATH=$env:RUNNER_TEMP/trustpolicy.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_CLOSURE_PATH=$env:RUNNER_TEMP/release-closure.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TOOL_ROOT=$env:RUNNER_TEMP/release-tools" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BRIDGE_READINESS_ROOT=$env:RUNNER_TEMP/bridge-readiness" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -356,16 +359,16 @@ jobs:
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg component attestation verification failed.' }
           }
-          $componentManifest = Get-Content "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --sealed-output dist/bridge-ffmpeg-sealed
           if ($LASTEXITCODE -ne 0) { throw 'Fixed signed FFmpeg component verification failed.' }
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$componentDirectory/manifest.json").Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
-              (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/manifest.json).Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
-              (Get-FileHash -Algorithm SHA256 -LiteralPath "$componentDirectory/ffmpeg.zip").Hash.ToLowerInvariant() -cne (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/ffmpeg.zip).Hash.ToLowerInvariant()) {
+          $componentManifest = Get-Content 'dist/bridge-ffmpeg-sealed/manifest.json' -Raw | ConvertFrom-Json
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/bridge-ffmpeg-sealed/manifest.json').Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
+              (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/manifest.json).Hash.ToLowerInvariant() -cne (Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/bridge-ffmpeg-sealed/manifest.json').Hash.ToLowerInvariant() -or
+              (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/ffmpeg.zip).Hash.ToLowerInvariant() -cne (Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/bridge-ffmpeg-sealed/ffmpeg.zip').Hash.ToLowerInvariant()) {
             throw 'The downloaded fixed FFmpeg component differs from the exact checked-in component.'
           }
           New-Item -ItemType Directory -Force -Path dist/bridge-ffmpeg-expanded | Out-Null
-          Expand-Archive -LiteralPath goserver/ffmpeg/ffmpeg.zip -DestinationPath dist/bridge-ffmpeg-expanded
+          Expand-Archive -LiteralPath dist/bridge-ffmpeg-sealed/ffmpeg.zip -DestinationPath dist/bridge-ffmpeg-expanded
           $ffmpegPath = 'dist/bridge-ffmpeg-expanded/ffmpeg.exe'
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpegPath).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath $ffmpegPath).Length
@@ -397,22 +400,22 @@ jobs:
         env:
           BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          $componentManifest = Get-Content goserver/ffmpeg/manifest.json -Raw | ConvertFrom-Json
-          $manifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/manifest.json).Hash.ToLowerInvariant()
-          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/ffmpeg.zip).Hash.ToLowerInvariant()
-          $downloadArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/bridge-ffmpeg-component/ffmpeg.zip).Hash.ToLowerInvariant()
+          $componentManifest = Get-Content dist/bridge-ffmpeg-sealed/manifest.json -Raw | ConvertFrom-Json
+          $manifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/bridge-ffmpeg-sealed/manifest.json).Hash.ToLowerInvariant()
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/bridge-ffmpeg-sealed/ffmpeg.zip).Hash.ToLowerInvariant()
+          $installedArchiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/ffmpeg.zip).Hash.ToLowerInvariant()
           $ffmpegPath = 'dist/bridge-ffmpeg-expanded/ffmpeg.exe'
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpegPath).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath $ffmpegPath).Length
           if ($componentManifest.version -cne '9.0' -or $manifestHash -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
-              $archiveHash -cne $downloadArchiveHash -or $hash -cne $env:BRIDGE_FFMPEG_SHA256 -or $size -ne [int64]$env:BRIDGE_FFMPEG_SIZE -or
+              $archiveHash -cne $installedArchiveHash -or $hash -cne $env:BRIDGE_FFMPEG_SHA256 -or $size -ne [int64]$env:BRIDGE_FFMPEG_SIZE -or
               $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Fixed FFmpeg changed during bridge packaging.'
           }
           & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
           if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg structured Authenticode inspection failed after packaging.' }
           Copy-Item -LiteralPath $ffmpegPath -Destination dist/ffmpeg-windows-x64.exe
-          Copy-Item -LiteralPath goserver/ffmpeg/manifest.json -Destination dist/ffmpeg-component-manifest.json
+          Copy-Item -LiteralPath dist/bridge-ffmpeg-sealed/manifest.json -Destination dist/ffmpeg-component-manifest.json
 
       - name: Validate bridge signer profile
         shell: pwsh
@@ -434,7 +437,7 @@ jobs:
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_BRIDGE_PASSWORD }}
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
-          node $env:EVSIGN_SCRIPT_PATH --profile bridge dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
+          node $env:EVSIGN_SCRIPT_PATH --profile bridge dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
           if ($LASTEXITCODE -ne 0) { throw 'RushRush bridge outer signing failed.' }
 
       - name: Inspect final bound bridge artifact
@@ -444,8 +447,14 @@ jobs:
           BRIDGE_BOOTSTRAP_POLICY_SHA256: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}
           BRIDGE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}
         run: |
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.exe --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json" --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-tag v0.4.12 --stable-channel stable --ffmpeg-archive goserver/ffmpeg/ffmpeg.zip --ffmpeg-manifest goserver/ffmpeg/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
+          New-Item -ItemType Directory -Path dist/bridge-sealed-executable -ErrorAction Stop | Out-Null
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/bridge-sealed-executable --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json" --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-tag v0.4.12 --stable-channel stable --ffmpeg-archive dist/bridge-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/bridge-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
           if ($LASTEXITCODE -ne 0) { throw 'Final bound bridge artifact inspection failed.' }
+          $inspection = Get-Content -LiteralPath dist/bridge-artifact-inspection.json -Raw | ConvertFrom-Json
+          if ([string]$inspection.signedFileSha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$inspection.signedFileSize -le 0 -or [string]$inspection.peContentSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Bridge sealed artifact evidence is invalid.' }
+          $sealedPath = Join-Path 'dist/bridge-sealed-executable' "$($inspection.signedFileSha256).exe"
+          if (-not (Test-Path -LiteralPath $sealedPath -PathType Leaf) -or (Get-Item -LiteralPath $sealedPath).Length -ne [int64]$inspection.signedFileSize -or (Get-FileHash -Algorithm SHA256 -LiteralPath $sealedPath).Hash.ToLowerInvariant() -cne [string]$inspection.signedFileSha256) { throw 'Bridge sealed artifact bytes do not match final inspection.' }
+          "BRIDGE_SEALED_EXE_PATH=$sealedPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Prepare public bridge evidence
         shell: pwsh
@@ -470,8 +479,10 @@ jobs:
               $readiness.rootSpkiSha256 -cne $inspection.rootSpkiSha256 -or $readiness.policySha256 -cne $inspection.policySha256 -or [uint64]$readiness.policyEpoch -ne [uint64]$inspection.policyEpoch) {
             throw 'Final artifact inspection and reviewed readiness evidence are inconsistent.'
           }
-          $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
-          $exeSize = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
+          $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BRIDGE_SEALED_EXE_PATH).Hash.ToLowerInvariant()
+          $exeSize = (Get-Item -LiteralPath $env:BRIDGE_SEALED_EXE_PATH).Length
+          if ($exeHash -cne [string]$inspection.signedFileSha256 -or $exeSize -ne [int64]$inspection.signedFileSize) { throw 'Bridge sealed artifact changed after final inspection.' }
+          New-Item -ItemType HardLink -Path dist/gift-panel-windows-x64.exe -Target $env:BRIDGE_SEALED_EXE_PATH -ErrorAction Stop | Out-Null
           "$exeHash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
           [ordered]@{
             tag_name = $env:BRIDGE_TAG
@@ -501,6 +512,8 @@ jobs:
             outerIdentity = [ordered]@{ country = [string]$inspection.outerIdentity.country; organization = [string]$inspection.outerIdentity.organization; organizationId = [string]$inspection.outerIdentity.organizationId; authenticode = 'Valid' }
             ffmpegIdentity = [ordered]@{ country = [string]$inspection.ffmpegIdentity.country; organization = [string]$inspection.ffmpegIdentity.organization; organizationId = [string]$inspection.ffmpegIdentity.organizationId; authenticode = 'Valid'; version = [string]$inspection.ffmpegVersion }
             peContentSha256 = [string]$inspection.peContentSha256
+            signedFileSha256 = [string]$inspection.signedFileSha256
+            signedFileSize = [int64]$inspection.signedFileSize
             rootSpkiSha256 = [string]$inspection.rootSpkiSha256
             bootstrapPolicyEpoch = [uint64]$inspection.policyEpoch
             bootstrapPolicySha256 = [string]$inspection.policySha256
@@ -523,17 +536,17 @@ jobs:
             )
           } | ConvertTo-Json -Depth 8 | Set-Content -NoNewline -Encoding utf8 dist/bridge-release-evidence.json
           $checksumPaths = @(
-            'dist/gift-panel-windows-x64.exe',
-            'dist/gift-panel-windows-x64.exe.sha256',
-            'dist/gift-panel-update.json',
-            'dist/ffmpeg-windows-x64.exe',
-            'dist/gift-panel-changelog.json',
-            'dist/ffmpeg-component-manifest.json',
-            'dist/bridge-release-evidence.json'
+            @($env:BRIDGE_SEALED_EXE_PATH, 'gift-panel-windows-x64.exe'),
+            @('dist/gift-panel-windows-x64.exe.sha256', 'gift-panel-windows-x64.exe.sha256'),
+            @('dist/gift-panel-update.json', 'gift-panel-update.json'),
+            @('dist/ffmpeg-windows-x64.exe', 'ffmpeg-windows-x64.exe'),
+            @('dist/gift-panel-changelog.json', 'gift-panel-changelog.json'),
+            @('dist/ffmpeg-component-manifest.json', 'ffmpeg-component-manifest.json'),
+            @('dist/bridge-release-evidence.json', 'bridge-release-evidence.json')
           )
-          $lines = foreach ($path in $checksumPaths) {
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-            "$hash  $([IO.Path]::GetFileName($path))"
+          $lines = foreach ($entry in $checksumPaths) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry[0]).Hash.ToLowerInvariant()
+            "$hash  $($entry[1])"
           }
           $lines -join "`n" | Set-Content -NoNewline -Encoding ascii dist/SHA256SUMS.txt
           $required = @(
@@ -545,7 +558,7 @@ jobs:
           $releaseAssets = foreach ($entry in $required) {
             $name = [string]$entry[0]
             $id = [int]$entry[1]
-            $path = "dist/$name"
+            $path = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_SEALED_EXE_PATH } else { "dist/$name" }
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
             [ordered]@{
               url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$id"
@@ -564,13 +577,13 @@ jobs:
           } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/local-bridge-release.json
 
       - name: Validate local bridge mirror closure
-        run: go -C updateapi run ./cmd/release-closure --metadata ../dist/local-bridge-release.json --assets ../dist --tag v0.4.11
+        run: '& $env:RELEASE_CLOSURE_PATH --metadata dist/local-bridge-release.json --assets dist --tag v0.4.11'
 
       - name: Attest bridge release assets
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
-            dist/gift-panel-windows-x64.exe
+            dist/bridge-sealed-executable/*.exe
             dist/ffmpeg-windows-x64.exe
             dist/ffmpeg-component-manifest.json
             dist/bridge-release-evidence.json
@@ -604,7 +617,7 @@ jobs:
         run: |
           gh release create $env:BRIDGE_TAG --draft --verify-tag --title $env:BRIDGE_TAG --latest=false
           if ($LASTEXITCODE -ne 0) { throw 'Bridge GitHub Release draft creation failed.' }
-          gh release upload $env:BRIDGE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/ffmpeg-windows-x64.exe dist/gift-panel-changelog.json dist/ffmpeg-component-manifest.json dist/bridge-release-evidence.json dist/SHA256SUMS.txt
+          gh release upload $env:BRIDGE_TAG "$env:BRIDGE_SEALED_EXE_PATH#gift-panel-windows-x64.exe" dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/ffmpeg-windows-x64.exe dist/gift-panel-changelog.json dist/ffmpeg-component-manifest.json dist/bridge-release-evidence.json dist/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw 'Bridge asset upload failed; the draft remains unpublished.' }
 
       - name: Read back and verify bridge draft
@@ -627,7 +640,7 @@ jobs:
           foreach ($name in $required) {
             gh release download $env:BRIDGE_TAG --dir dist/bridge-draft-readback --pattern $name
             if ($LASTEXITCODE -ne 0) { throw 'Bridge draft asset readback failed.' }
-            $source = "dist/$name"
+            $source = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_SEALED_EXE_PATH } else { "dist/$name" }
             $readback = "dist/bridge-draft-readback/$name"
             $asset = @($release.assets | Where-Object { $_.name -ceq $name })[0]
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()
@@ -691,7 +704,7 @@ jobs:
             if (@($names | Where-Object { $_ -ceq $name }).Count -ne 1) { throw 'Published bridge asset names changed.' }
             gh release download $env:BRIDGE_TAG --dir dist/bridge-published-readback --pattern $name
             if ($LASTEXITCODE -ne 0) { throw 'Published bridge asset readback failed.' }
-            $source = "dist/$name"
+            $source = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_SEALED_EXE_PATH } else { "dist/$name" }
             $readback = "dist/bridge-published-readback/$name"
             $asset = @($release.assets | Where-Object { $_.name -ceq $name })[0]
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()

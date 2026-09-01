@@ -301,7 +301,7 @@ jobs:
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component attestation verification failed for $($asset.Name)" }
           }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --manifest-output dist/standalone-component-manifest.json
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --sealed-output dist/repair-ffmpeg-sealed --manifest-output dist/standalone-component-manifest.json
           if ($LASTEXITCODE -ne 0) { throw "Repair signed FFmpeg component verification failed" }
 
       - name: Set up MSYS2 host environment
@@ -367,7 +367,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" prepare --kind current --tool-root $env:RELEASE_TOOL_ROOT --output dist/ffmpeg-component-publish
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" prepare --kind current --tool-root $env:RELEASE_TOOL_ROOT --output dist/ffmpeg-component-publish --sealed-output dist/component-source-sealed
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component asset packaging failed" }
 
       - name: Attest signed FFmpeg component
@@ -441,14 +441,14 @@ jobs:
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw "FFmpeg component attestation verification failed for $($asset.Name)" }
           }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --sealed-output dist/release-ffmpeg-sealed
           if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component verification or installation failed" }
           New-Item -ItemType Directory -Force -Path dist/ffmpeg-source | Out-Null
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz.asc" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-build-config.txt" -Destination dist/ffmpeg-build-config.txt
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-component-gate.txt" -Destination dist/ffmpeg-component-gate.txt
-          if (Test-Path dist/gift-clip-test-tools) { Remove-Item -LiteralPath dist/gift-clip-test-tools -Recurse -Force }
+          if (Test-Path -LiteralPath dist/gift-clip-test-tools) { throw 'Gift clip test-tool destination already exists.' }
           Expand-Archive -LiteralPath "$componentDirectory/gift-clip-test-tools.zip" -DestinationPath dist/gift-clip-test-tools
           node "$env:RELEASE_TOOL_ROOT/scripts/gift-clip-test-tools.mjs" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Cached gift clip test tools failed verification" }
@@ -457,7 +457,7 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
-          $componentDirectory = 'goserver/ffmpeg'
+          $componentDirectory = 'dist/release-ffmpeg-sealed'
           $standaloneDirectory = 'dist/standalone-ffmpeg'
           New-Item -ItemType Directory -Force -Path $standaloneDirectory | Out-Null
           Expand-Archive -LiteralPath "$componentDirectory/ffmpeg.zip" -DestinationPath $standaloneDirectory
@@ -499,12 +499,8 @@ jobs:
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
-          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
+          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
           if ($LASTEXITCODE -ne 0) { throw 'Stable outer signing failed.' }
-          $version = $env:RELEASE_TAG.Substring(1)
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.exe --version $version --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive goserver/ffmpeg/ffmpeg.zip --ffmpeg-manifest goserver/ffmpeg/manifest.json
-          if ($LASTEXITCODE -ne 0) { throw 'Stable outer bound artifact inspection failed.' }
-          Write-Host 'Verified outer application Authenticode signature.'
 
       - name: Verify deterministic gift clip exports from signed package chain
         if: env.RELEASE_EXISTS != 'true'
@@ -523,12 +519,29 @@ jobs:
             throw "Gift clip browser E2E failed with exit code $LASTEXITCODE"
           }
 
+      - name: Seal final stable executable
+        if: env.RELEASE_EXISTS != 'true'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          New-Item -ItemType Directory -Path dist/stable-sealed-executable -ErrorAction Stop | Out-Null
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/stable-sealed-executable --version $version --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-artifact-inspection.json
+          if ($LASTEXITCODE -ne 0) { throw 'Stable outer bound artifact inspection failed.' }
+          $inspection = Get-Content -LiteralPath dist/stable-artifact-inspection.json -Raw | ConvertFrom-Json
+          if ([string]$inspection.signedFileSha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$inspection.signedFileSize -le 0 -or [string]$inspection.peContentSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Stable sealed artifact evidence is invalid.' }
+          $sealedPath = Join-Path 'dist/stable-sealed-executable' "$($inspection.signedFileSha256).exe"
+          if (-not (Test-Path -LiteralPath $sealedPath -PathType Leaf) -or (Get-Item -LiteralPath $sealedPath).Length -ne [int64]$inspection.signedFileSize -or (Get-FileHash -Algorithm SHA256 -LiteralPath $sealedPath).Hash.ToLowerInvariant() -cne [string]$inspection.signedFileSha256) { throw 'Stable sealed artifact bytes do not match final inspection.' }
+          "STABLE_SEALED_EXE_PATH=$sealedPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'Verified and sealed outer application Authenticode signature.'
+
       - name: Prepare release assets
         if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
         run: |
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
-          $size = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
+          $inspection = Get-Content -LiteralPath dist/stable-artifact-inspection.json -Raw | ConvertFrom-Json
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:STABLE_SEALED_EXE_PATH).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $env:STABLE_SEALED_EXE_PATH).Length
+          if ($hash -cne [string]$inspection.signedFileSha256 -or $size -ne [int64]$inspection.signedFileSize) { throw 'Stable sealed artifact changed after final inspection.' }
           "$hash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
           @{
             tag_name = $env:RELEASE_TAG
@@ -593,7 +606,7 @@ jobs:
         if: env.RELEASE_EXISTS != 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: dist/gift-panel-windows-x64.exe
+          subject-path: dist/stable-sealed-executable/*.exe
 
       - name: Create GitHub release
         if: env.RELEASE_EXISTS != 'true'
@@ -603,7 +616,7 @@ jobs:
         run: |
           gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release draft creation failed" }
-          gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/ffmpeg-source/ffmpeg-9.0.tar.xz dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-build-config.txt dist/ffmpeg-component-gate.txt third_party/ffmpeg/toolchain-lock.json third_party/ffmpeg/NOTICE.md third_party/ffmpeg/COPYING.LGPLv2.1
+          gh release upload $env:RELEASE_TAG "$env:STABLE_SEALED_EXE_PATH#gift-panel-windows-x64.exe" dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/ffmpeg-source/ffmpeg-9.0.tar.xz dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-build-config.txt dist/ffmpeg-component-gate.txt third_party/ffmpeg/toolchain-lock.json third_party/ffmpeg/NOTICE.md third_party/ffmpeg/COPYING.LGPLv2.1
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release asset upload failed; draft retained for manual recovery" }
           if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
             gh release upload $env:RELEASE_TAG dist/ffmpeg-windows-x64.exe dist/ffmpeg-windows-x64.exe.sha256

@@ -202,13 +202,17 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
     const executable = Buffer.from('rushrush-signed-executable');
     const ffmpeg = Buffer.from('naisnet-signed-ffmpeg');
     const componentManifest = Buffer.from('{"version":"9.0"}');
+	const sealedExecutableDirectory = join(dist, 'bridge-sealed-executable');
+	mkdirSync(sealedExecutableDirectory);
+	const executableHash = createHash('sha256').update(executable).digest('hex');
+	const sealedExecutablePath = join(sealedExecutableDirectory, `${executableHash}.exe`);
     const ffmpegHash = createHash('sha256').update(ffmpeg).digest('hex');
     const manifestHash = createHash('sha256').update(componentManifest).digest('hex');
-    writeFileSync(join(dist, 'gift-panel-windows-x64.exe'), executable);
+	writeFileSync(sealedExecutablePath, executable);
     writeFileSync(join(dist, 'ffmpeg-windows-x64.exe'), ffmpeg);
     writeFileSync(join(dist, 'ffmpeg-component-manifest.json'), componentManifest);
     writeFileSync(join(dist, 'bridge-artifact-inspection.json'), JSON.stringify({
-      version: '0.4.11', tag: 'v0.4.11', commit: 'a'.repeat(40), peContentSha256: 'd'.repeat(64),
+	  version: '0.4.11', tag: 'v0.4.11', commit: 'a'.repeat(40), peContentSha256: 'd'.repeat(64), signedFileSha256: executableHash, signedFileSize: executable.length,
       rootSpkiSha256: 'b'.repeat(64), policySha256: 'c'.repeat(64), policyEpoch: 1,
       outerIdentity: { country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P' },
       ffmpegVersion: '9.0', ffmpegSha256: ffmpegHash, ffmpegSize: ffmpeg.length,
@@ -237,6 +241,7 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
         BRIDGE_FFMPEG_SHA256: expectedFFmpegHash ?? ffmpegHash,
         BRIDGE_FFMPEG_SIZE: String(ffmpeg.length),
         BRIDGE_READINESS_ROOT: readinessRoot,
+		BRIDGE_SEALED_EXE_PATH: sealedExecutablePath,
       },
       input: `$ErrorActionPreference = 'Stop'\n${evidence}\n`,
       timeout: 30_000,
@@ -444,6 +449,7 @@ describe('release workflow supply-chain contract', () => {
     const packageInner = stepIndex(steps, 'Package and verify signed FFmpeg payload');
     const buildOuter = stepIndex(steps, 'Build release executable');
     const signOuter = stepIndex(steps, 'Prepare and sign release executable');
+	const sealOuter = stepIndex(steps, 'Seal final stable executable');
     const e2e = stepIndex(steps, 'Verify deterministic gift clip exports from signed package chain');
 
     expect(buildFrontend).toBeLessThan(prepareAssets);
@@ -451,6 +457,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[prepareAssets]?.run).toBe('npm run prepare:go-assets');
     expect([setup, build, signInner, packageInner, buildOuter, signOuter, e2e])
       .toEqual([...new Set([setup, build, signInner, packageInner, buildOuter, signOuter, e2e])].sort((a, b) => a - b));
+	expect(e2e).toBeLessThan(sealOuter);
     expect(steps[setup]?.id).toBe('msys2');
     expect(steps[build]?.run).toContain('${{ steps.msys2.outputs.msys2-location }}');
     expect(steps[build]?.run).toContain('npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain');
@@ -525,7 +532,7 @@ describe('release workflow supply-chain contract', () => {
     expect(createRelease).toBeLessThan(redownloadStandalone);
     expect(redownloadStandalone).toBeLessThan(validatePublished);
     expect(steps[prepareStandalone]?.if).toBe("env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
-    expect(steps[prepareStandalone]?.run).toContain("$componentDirectory = 'goserver/ffmpeg'");
+	expect(steps[prepareStandalone]?.run).toContain("$componentDirectory = 'dist/release-ffmpeg-sealed'");
     expect(steps[prepareStandalone]?.run).toContain('$componentDirectory/ffmpeg.zip');
     expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe');
     expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe.sha256');
@@ -602,16 +609,19 @@ describe('release workflow supply-chain contract', () => {
     const { steps } = releaseWorkflow();
     const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
     const signOuter = stepIndex(steps, 'Prepare and sign release executable');
+	const sealOuter = stepIndex(steps, 'Seal final stable executable');
     const githubRelease = stepIndex(steps, 'Create GitHub release');
 
     expect(steps[testUpdateApi]?.run)
       .toBe('go -C updateapi test ./... -race -count=1');
     expect(testUpdateApi).toBeLessThan(githubRelease);
     expect(signOuter).toBeLessThan(githubRelease);
+	expect(signOuter).toBeLessThan(sealOuter);
+	expect(sealOuter).toBeLessThan(githubRelease);
     expect(steps[signOuter]?.env).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
-    expect(steps[signOuter]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH verify-static');
-    expect(steps[signOuter]?.run).toContain('--organization-id 91210103MA7CJ3C094');
-    expect(steps[signOuter]?.run).not.toContain('SignerCertificate.Subject');
+	expect(steps[sealOuter]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH verify-static');
+	expect(steps[sealOuter]?.run).toContain('--organization-id 91210103MA7CJ3C094');
+	expect(steps[sealOuter]?.run).not.toContain('SignerCertificate.Subject');
   });
 
   it('builds domestic update identity into the signed executable and ends at a validated GitHub Release', () => {
@@ -704,7 +714,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[create]?.if).toBe("env.RELEASE_EXISTS != 'true'");
     expect(steps[create]?.run).not.toContain('--clobber');
     expect(steps[create]?.run).toContain(
-      'gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256',
+	  'gh release upload $env:RELEASE_TAG "$env:STABLE_SEALED_EXE_PATH#gift-panel-windows-x64.exe" dist/gift-panel-windows-x64.exe.sha256',
     );
     expect(steps[create]?.run).toContain('dist/gift-panel-update.json');
     expect(steps[create]?.run).toContain('dist/gift-panel-changelog.json');
@@ -863,6 +873,75 @@ describe('publisher rotation workflow contract', () => {
       .filter((uses): uses is string => typeof uses === 'string');
     expect(actions.length).toBeGreaterThan(0);
     for (const uses of actions) expect(uses).toMatch(/^[^@\s]+@[0-9a-f]{40}$/);
+  });
+
+  it('derives stable and bridge publication only from content-addressed sealed executables', () => {
+	const stable = releaseWorkflow().steps;
+	const stableSign = stable[stepIndex(stable, 'Prepare and sign release executable')];
+	const stableInspect = stable[stepIndex(stable, 'Seal final stable executable')];
+	const stableAssets = stable[stepIndex(stable, 'Prepare release assets')];
+	const stableAttest = stable[stepIndex(stable, 'Attest executable provenance')];
+	const stablePublish = stable[stepIndex(stable, 'Create GitHub release')];
+	expect(stableSign?.run).toContain('gift-panel-windows-x64.signed-candidate.exe');
+	expect(stableInspect?.run).toContain('--sealed-directory dist/stable-sealed-executable');
+	expect(stableInspect?.run).toContain('signedFileSha256');
+	expect(stableInspect?.run).toContain('STABLE_SEALED_EXE_PATH');
+	expect(stableAssets?.run).toContain('$env:STABLE_SEALED_EXE_PATH');
+	expect(stableAssets?.run).not.toContain('dist/gift-panel-windows-x64.signed-candidate.exe');
+	expect(String(stableAttest?.with?.['subject-path'])).toContain('dist/stable-sealed-executable/*.exe');
+	expect(stablePublish?.run).toContain('$env:STABLE_SEALED_EXE_PATH#gift-panel-windows-x64.exe');
+	expect(stablePublish?.run).not.toMatch(/(?:Get-FileHash|Get-Item|upload).*signed-candidate/);
+
+	const bridge = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+	const bridgeSign = bridge[stepIndex(bridge, 'Sign RushRush outer executable')];
+	const bridgeInspect = bridge[stepIndex(bridge, 'Inspect final bound bridge artifact')];
+	const bridgeEvidence = bridge[stepIndex(bridge, 'Prepare public bridge evidence')];
+	const bridgeAttest = bridge[stepIndex(bridge, 'Attest bridge release assets')];
+	const bridgePublish = bridge[stepIndex(bridge, 'Create immutable-shaped bridge draft')];
+	expect(bridgeSign?.run).toContain('gift-panel-windows-x64.signed-candidate.exe');
+	expect(bridgeInspect?.run).toContain('--sealed-directory dist/bridge-sealed-executable');
+	expect(bridgeInspect?.run).toContain('BRIDGE_SEALED_EXE_PATH');
+	expect(bridgeEvidence?.run).toContain('$env:BRIDGE_SEALED_EXE_PATH');
+	expect(bridgeEvidence?.run).not.toContain('dist/gift-panel-windows-x64.signed-candidate.exe');
+	expect(String(bridgeAttest?.with?.['subject-path'])).toContain('dist/bridge-sealed-executable/*.exe');
+	expect(bridgePublish?.run).toContain('$env:BRIDGE_SEALED_EXE_PATH#gift-panel-windows-x64.exe');
+  });
+
+  it('executes no target code after final sealing before either publication', () => {
+	const stable = releaseWorkflow().steps;
+	const stableSeal = stepIndex(stable, 'Seal final stable executable');
+	const stablePublish = stepIndex(stable, 'Create GitHub release');
+	for (const step of stable.slice(stableSeal + 1, stablePublish)) {
+	  expect(step.run ?? '', step.name).not.toMatch(/(?:^|\n)\s*(?:npm|node|go\s+-C\s+(?!release-tools))\b/i);
+	}
+
+	const bridge = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+	const bridgeSeal = stepIndex(bridge, 'Inspect final bound bridge artifact');
+	const bridgePublish = stepIndex(bridge, 'Create immutable-shaped bridge draft');
+	for (const step of bridge.slice(bridgeSeal + 1, bridgePublish)) {
+	  expect(step.run ?? '', step.name).not.toMatch(/go\s+-C\s+updateapi|(?:^|\n)\s*(?:npm|node)\b/i);
+	}
+	expect(bridge[stepIndex(bridge, 'Validate local bridge mirror closure')]?.run).toContain('$env:RELEASE_CLOSURE_PATH');
+  });
+
+  it('routes both workflows through the Go-sealed FFmpeg closure before install or output', () => {
+	const stable = releaseWorkflow().steps;
+	const repair = stable[stepIndex(stable, 'Verify standalone FFmpeg repair component')];
+	const install = stable[stepIndex(stable, 'Verify and install signed FFmpeg component')];
+	expect(repair?.run).toContain('--sealed-output dist/repair-ffmpeg-sealed');
+	expect(repair?.run).toContain('--manifest-output dist/standalone-component-manifest.json');
+	expect(install?.run).toContain('install');
+	expect(install?.run).toContain('--sealed-output dist/release-ffmpeg-sealed');
+	expect(install?.run).not.toMatch(/Remove-Item[^\n]*-Recurse/i);
+
+	const bridge = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+	const verify = bridge[stepIndex(bridge, 'Verify NaisNet FFmpeg component before packaging')];
+	const after = bridge[stepIndex(bridge, 'Verify NaisNet FFmpeg after packaging')];
+	expect(verify?.run).toContain('install --kind fixed');
+	expect(verify?.run).toContain('--sealed-output dist/bridge-ffmpeg-sealed');
+	expect(verify?.run).not.toContain('Get-Content "$componentDirectory/manifest.json"');
+	expect(after?.run).toContain('dist/bridge-ffmpeg-sealed/ffmpeg.zip');
+	expect(after?.run).toContain('dist/bridge-ffmpeg-sealed/manifest.json');
   });
 
   it('has one manual trigger with explicit epoch transition and pointer choice', () => {
@@ -1105,7 +1184,7 @@ describe('exact RushRush bridge release workflow contract', () => {
       EVSIGN_PASSWORD: '${{ secrets.EVSIGN_BRIDGE_PASSWORD }}',
     });
     expect(sign?.run).toContain('$env:EVSIGN_SCRIPT_PATH --profile bridge');
-    expect(sign?.run).toContain('dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe');
+	expect(sign?.run).toContain('dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe');
     expect(sign?.run).not.toContain('Get-AuthenticodeSignature');
     for (const step of steps) {
       expect(Object.values(step.env ?? {})).not.toContain('${{ secrets.EVSIGN_KEY }}');
@@ -1125,7 +1204,7 @@ describe('exact RushRush bridge release workflow contract', () => {
     expect(verifyBefore?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
     expect(verifyBefore?.run).toContain('verify-metadata --tool-root');
     expect(verifyBefore?.run).toContain('--metadata dist/bridge-ffmpeg-component-release.json');
-    expect(verifyBefore?.run).toContain('verify --kind fixed --tool-root');
+	expect(verifyBefore?.run).toContain('install --kind fixed --tool-root');
     expect(verifyBefore?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(verifyBefore?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode');
     expect(verifyBefore?.run).toContain('--organization-id 91210103MA7CJ3C094');
@@ -1192,7 +1271,7 @@ describe('exact RushRush bridge release workflow contract', () => {
     expect(steps[evidence]?.run).toContain('gift-panel-windows-x64.exe.sha256');
     expect(steps[evidence]?.run).toContain('gift-panel-update.json');
     expect(steps[evidence]?.run).toContain('local-bridge-release.json');
-    expect(steps[mirrorClosure]?.run).toContain('go -C updateapi run ./cmd/release-closure');
+	expect(steps[mirrorClosure]?.run).toContain('$env:RELEASE_CLOSURE_PATH');
     expect(steps[mirrorClosure]?.run).toContain('--tag v0.4.11');
   });
 
@@ -1216,6 +1295,8 @@ describe('exact RushRush bridge release workflow contract', () => {
       bootstrapPolicyEpoch: 1,
       bootstrapPolicySha256: 'c'.repeat(64),
       peContentSha256: 'd'.repeat(64),
+	  signedFileSha256: createHash('sha256').update(Buffer.from('rushrush-signed-executable')).digest('hex'),
+	  signedFileSize: Buffer.from('rushrush-signed-executable').length,
       stableReleaseId: 412,
       stableArtifactSha256:'1'.repeat(64),
       observationEvidenceSha256: 'e'.repeat(64),

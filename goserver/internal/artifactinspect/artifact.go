@@ -26,6 +26,7 @@ var (
 
 type VerifyArtifactOptions struct {
 	UnsignedPath, SignedPath              string
+	SealedDirectory                       string
 	Version, Tag, Commit                  string
 	RootSPKIPath, ExpectedRootSHA256      string
 	PolicyPath, ExpectedPolicySHA256      string
@@ -38,22 +39,25 @@ type VerifyArtifactOptions struct {
 }
 
 type ArtifactEvidence struct {
-	Version         string                `json:"version"`
-	Tag             string                `json:"tag"`
-	Commit          string                `json:"commit"`
-	PEContentSHA256 string                `json:"peContentSha256"`
-	RootSPKISHA256  string                `json:"rootSpkiSha256"`
-	PolicySHA256    string                `json:"policySha256"`
-	PolicyEpoch     uint64                `json:"policyEpoch"`
-	OuterIdentity   certidentity.Identity `json:"outerIdentity"`
-	FFmpegVersion   string                `json:"ffmpegVersion"`
-	FFmpegSHA256    string                `json:"ffmpegSha256"`
-	FFmpegSize      int64                 `json:"ffmpegSize"`
-	FFmpegIdentity  certidentity.Identity `json:"ffmpegIdentity"`
+	Version          string                `json:"version"`
+	Tag              string                `json:"tag"`
+	Commit           string                `json:"commit"`
+	PEContentSHA256  string                `json:"peContentSha256"`
+	SignedFileSHA256 string                `json:"signedFileSha256"`
+	SignedFileSize   int64                 `json:"signedFileSize"`
+	RootSPKISHA256   string                `json:"rootSpkiSha256"`
+	PolicySHA256     string                `json:"policySha256"`
+	PolicyEpoch      uint64                `json:"policyEpoch"`
+	OuterIdentity    certidentity.Identity `json:"outerIdentity"`
+	FFmpegVersion    string                `json:"ffmpegVersion"`
+	FFmpegSHA256     string                `json:"ffmpegSha256"`
+	FFmpegSize       int64                 `json:"ffmpegSize"`
+	FFmpegIdentity   certidentity.Identity `json:"ffmpegIdentity"`
 }
 
 type VerifyStaticOptions struct {
 	UnsignedPath, SignedPath              string
+	SealedDirectory                       string
 	Version, Commit                       string
 	ExpectedIdentity                      certidentity.Identity
 	FFmpegArchivePath, FFmpegManifestPath string
@@ -150,7 +154,11 @@ func VerifyStaticArtifact(options VerifyStaticOptions) (ArtifactEvidence, error)
 	if err := ffmpegSnapshot.Revalidate(); err != nil {
 		return ArtifactEvidence{}, errors.New("static FFmpeg snapshot changed during Authenticode inspection")
 	}
-	return ArtifactEvidence{Version: options.Version, Commit: options.Commit, PEContentSHA256: signedDigest, OuterIdentity: outer, FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: inner}, nil
+	sealed, err := signedSnapshot.SealContentAddressed(options.SealedDirectory, ".exe", nil)
+	if err != nil {
+		return ArtifactEvidence{}, errors.New("verified static executable could not be sealed")
+	}
+	return ArtifactEvidence{Version: options.Version, Commit: options.Commit, PEContentSHA256: signedDigest, SignedFileSHA256: sealed.SHA256, SignedFileSize: sealed.Size, OuterIdentity: outer, FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: inner}, nil
 }
 
 func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error) {
@@ -250,12 +258,16 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if err := ffmpegSnapshot.Revalidate(); err != nil {
 		return ArtifactEvidence{}, errors.New("embedded FFmpeg snapshot changed during Authenticode inspection")
 	}
+	sealed, err := signedSnapshot.SealContentAddressed(options.SealedDirectory, ".exe", nil)
+	if err != nil {
+		return ArtifactEvidence{}, errors.New("verified bridge executable could not be sealed")
+	}
 
 	return ArtifactEvidence{
 		Version: options.Version, Tag: options.Tag, Commit: options.Commit,
-		PEContentSHA256: signedDigest,
-		RootSPKISHA256:  options.ExpectedRootSHA256,
-		PolicySHA256:    options.ExpectedPolicySHA256, PolicyEpoch: stableEvidence.PolicyEpoch,
+		PEContentSHA256: signedDigest, SignedFileSHA256: sealed.SHA256, SignedFileSize: sealed.Size,
+		RootSPKISHA256: options.ExpectedRootSHA256,
+		PolicySHA256:   options.ExpectedPolicySHA256, PolicyEpoch: stableEvidence.PolicyEpoch,
 		OuterIdentity: outerIdentity,
 		FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: ffmpegIdentity,
 	}, nil

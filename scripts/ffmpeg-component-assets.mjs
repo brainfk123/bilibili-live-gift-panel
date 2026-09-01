@@ -1,11 +1,10 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { FFMPEG_FIXED_COMPONENT_SIGNER_SUBJECT, FFMPEG_SIGNED_COMPONENT_SIGNER, FFMPEG_SOURCE_SIGNATURE_SHA256, ffmpegComponentIdentity, loadFFmpegPolicy, reviewedFixedFFmpegComponentIdentity, reviewedSignedFFmpegComponentIdentity } from './ffmpeg-policy.mjs';
-import { publishPairTransactionally } from './package-ffmpeg.mjs';
 
 export const REQUIRED_COMPONENT_ASSETS = Object.freeze([
   'ffmpeg.zip',
@@ -118,28 +117,35 @@ export function verifyPinnedSourceAssets(archive, signature, policy) {
   if (sha256(signature) !== policy.sourceSignatureSha256) throw new Error('FFmpeg detached signature does not match the pinned SHA-256.');
 }
 
-export async function prepareComponentAssets({ projectRoot = root, toolRoot = defaultToolRoot, outputDirectory, expectedSigner = FFMPEG_SIGNED_COMPONENT_SIGNER }) {
+export async function prepareComponentAssets({ projectRoot = root, toolRoot = defaultToolRoot, outputDirectory, sealedOutputDirectory, expectedSigner = FFMPEG_SIGNED_COMPONENT_SIGNER, sealFFmpegClosure }) {
   requireReviewedSigner(expectedSigner);
   const sources = componentSourcePaths(projectRoot);
   assertContainedDirectory(resolve(projectRoot, 'dist'), outputDirectory, 'FFmpeg component output');
-  const manifestPath = sources.get('manifest.json');
-  const manifestInfo = await lstat(manifestPath);
-  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) throw new Error('FFmpeg component source manifest.json is not a regular file.');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(toolRoot), expectedSigner);
-  verifyComponentMetadata(manifest, identity, expectedSigner);
-  await rm(outputDirectory, { recursive: true, force: true });
-  await mkdir(outputDirectory, { recursive: true });
-  const files = new Map();
-  for (const name of REQUIRED_COMPONENT_ASSETS) {
-    const source = sources.get(name);
-    const info = await lstat(source);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`FFmpeg component source ${name} is not a regular file.`);
-    const bytes = name === 'ffmpeg-component-gate.txt' ? Buffer.from(manifest.component_gate, 'utf8') : await readFile(source);
-    files.set(name, bytes);
+  const sealed = await createSealedFFmpegClosure({ projectRoot, archivePath: sources.get('ffmpeg.zip'), manifestPath: sources.get('manifest.json'), sealedOutputDirectory, sealFFmpegClosure });
+  try {
+    let manifest;
+    try { manifest = JSON.parse(sealed.files.get('manifest.json').toString('utf8')); }
+    catch { throw new Error('FFmpeg component source manifest.json is malformed.'); }
+    const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(toolRoot), expectedSigner);
+    verifyComponentMetadata(manifest, identity, expectedSigner);
+    await createExclusiveDirectory(outputDirectory, 'FFmpeg component output');
+    const files = new Map();
+    for (const name of REQUIRED_COMPONENT_ASSETS) {
+      if (name === 'ffmpeg.zip' || name === 'manifest.json') {
+        files.set(name, sealed.files.get(name));
+        continue;
+      }
+      const source = sources.get(name);
+      const info = await lstat(source);
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error(`FFmpeg component source ${name} is not a regular file.`);
+      const bytes = name === 'ffmpeg-component-gate.txt' ? Buffer.from(manifest.component_gate, 'utf8') : await readFile(source);
+      files.set(name, bytes);
+    }
+    await writePreparedComponentAssets(outputDirectory, files);
+    return identity;
+  } finally {
+    await sealed.cleanup();
   }
-  await writePreparedComponentAssets(outputDirectory, files);
-  return identity;
 }
 
 export async function verifyComponentAssets({
@@ -147,27 +153,42 @@ export async function verifyComponentAssets({
   toolRoot = defaultToolRoot,
   inputDirectory,
   manifestOutputPath,
+	sealedOutputDirectory,
   expectedSigner = FFMPEG_SIGNED_COMPONENT_SIGNER,
   verifyPayload,
   loadPolicy = loadFFmpegPolicy,
   sourceSignatureSHA256 = FFMPEG_SOURCE_SIGNATURE_SHA256,
+	sealFFmpegClosure,
 }) {
-  const verified = await verifyComponentSnapshot({ projectRoot, toolRoot, inputDirectory, expectedSigner, verifyPayload, loadPolicy, sourceSignatureSHA256 });
-  if (manifestOutputPath) await writeVerifiedManifest(projectRoot, manifestOutputPath, verified.files.get('manifest.json'));
-  return verified.identity;
+  const verified = await verifyComponentSnapshot({ projectRoot, toolRoot, inputDirectory, sealedOutputDirectory, expectedSigner, verifyPayload, loadPolicy, sourceSignatureSHA256, sealFFmpegClosure });
+  try {
+    if (manifestOutputPath) await writeVerifiedManifest(projectRoot, manifestOutputPath, verified.files.get('manifest.json'));
+    return verified.identity;
+  } finally {
+    await verified.cleanup();
+  }
 }
 
 async function verifyComponentSnapshot({
   projectRoot,
   toolRoot,
   inputDirectory,
+	sealedOutputDirectory,
   expectedSigner,
   verifyPayload,
   loadPolicy,
   sourceSignatureSHA256,
+	sealFFmpegClosure,
 }) {
   requireReviewedSigner(expectedSigner);
-  const snapshot = await readComponentSnapshot(inputDirectory);
+  const sealed = await createSealedFFmpegClosure({ projectRoot, archivePath: join(inputDirectory, 'ffmpeg.zip'), manifestPath: join(inputDirectory, 'manifest.json'), sealedOutputDirectory, sealFFmpegClosure });
+  let snapshot;
+  try {
+    snapshot = await readComponentSnapshot(inputDirectory, sealed.files);
+  } catch (error) {
+    await sealed.cleanup();
+    throw error;
+  }
   const policy = await loadPolicy(toolRoot);
   const identity = ffmpegComponentIdentity(policy, expectedSigner);
   let manifest;
@@ -192,33 +213,40 @@ async function verifyComponentSnapshot({
   }
   const payloadVerifier = verifyPayload ?? ((directory, signer) => verifyPayloadDirectory(directory, signer, { projectRoot, toolRoot }));
   await withPrivateComponentSnapshot(snapshot.files, async (directory) => payloadVerifier(directory, expectedSigner));
-  return { identity, files: snapshot.files };
+  return { identity, files: snapshot.files, sealed, cleanup: sealed.cleanup };
 }
 
 export async function installComponentAssets(options) {
-  const { projectRoot = root, inputDirectory, publishPair = publishPairTransactionally } = options;
+  const { projectRoot = root, inputDirectory, publishPair } = options;
   const destination = await assertInstallDestination(projectRoot);
   const expectedSigner = options.expectedSigner ?? FFMPEG_SIGNED_COMPONENT_SIGNER;
   const verified = await verifyComponentSnapshot({
     projectRoot,
     toolRoot: options.toolRoot ?? defaultToolRoot,
     inputDirectory,
+	sealedOutputDirectory: options.sealedOutputDirectory,
     expectedSigner,
     verifyPayload: options.verifyPayload,
     loadPolicy: options.loadPolicy ?? loadFFmpegPolicy,
     sourceSignatureSHA256: options.sourceSignatureSHA256 ?? FFMPEG_SOURCE_SIGNATURE_SHA256,
+	sealFFmpegClosure: options.sealFFmpegClosure,
   });
-  await assertInstallDestination(projectRoot);
-  const archive = verified.files.get('ffmpeg.zip');
-  const manifest = verified.files.get('manifest.json');
-  await publishPair(destination, archive, manifest);
-  await assertInstallDestination(projectRoot);
-  const installedArchive = await readBoundedRegularFile(join(destination, 'ffmpeg.zip'), COMPONENT_ASSET_MAXIMUMS['ffmpeg.zip'], 'installed FFmpeg archive');
-  const installedManifest = await readBoundedRegularFile(join(destination, 'manifest.json'), COMPONENT_ASSET_MAXIMUMS['manifest.json'], 'installed FFmpeg manifest');
-  if (!installedArchive.equals(archive) || !installedManifest.equals(manifest)) {
-    throw new Error('FFmpeg installation bytes differ from the verified snapshot.');
+  try {
+    await assertInstallDestination(projectRoot);
+    const archive = verified.files.get('ffmpeg.zip');
+    const manifest = verified.files.get('manifest.json');
+    if (publishPair) await publishPair(destination, archive, manifest);
+    else publishSealedFFmpegClosure(destination, verified.sealed);
+    await assertInstallDestination(projectRoot);
+    const installedArchive = await readBoundedRegularFile(join(destination, 'ffmpeg.zip'), COMPONENT_ASSET_MAXIMUMS['ffmpeg.zip'], 'installed FFmpeg archive');
+    const installedManifest = await readBoundedRegularFile(join(destination, 'manifest.json'), COMPONENT_ASSET_MAXIMUMS['manifest.json'], 'installed FFmpeg manifest');
+    if (!installedArchive.equals(archive) || !installedManifest.equals(manifest)) {
+      throw new Error('FFmpeg installation bytes differ from the verified snapshot.');
+    }
+    return verified.identity;
+  } finally {
+    await verified.cleanup();
   }
-  return verified.identity;
 }
 
 function verifyPayloadDirectory(directory, expectedSigner, { projectRoot, toolRoot }) {
@@ -245,7 +273,7 @@ function componentSourcePaths(projectRoot) {
   ]);
 }
 
-async function readComponentSnapshot(directory) {
+async function readComponentSnapshot(directory, sealedFiles) {
   const inputReal = await assertRealDirectory(directory, 'FFmpeg component input');
   const names = await readdir(directory);
   const expectedNames = [...REQUIRED_COMPONENT_ASSETS, CHECKSUM_ASSET].sort();
@@ -254,13 +282,74 @@ async function readComponentSnapshot(directory) {
   }
   const files = new Map();
   for (const name of REQUIRED_COMPONENT_ASSETS) {
-    files.set(name, await readBoundedRegularFile(join(directory, name), COMPONENT_ASSET_MAXIMUMS[name], `FFmpeg component asset ${name}`));
+	if (sealedFiles?.has(name)) files.set(name, sealedFiles.get(name));
+	else files.set(name, await readBoundedRegularFile(join(directory, name), COMPONENT_ASSET_MAXIMUMS[name], `FFmpeg component asset ${name}`));
   }
   const checksum = await readBoundedRegularFile(join(directory, CHECKSUM_ASSET), COMPONENT_ASSET_MAXIMUMS[CHECKSUM_ASSET], 'FFmpeg checksum asset');
   verifyChecksumSnapshot(files, checksum);
   const finalInputReal = await assertRealDirectory(directory, 'FFmpeg component input');
   if (!sameResolvedPath(inputReal, finalInputReal)) throw new Error('FFmpeg component input directory changed while snapshotting.');
   return { files, checksum };
+}
+
+async function createSealedFFmpegClosure({ projectRoot, archivePath, manifestPath, sealedOutputDirectory, sealFFmpegClosure }) {
+	const temporary = !sealedOutputDirectory;
+	const directory = temporary
+	  ? await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-sealed-'))
+	  : resolve(sealedOutputDirectory);
+	if (temporary) await chmod(directory, 0o700);
+	else {
+	  assertContainedDirectory(join(resolve(projectRoot), 'dist'), directory, 'sealed FFmpeg output');
+	  await createExclusiveDirectory(directory, 'sealed FFmpeg output');
+	}
+	await assertRealDirectory(directory, 'sealed FFmpeg output');
+	let cleaned = false;
+	const cleanup = async () => {
+	  if (!temporary || cleaned) return;
+	  cleaned = true;
+	  for (const name of ['ffmpeg.zip', 'manifest.json']) await unlink(join(directory, name)).catch(() => undefined);
+	  await rmdir(directory);
+	};
+	try {
+	  const sealer = sealFFmpegClosure ?? runGoFFmpegSealer;
+	  const evidence = await sealer({ archivePath, manifestPath, sealedDirectory: directory });
+	  const names = await readdir(directory);
+	  if (names.length !== 2 || [...names].sort().join(',') !== 'ffmpeg.zip,manifest.json') throw new Error('Go-sealed FFmpeg closure contains unexpected files.');
+	  const archive = await readBoundedRegularFile(join(directory, 'ffmpeg.zip'), COMPONENT_ASSET_MAXIMUMS['ffmpeg.zip'], 'Go-sealed FFmpeg archive');
+	  const manifest = await readBoundedRegularFile(join(directory, 'manifest.json'), COMPONENT_ASSET_MAXIMUMS['manifest.json'], 'Go-sealed FFmpeg manifest');
+	  if (!evidence || evidence.schemaVersion !== 1 || evidence.archiveSha256 !== sha256(archive) || evidence.archiveSize !== archive.length || evidence.manifestSha256 !== sha256(manifest) || evidence.manifestSize !== manifest.length) {
+		throw new Error('Go-sealed FFmpeg evidence does not bind the exact output bytes.');
+	  }
+	  return { directory, archivePath: join(directory, 'ffmpeg.zip'), manifestPath: join(directory, 'manifest.json'), files: new Map([['ffmpeg.zip', archive], ['manifest.json', manifest]]), evidence, cleanup };
+	} catch (error) {
+	  await cleanup();
+	  throw error;
+	}
+}
+
+function runGoFFmpegSealer({ archivePath, manifestPath, sealedDirectory }) {
+	const inspector = process.env.AUTHENTICODE_INSPECTOR_PATH?.trim();
+	if (!inspector) throw new Error('AUTHENTICODE_INSPECTOR_PATH is required for Go FFmpeg sealing.');
+	const output = execFileSync(inspector, ['seal-ffmpeg', '--archive', archivePath, '--manifest', manifestPath, '--sealed-directory', sealedDirectory], { encoding: 'utf8', windowsHide: true });
+	try { return JSON.parse(output); }
+	catch { throw new Error('Go FFmpeg sealer output is invalid.'); }
+}
+
+function publishSealedFFmpegClosure(destination, sealed) {
+	const inspector = process.env.AUTHENTICODE_INSPECTOR_PATH?.trim();
+	if (!inspector) throw new Error('AUTHENTICODE_INSPECTOR_PATH is required for sealed FFmpeg publication.');
+	execFileSync(inspector, ['publish-ffmpeg', '--archive', sealed.archivePath, '--manifest', sealed.manifestPath, '--destination', destination], { stdio: 'inherit', windowsHide: true });
+}
+
+async function createExclusiveDirectory(directory, label) {
+	const parent = dirname(resolve(directory));
+	await assertRealDirectory(parent, `${label} parent`);
+	try { await mkdir(resolve(directory), { mode: 0o700 }); }
+	catch (error) {
+	  if (error?.code === 'EEXIST') throw new Error(`${label} already exists.`);
+	  throw error;
+	}
+	await assertRealDirectory(directory, label);
 }
 
 async function readBoundedRegularFile(path, maximum, label) {
@@ -417,15 +506,16 @@ async function main() {
   }
   if (command === 'prepare') {
     if (kind !== 'current') throw new Error('Only the current reviewed component may be prepared.');
-    await prepareComponentAssets({ toolRoot, outputDirectory: argument('--output'), expectedSigner: component.signer });
+	await prepareComponentAssets({ toolRoot, outputDirectory: argument('--output'), sealedOutputDirectory: argument('--sealed-output'), expectedSigner: component.signer });
   }
   else if (command === 'verify') await verifyComponentAssets({
     toolRoot,
     inputDirectory: argument('--input'),
     expectedSigner: component.signer,
     manifestOutputPath: process.argv.includes('--manifest-output') ? argument('--manifest-output') : undefined,
+	sealedOutputDirectory: argument('--sealed-output'),
   });
-  else if (command === 'install') await installComponentAssets({ toolRoot, inputDirectory: argument('--input'), expectedSigner: component.signer });
+  else if (command === 'install') await installComponentAssets({ toolRoot, inputDirectory: argument('--input'), sealedOutputDirectory: argument('--sealed-output'), expectedSigner: component.signer });
   else if (command === 'verify-metadata') await verifyGitHubReleaseMetadata(JSON.parse(await readFile(argument('--metadata'), 'utf8')), argument('--input'), stringArgument('--tag'));
   else throw new Error('Usage: node scripts/ffmpeg-component-assets.mjs <mode> --tool-root <reviewed-root> [mode arguments]');
 }

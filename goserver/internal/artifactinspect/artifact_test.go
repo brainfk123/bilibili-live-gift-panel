@@ -100,7 +100,7 @@ func TestVerifyBoundArtifactRejectsUnscopedStableConvergencePolicy(t *testing.T)
 
 func TestVerifyStaticArtifactBindsStableOuterAndRejectsArbitrarySignerOutputBytes(t *testing.T) {
 	fixture := boundArtifactFixture(t)
-	options := VerifyStaticOptions{UnsignedPath: fixture.options.UnsignedPath, SignedPath: fixture.options.SignedPath, Version: "0.4.11", Commit: strings.Repeat("a", 40), ExpectedIdentity: naisNetIdentity, FFmpegArchivePath: fixture.options.FFmpegArchivePath, FFmpegManifestPath: fixture.options.FFmpegManifestPath, InspectAuthenticode: func(string) (certidentity.Identity, error) { return naisNetIdentity, nil }}
+	options := VerifyStaticOptions{UnsignedPath: fixture.options.UnsignedPath, SignedPath: fixture.options.SignedPath, SealedDirectory: t.TempDir(), Version: "0.4.11", Commit: strings.Repeat("a", 40), ExpectedIdentity: naisNetIdentity, FFmpegArchivePath: fixture.options.FFmpegArchivePath, FFmpegManifestPath: fixture.options.FFmpegManifestPath, InspectAuthenticode: func(string) (certidentity.Identity, error) { return naisNetIdentity, nil }}
 	if _, err := VerifyStaticArtifact(options); err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +109,74 @@ func TestVerifyStaticArtifactBindsStableOuterAndRejectsArbitrarySignerOutputByte
 	_ = os.WriteFile(options.SignedPath, contents, 0o600)
 	if _, err := VerifyStaticArtifact(options); err == nil {
 		t.Fatal("arbitrary signed response bytes accepted")
+	}
+}
+
+func TestVerifyStaticArtifactSealsTheExactSnapshotInspectedBeforeSourceSwap(t *testing.T) {
+	fixture := boundArtifactFixture(t)
+	original, err := os.ReadFile(fixture.options.SignedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedDirectory := t.TempDir()
+	options := VerifyStaticOptions{
+		UnsignedPath: fixture.options.UnsignedPath, SignedPath: fixture.options.SignedPath,
+		SealedDirectory: sealedDirectory, Version: "0.4.11", Commit: strings.Repeat("a", 40), ExpectedIdentity: naisNetIdentity,
+		FFmpegArchivePath: fixture.options.FFmpegArchivePath, FFmpegManifestPath: fixture.options.FFmpegManifestPath,
+		InspectAuthenticode: func(path string) (certidentity.Identity, error) {
+			if filepath.Base(path) == "signed.exe" {
+				if err := os.WriteFile(fixture.options.SignedPath, syntheticPEWithPayload(t, []byte("attacker replacement")), 0o600); err != nil {
+					return certidentity.Identity{}, err
+				}
+			}
+			return naisNetIdentity, nil
+		},
+	}
+	evidence, err := VerifyStaticArtifact(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256Hex(original)
+	if evidence.SignedFileSHA256 != wantHash || evidence.SignedFileSize != int64(len(original)) {
+		t.Fatalf("sealed evidence = %#v", evidence)
+	}
+	sealed, err := os.ReadFile(filepath.Join(sealedDirectory, wantHash+".exe"))
+	if err != nil || !bytes.Equal(sealed, original) {
+		t.Fatalf("sealed executable differs from inspected snapshot: error=%v", err)
+	}
+}
+
+func TestVerifyBoundArtifactSealsTheExactInspectedBridgeSnapshot(t *testing.T) {
+	fixture := boundArtifactFixture(t)
+	original, err := os.ReadFile(fixture.options.SignedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := 0
+	fixture.options.InspectAuthenticode = func(path string) (certidentity.Identity, error) {
+		call++
+		if filepath.Base(path) == "signed.exe" {
+			if err := os.WriteFile(fixture.options.SignedPath, syntheticPEWithPayload(t, []byte("attacker bridge replacement")), 0o600); err != nil {
+				return certidentity.Identity{}, err
+			}
+			return rushRushIdentity, nil
+		}
+		if call == 1 || filepath.Base(path) == "ffmpeg.exe" {
+			return naisNetIdentity, nil
+		}
+		return certidentity.Identity{}, nil
+	}
+	evidence, err := VerifyBoundArtifact(fixture.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256Hex(original)
+	if evidence.SignedFileSHA256 != wantHash || evidence.SignedFileSize != int64(len(original)) {
+		t.Fatalf("sealed evidence = %#v", evidence)
+	}
+	sealed, err := os.ReadFile(filepath.Join(fixture.options.SealedDirectory, wantHash+".exe"))
+	if err != nil || !bytes.Equal(sealed, original) {
+		t.Fatalf("sealed bridge executable differs from inspected snapshot: error=%v", err)
 	}
 }
 
@@ -241,6 +309,10 @@ func boundArtifactFixture(t testing.TB) boundArtifactTestFixture {
 func boundArtifactFixtureWithScope(t testing.TB, scoped bool) boundArtifactTestFixture {
 	t.Helper()
 	root := t.TempDir()
+	sealedDirectory := filepath.Join(root, "sealed")
+	if err := os.Mkdir(sealedDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	stableArtifact := []byte("actual immutable stable artifact fixture")
 	stableHash := sha256Hex(stableArtifact)
 	rootSPKI, policy := scopedPolicyFixture(t, stableHash, scoped)
@@ -259,6 +331,7 @@ func boundArtifactFixtureWithScope(t testing.TB, scoped bool) boundArtifactTestF
 	return boundArtifactTestFixture{root: root, options: VerifyArtifactOptions{
 		UnsignedPath:         unsignedPath,
 		SignedPath:           signedPath,
+		SealedDirectory:      sealedDirectory,
 		Version:              version,
 		Tag:                  "v" + version,
 		Commit:               commit,

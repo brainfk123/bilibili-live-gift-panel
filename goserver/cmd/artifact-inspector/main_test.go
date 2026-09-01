@@ -11,9 +11,27 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestFFmpegClosureCommandsFailClosedOnMissingExplicitPaths(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "seal-ffmpeg", want: "FFmpeg seal arguments"},
+		{command: "publish-ffmpeg", want: "FFmpeg publication arguments"},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			err := run([]string{test.command}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
 
 func TestCertificateCommandUsesGeneratedDERSerialNumberIdentity(t *testing.T) {
 	der := commandCertificate(t, false)

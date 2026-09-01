@@ -13,6 +13,7 @@ import (
 
 	"bilibili-live-gift-panel/internal/artifactinspect"
 	"bilibili-live-gift-panel/internal/certidentity"
+	"bilibili-live-gift-panel/internal/ffmpegseal"
 	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
@@ -40,9 +41,47 @@ func run(args []string, output io.Writer) error {
 		return runVerifyStatic(args[1:], output)
 	case "verify-policy":
 		return runVerifyPolicy(args[1:], output)
+	case "seal-ffmpeg":
+		return runSealFFmpeg(args[1:], output)
+	case "publish-ffmpeg":
+		return runPublishFFmpeg(args[1:], output)
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func runSealFFmpeg(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("seal-ffmpeg", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var options ffmpegseal.Options
+	flags.StringVar(&options.ArchivePath, "archive", "", "source FFmpeg ZIP")
+	flags.StringVar(&options.ManifestPath, "manifest", "", "source FFmpeg manifest")
+	flags.StringVar(&options.SealedDirectory, "sealed-directory", "", "exact sealed output directory")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || options.ArchivePath == "" || options.ManifestPath == "" || options.SealedDirectory == "" {
+		return errors.New("FFmpeg seal arguments are invalid")
+	}
+	evidence, err := ffmpegseal.VerifyAndSeal(options)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(evidence)
+}
+
+func runPublishFFmpeg(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("publish-ffmpeg", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var options ffmpegseal.PublishOptions
+	flags.StringVar(&options.ArchivePath, "archive", "", "sealed FFmpeg ZIP")
+	flags.StringVar(&options.ManifestPath, "manifest", "", "sealed FFmpeg manifest")
+	flags.StringVar(&options.Destination, "destination", "", "exact FFmpeg destination directory")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || options.ArchivePath == "" || options.ManifestPath == "" || options.Destination == "" {
+		return errors.New("FFmpeg publication arguments are invalid")
+	}
+	evidence, err := ffmpegseal.PublishSealed(options)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(evidence)
 }
 
 func runVerifyPolicy(args []string, output io.Writer) error {
@@ -55,6 +94,7 @@ func runVerifyStatic(args []string, output io.Writer) error {
 	var options artifactinspect.VerifyStaticOptions
 	flags.StringVar(&options.UnsignedPath, "unsigned", "", "unsigned PE")
 	flags.StringVar(&options.SignedPath, "signed", "", "signed PE")
+	flags.StringVar(&options.SealedDirectory, "sealed-directory", "", "sealed executable output directory")
 	flags.StringVar(&options.Version, "version", "", "version")
 	flags.StringVar(&options.Commit, "commit", "", "commit")
 	flags.StringVar(&options.ExpectedIdentity.Country, "country", "", "country")
@@ -146,6 +186,7 @@ func runVerifyArtifact(args []string, output io.Writer) error {
 	var options artifactinspect.VerifyArtifactOptions
 	flags.StringVar(&options.UnsignedPath, "unsigned", "", "unsigned PE")
 	flags.StringVar(&options.SignedPath, "signed", "", "signed PE")
+	flags.StringVar(&options.SealedDirectory, "sealed-directory", "", "sealed executable output directory")
 	flags.StringVar(&options.Version, "version", "", "version")
 	flags.StringVar(&options.Tag, "tag", "", "tag")
 	flags.StringVar(&options.Commit, "commit", "", "commit")

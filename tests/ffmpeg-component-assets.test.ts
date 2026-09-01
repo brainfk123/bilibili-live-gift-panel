@@ -153,6 +153,20 @@ appendFileSync(${JSON.stringify(reviewedLog)}, 'reviewed\\n');
       expectedSigner,
       loadPolicy: async () => policy,
       sourceSignatureSHA256: createHash('sha256').update(signature).digest('hex'),
+	  sealFFmpegClosure: async ({ archivePath, manifestPath, sealedDirectory }: { archivePath: string; manifestPath: string; sealedDirectory: string }) => {
+		mkdirSync(sealedDirectory, { recursive: true });
+		const archive = readFileSync(archivePath);
+		const manifest = readFileSync(manifestPath);
+		writeFileSync(join(sealedDirectory, 'ffmpeg.zip'), archive);
+		writeFileSync(join(sealedDirectory, 'manifest.json'), manifest);
+		return {
+		  schemaVersion: 1,
+		  archiveSha256: createHash('sha256').update(archive).digest('hex'),
+		  archiveSize: archive.length,
+		  manifestSha256: createHash('sha256').update(manifest).digest('hex'),
+		  manifestSize: manifest.length,
+		};
+	  },
       publishPair: async (directory: string, archive: Buffer, installedManifest: Buffer) => {
         mkdirSync(directory, { recursive: true });
         writeFileSync(join(directory, 'ffmpeg.zip'), archive);
@@ -261,6 +275,35 @@ describe('FFmpeg component assets', () => {
     },
     20_000,
   );
+
+  it('uses only the Go-sealed FFmpeg pair after the downloaded sources are swapped', async () => {
+	const fixture = await v0410ComponentFixture();
+	const verifiedArchive = readFileSync(join(fixture.inputDirectory, 'ffmpeg.zip'));
+	const verifiedManifest = readFileSync(join(fixture.inputDirectory, 'manifest.json'));
+	const baseSealer = fixture.options.sealFFmpegClosure;
+	let sealed = false;
+	await installComponentAssets({
+	  ...fixture.options,
+	  sealFFmpegClosure: async (options: { archivePath: string; manifestPath: string; sealedDirectory: string }) => {
+		const evidence = await baseSealer(options);
+		sealed = true;
+		writeFileSync(options.archivePath, Buffer.from('attacker archive after Go seal'));
+		writeFileSync(options.manifestPath, Buffer.from('attacker manifest after Go seal'));
+		return evidence;
+	  },
+	  verifyPayload: async (snapshotDirectory: string) => {
+		expect(readFileSync(join(snapshotDirectory, 'ffmpeg.zip'))).toEqual(verifiedArchive);
+		expect(readFileSync(join(snapshotDirectory, 'manifest.json'))).toEqual(verifiedManifest);
+	  },
+	  publishPair: async (directory: string, archive: Buffer, manifest: Buffer) => {
+		expect(archive).toEqual(verifiedArchive);
+		expect(manifest).toEqual(verifiedManifest);
+		writeFileSync(join(directory, 'ffmpeg.zip'), archive);
+		writeFileSync(join(directory, 'manifest.json'), manifest);
+	  },
+	});
+	expect(sealed).toBe(true);
+  });
 
   it('writes the exact verified manifest snapshot when the downloaded manifest changes after verification', async () => {
     const fixture = await v0410ComponentFixture();
