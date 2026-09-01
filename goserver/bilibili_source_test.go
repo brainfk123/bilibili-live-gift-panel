@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 type fakeBiliSocket struct {
@@ -196,6 +199,36 @@ func TestBilibiliDiagnosticsDescribeV2GiftListTypeWithoutPayloadValues(t *testin
 	}
 }
 
+func TestBilibiliDiagnosticsDescribeMalformedProtobufWithoutPayloadValues(t *testing.T) {
+	logger, err := newDiagnosticLogger(filepath.Join(t.TempDir(), "runtime.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"cmd":"SEND_GIFT_V2","data":{"pb":"private-invalid-protobuf","protover":1}}`)
+	frame := encodeBiliPacket(biliOpMessage, payload)
+	socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("stop")}
+
+	err = (&bilibiliGiftSource{diagnostics: logger, heartbeatInterval: time.Hour}).runSocket(
+		context.Background(), socket, roomInfo{}, biliSession{}, nil, nil, runtimeCallbacks{},
+	)
+	if err == nil {
+		t.Fatal("runSocket returned nil after fixture exhaustion")
+	}
+
+	export := string(logger.exportBytes())
+	for _, expected := range []string{
+		"bili_parse_failed", `reason="malformed_gift_data"`, `gift_command="send_gift_v2"`,
+		`parse_stage="protobuf_decode"`, `data_kind="object"`, "data_field_count=2", `schema_hash="88a297ddbc61"`,
+	} {
+		if !strings.Contains(export, expected) {
+			t.Fatalf("diagnostic export missing %q: %s", expected, export)
+		}
+	}
+	if strings.Contains(export, "private-invalid-protobuf") {
+		t.Fatalf("diagnostic export leaked the protobuf payload: %s", export)
+	}
+}
+
 func TestDiagnosticHashIsShortAndStable(t *testing.T) {
 	if got, want := diagnosticHash("abc"), "ba7816bf8f01"; got != want {
 		t.Fatalf("diagnosticHash(abc) = %q, want %q", got, want)
@@ -219,6 +252,11 @@ func TestBiliGiftParseDiagnosticsClassifyV2FailureStages(t *testing.T) {
 			name: "missing gift list",
 			body: `{"cmd":"SEND_GIFT_V2","data":{"uid":"987654321"}}`,
 			want: map[string]any{"parse_stage": "gift_list_missing", "gift_list_kind": "missing", "gift_list_count": 0},
+		},
+		{
+			name: "malformed protobuf",
+			body: `{"cmd":"SEND_GIFT_V2","data":{"pb":"not-base64!","protover":1}}`,
+			want: map[string]any{"parse_stage": "protobuf_decode", "gift_list_kind": "missing", "gift_list_count": 0},
 		},
 		{
 			name: "empty gift list",
@@ -634,6 +672,219 @@ func TestBilibiliSourceDeliversEveryV2BlindBoxReward(t *testing.T) {
 	if len(gifts) != 2 || gifts[0].GiftID != 35787 || gifts[1].GiftID != 35788 {
 		t.Fatalf("delivered gifts = %#v", gifts)
 	}
+}
+
+func TestParseBiliGiftEventsExtractsProtobufV2Batch(t *testing.T) {
+	payload := []byte(`{"cmd":"SEND_GIFT_V2","data":{"pb":"ShEaDOeSgOeSqOWuneebkjCQTlJDCNmXAhIJ5Zac5qyi5L2gGAEo4F044F1CBGdvbGRKDmJsaW5kLXJld2FyZC0xUIDj0dQGYg5ibGluZC1yZXdhcmQtMVJGCNqXAhIM5o+Q552j5LiA5Y+3GAIoiCc4kE5CBGdvbGRKDmJsaW5kLXJld2FyZC0yUIDj0dQGYg5ibGluZC1yZXdhcmQtMg==","protover":1}}`)
+	gifts, reason, ok := parseBiliGiftEventsDetailed(payload)
+	if !ok {
+		t.Fatalf("protobuf SEND_GIFT_V2 was not parsed: reason=%q", reason)
+	}
+	if len(gifts) != 2 {
+		t.Fatalf("parsed gifts = %#v, want two protobuf rewards", gifts)
+	}
+	first, second := gifts[0], gifts[1]
+	if first.GiftID != 35801 || first.GiftName != "喜欢你" || first.Num != 1 || first.Price != 12000 || first.TotalCoin != 12000 || first.Rnd != "blind-reward-1" {
+		t.Fatalf("first protobuf reward = %#v", first)
+	}
+	if second.GiftID != 35802 || second.GiftName != "提督一号" || second.Num != 2 || second.Price != 5000 || second.TotalCoin != 10000 || second.Rnd != "blind-reward-2" {
+		t.Fatalf("second protobuf reward = %#v", second)
+	}
+	for _, gift := range gifts {
+		if gift.BlindGiftID != 0 || gift.BlindGiftName != "璀璨宝盒" || gift.BlindGiftPrice != 10000 {
+			t.Fatalf("protobuf blind-box metadata = %#v", gift)
+		}
+	}
+}
+
+func appendTestProtobufVarint(message []byte, number protowire.Number, value uint64) []byte {
+	message = protowire.AppendTag(message, number, protowire.VarintType)
+	return protowire.AppendVarint(message, value)
+}
+
+func appendTestProtobufBytes(message []byte, number protowire.Number, value []byte) []byte {
+	message = protowire.AppendTag(message, number, protowire.BytesType)
+	return protowire.AppendBytes(message, value)
+}
+
+func testProtobufGiftItem(giftID int, giftName string, timestamp int64) []byte {
+	item := appendTestProtobufVarint(nil, 1, uint64(giftID))
+	item = appendTestProtobufBytes(item, 2, []byte(giftName))
+	item = appendTestProtobufVarint(item, 3, 1)
+	item = appendTestProtobufVarint(item, 10, uint64(timestamp))
+	return item
+}
+
+func testProtobufGiftBatch(items ...[]byte) []byte {
+	message := []byte{}
+	for _, item := range items {
+		message = appendTestProtobufBytes(message, 10, item)
+	}
+	return message
+}
+
+func TestParseBiliGiftV2ProtobufRejectsMalformedWireData(t *testing.T) {
+	validItem := testProtobufGiftItem(33300, "喜欢你", 1788113280)
+	validBatch := testProtobufGiftBatch(validItem)
+
+	wrongWireType := appendTestProtobufVarint(nil, 10, 1)
+	wrongWireType = append(wrongWireType, validBatch...)
+	truncatedBytes := protowire.AppendTag(nil, 10, protowire.BytesType)
+	truncatedBytes = protowire.AppendVarint(truncatedBytes, 5)
+	truncatedBytes = append(truncatedBytes, 0x08)
+	overflowVarint := protowire.AppendTag(nil, 1, protowire.VarintType)
+	overflowVarint = append(overflowVarint, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00)
+	overflowVarint = append(overflowVarint, validBatch...)
+	invalidUTF8 := appendTestProtobufBytes(nil, 2, []byte{0xff})
+	invalidUTF8 = append(invalidUTF8, validBatch...)
+	const oversizedGiftBatchItems = 257
+	var tooManyItems []byte
+	for index := 0; index < oversizedGiftBatchItems; index++ {
+		item := testProtobufGiftItem(33300+index, "合成礼物", 1788113280)
+		tooManyItems = appendTestProtobufBytes(tooManyItems, 10, item)
+	}
+	unknownField := appendTestProtobufVarint(nil, 100, 7)
+	unknownField = append(unknownField, validBatch...)
+	oversizedValidMessage := append([]byte(nil), validBatch...)
+	oversizedValidMessage = appendTestProtobufBytes(oversizedValidMessage, 100, make([]byte, 256*1024))
+
+	tests := []struct {
+		name    string
+		message []byte
+		wantOK  bool
+	}{
+		{name: "wrong known wire type", message: wrongWireType},
+		{name: "truncated length-delimited item", message: truncatedBytes},
+		{name: "overflowing varint", message: overflowVarint},
+		{name: "invalid UTF-8", message: invalidUTF8},
+		{name: "too many gift items", message: tooManyItems},
+		{name: "oversized protobuf", message: oversizedValidMessage},
+		{name: "valid unknown field", message: unknownField, wantOK: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded := base64.StdEncoding.EncodeToString(test.message)
+			gifts, reason, ok := parseBiliGiftV2Protobuf(encoded)
+			if ok != test.wantOK {
+				t.Fatalf("parse result = ok %v, reason %q, gift count %d; want ok %v", ok, reason, len(gifts), test.wantOK)
+			}
+			if !ok && (reason != "malformed_gift_data" || len(gifts) != 0) {
+				t.Fatalf("malformed result = reason %q, gifts %#v", reason, gifts)
+			}
+		})
+	}
+}
+
+func TestBilibiliSourceProtobufFallbackKeysKeepBatchDistinctAndReplayIdempotent(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{ID: "same-gift-batch", GiftID: 33300, AttributeName: "积分", Formula: "积分+1"}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
+	if err := runtime.prepareRoomConnection("room"); err != nil {
+		t.Fatal(err)
+	}
+
+	item := testProtobufGiftItem(33300, "喜欢你", 1788113280)
+	encoded := base64.StdEncoding.EncodeToString(testProtobufGiftBatch(item, item))
+	payload, err := json.Marshal(map[string]any{"cmd": "SEND_GIFT_V2", "data": map[string]any{"pb": encoded, "protover": 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := encodeBiliPacket(biliOpMessage, payload)
+	deliver := func() {
+		t.Helper()
+		socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("fixture exhausted")}
+		err := (&bilibiliGiftSource{heartbeatInterval: time.Hour}).runSocket(
+			context.Background(), socket, roomInfo{}, biliSession{}, nil, nil,
+			runtimeCallbacks{onGift: func(gift giftEvent) {
+				runtime.acceptGift(context.Background(), "room", "SEND_GIFT_V2", gift)
+			}},
+		)
+		if err == nil {
+			t.Fatal("runSocket returned nil after fixture exhaustion")
+		}
+	}
+	consume := func(count int) {
+		t.Helper()
+		for range count {
+			processed, err := runtime.consumeAvailableInboxRecord(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !processed {
+				t.Fatal("protobuf gift was not consumed from the durable inbox")
+			}
+		}
+	}
+
+	deliver()
+	consume(2)
+	assertRuntimeAttributeValue(t, store, "积分", 2)
+	deliver()
+	consume(2)
+	assertRuntimeAttributeValue(t, store, "积分", 2)
+}
+
+func TestBilibiliSourceProtobufV2OrdinaryGiftTriggersAttributeRule(t *testing.T) {
+	root := t.TempDir()
+	store := &configStore{path: filepath.Join(root, "config.json")}
+	state := defaultAppState()
+	state.RoomID = "room"
+	state.Attributes = []attributeState{{Name: "积分", Value: 0}}
+	state.Rules = []giftRule{{
+		ID: "ordinary-gift-rule", GiftID: 33300, AttributeName: "积分", Formula: "积分+7",
+	}}
+	if err := store.replaceState(state); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := openGiftInbox(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := newBackgroundRuntime(store, nil)
+	runtime.installInbox(inbox, inbox.SnapshotHealth())
+	if err := runtime.prepareRoomConnection("room"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Captured v0.4.10 diagnostics identify a two-field SEND_GIFT_V2 data
+	// object with no gift_list. Current wire events carry the gift batch in
+	// the base64 protobuf field instead. This fixture contains only synthetic
+	// gift data and no viewer identity or external URL.
+	payload := []byte(`{"cmd":"SEND_GIFT_V2","data":{"pb":"Uk0IlIQCEgnllpzmrKLkvaAYASjoBzjoB0IEZ29sZEoTb3JkaW5hcnktbGlrZS15b3UtMVCA49HUBmITb3JkaW5hcnktbGlrZS15b3UtMQ==","protover":1}}`)
+	frame := encodeBiliPacket(biliOpMessage, payload)
+	socket := &fakeBiliSocket{reads: [][]byte{frame}, readErr: errors.New("fixture exhausted")}
+	err = (&bilibiliGiftSource{heartbeatInterval: time.Hour}).runSocket(
+		context.Background(), socket, roomInfo{}, biliSession{}, nil, nil,
+		runtimeCallbacks{onGift: func(gift giftEvent) {
+			runtime.acceptGift(context.Background(), "room", "SEND_GIFT_V2", gift)
+		}},
+	)
+	if err == nil {
+		t.Fatal("runSocket returned nil after fixture exhaustion")
+	}
+	if pending := inbox.Health().PendingCount; pending != 1 {
+		t.Fatalf("pending gifts = %d, want protobuf gift persisted before gameplay", pending)
+	}
+	processed, err := runtime.consumeAvailableInboxRecord(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processed {
+		t.Fatal("protobuf gift was not consumed from the durable inbox")
+	}
+	assertRuntimeAttributeValue(t, store, "积分", 7)
 }
 
 func TestParseBiliPaidEventParsesGuardBuy(t *testing.T) {

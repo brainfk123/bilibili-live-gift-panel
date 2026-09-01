@@ -1,0 +1,167 @@
+name: Mainline CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - codex/hosted-service
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    runs-on: ubuntu-24.04
+    outputs:
+      windows_level: ${{ steps.scope.outputs.windows_level }}
+      run_windows: ${{ steps.scope.outputs.run_windows }}
+      run_mysql: ${{ steps.scope.outputs.run_mysql }}
+      reasons_json: ${{ steps.scope.outputs.reasons_json }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run ci:scope -- "$CI_BASE_SHA" "$CI_HEAD_SHA"
+
+  hosted:
+    needs: [scope]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: goserver/go.mod
+          cache-dependency-path: |
+            goserver/go.sum
+            updateapi/go.sum
+      - run: npm ci
+      - run: npm exec -- playwright install --with-deps chromium
+      - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
+      - run: npm run typecheck
+      - run: npm run build:ui
+      - run: npm run prepare:go-assets
+      - run: npm run verify:go-linux-compile
+      - run: npm run build:hosted
+      - run: go -C goserver test -race -count=1 ./cmd/hosted ./internal/...
+      - run: go -C goserver vet ./cmd/hosted ./internal/...
+      - run: npm run test:update-api
+      - run: go -C goserver build -trimpath -o "${{ runner.temp }}/gift-panel-hosted" ./cmd/hosted
+
+  hosted-mysql:
+    needs: [scope, hosted]
+    if: needs.scope.outputs.run_mysql == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: goserver/go.mod
+          cache-dependency-path: goserver/go.sum
+      - run: npm ci
+      - run: npm run test:hosted-mysql
+
+  windows-compat:
+    needs: [scope, hosted]
+    if: needs.scope.outputs.run_windows == 'true'
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: goserver/go.mod
+          cache-dependency-path: goserver/go.sum
+      - run: npm ci
+      - run: npm exec -- playwright install chromium
+      - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
+      - run: npm run build:ui
+      - run: npm run prepare:go-assets
+      - run: go -C goserver test ./... -race -count=1
+      - name: Build unsigned CI executable
+        env:
+          APP_BUILD_PROFILE: ci-windows-smoke
+          APP_VERSION: 0.0.0
+          APP_COMMIT: ${{ github.sha }}
+          APP_UPDATE_API_URL: https://updates.example.test
+          APP_UPDATE_PUBLISHER: CN=CI Smoke
+          CI: 'true'
+        run: npm run build:exe
+      - env:
+          GIFT_PANEL_CI_SMOKE: 'true'
+        run: npm run smoke:windows-exe
+      - name: Verify Windows artifact closure
+        if: success()
+        run: |
+          $requiredArtifacts = @(
+            'dist/gift-panel.exe'
+            'dist/ci-smoke-evidence.json'
+          )
+          foreach ($artifact in $requiredArtifacts) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+              throw "Required Windows compatibility artifact is missing: $artifact"
+            }
+          }
+      - if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-compat-${{ github.sha }}
+          path: |
+            dist/gift-panel.exe
+            dist/ci-smoke-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
+  ci-gate:
+    if: always()
+    needs: [scope, hosted, hosted-mysql, windows-compat]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - env:
+          CI_SCOPE_RESULT: ${{ needs.scope.result }}
+          CI_HOSTED_RESULT: ${{ needs.hosted.result }}
+          CI_MYSQL_RESULT: ${{ needs.hosted-mysql.result }}
+          CI_WINDOWS_RESULT: ${{ needs.windows-compat.result }}
+          CI_WINDOWS_LEVEL: ${{ needs.scope.outputs.windows_level }}
+          CI_EXPECT_MYSQL: ${{ needs.scope.outputs.run_mysql }}
+          CI_EXPECT_WINDOWS: ${{ needs.scope.outputs.run_windows }}
+        run: npm run ci:gate

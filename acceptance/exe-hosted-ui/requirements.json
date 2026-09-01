@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "reference": { "product": "gift-panel-exe", "minimumVersion": "0.4.10" },
+  "viewports": [
+    { "id": "desktop-1440x900", "width": 1440, "height": 900, "deviceScaleFactor": 1 },
+    { "id": "narrow-1024x768", "width": 1024, "height": 768, "deviceScaleFactor": 1 },
+    { "id": "mobile-390x844", "width": 390, "height": 844, "deviceScaleFactor": 1 }
+  ],
+  "features": [
+    { "id": "overview", "states": ["empty", "populated", "loading", "error", "readonly", "disabled", "focus-visible", "overlay-open"], "interactions": ["navigate", "refresh", "open-settings"] },
+    { "id": "attributes", "states": ["empty", "populated", "loading", "error", "readonly", "disabled", "focus-visible", "overlay-open", "editing", "validation-error"], "interactions": ["create", "edit", "save", "cancel", "delete-confirm"] },
+    { "id": "activities", "states": ["empty", "populated", "loading", "error", "readonly", "disabled", "focus-visible", "overlay-open", "active", "locked", "settled"], "interactions": ["create", "start", "lock", "settle", "cancel"] },
+    { "id": "gift-targets", "states": ["empty", "populated", "loading", "error", "readonly", "disabled", "focus-visible", "overlay-open", "editing"], "interactions": ["create", "edit", "save", "cancel", "delete-confirm"] },
+    { "id": "obs", "states": ["empty", "populated", "loading", "error", "readonly", "disabled", "focus-visible", "overlay-open", "preview"], "interactions": ["create", "preview", "copy", "reset-link", "delete-confirm"] },
+    { "id": "analytics", "states": ["empty", "populated", "loading", "error", "readonly", "disabled", "focus-visible", "overlay-open", "filtered"], "interactions": ["filter", "paginate", "open-viewer", "clear-history"] }
+  ]
+}

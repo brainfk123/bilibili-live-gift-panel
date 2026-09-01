@@ -1207,6 +1207,69 @@ func TestNormalStartupStillOpensConfig(t *testing.T) {
 	}
 }
 
+func TestCISmokeHeadlessModeRequiresExactSentinels(t *testing.T) {
+	tests := []struct {
+		version string
+		marker  string
+		want    bool
+	}{
+		{version: "0.0.0", marker: "true", want: true},
+		{version: "0.0.0", marker: "TRUE", want: false},
+		{version: "0.0.0", marker: "1", want: false},
+		{version: "0.0.0", marker: "", want: false},
+		{version: "dev", marker: "true", want: false},
+		{version: "1.2.3", marker: "true", want: false},
+	}
+	for _, test := range tests {
+		if got := ciSmokeHeadlessMode(test.version, test.marker); got != test.want {
+			t.Fatalf("ciSmokeHeadlessMode(%q, %q) = %v, want %v", test.version, test.marker, got, test.want)
+		}
+	}
+}
+
+func TestCISmokeHeadlessModeSuppressesStartupBrowser(t *testing.T) {
+	if shouldOpenStartupConfig(true, true) {
+		t.Fatal("CI smoke headless mode still opens the startup browser")
+	}
+	if !shouldOpenStartupConfig(true, false) {
+		t.Fatal("normal startup browser behavior changed")
+	}
+}
+
+func TestCISmokeHeadlessLifecycleUsesExistingExitSemantics(t *testing.T) {
+	trayRunner := func(string, *notificationCenter, <-chan struct{}, <-chan struct{}) (bool, error) {
+		t.Fatal("CI smoke headless mode called the tray runner")
+		return false, nil
+	}
+
+	updateExit := make(chan struct{}, 1)
+	updateExit <- struct{}{}
+	restart, err := runAppLifecycle(true, "", nil, updateExit, make(chan struct{}), trayRunner)
+	if err != nil || !restart {
+		t.Fatalf("update exit = (%v, %v), want (true, nil)", restart, err)
+	}
+
+	instanceExit := make(chan struct{}, 1)
+	instanceExit <- struct{}{}
+	restart, err = runAppLifecycle(true, "", nil, make(chan struct{}), instanceExit, trayRunner)
+	if err != nil || restart {
+		t.Fatalf("instance exit = (%v, %v), want (false, nil)", restart, err)
+	}
+
+	wantErr := errors.New("tray sentinel")
+	trayCalled := false
+	restart, err = runAppLifecycle(false, "config", nil, nil, nil, func(configURL string, _ *notificationCenter, _ <-chan struct{}, _ <-chan struct{}) (bool, error) {
+		trayCalled = true
+		if configURL != "config" {
+			t.Fatalf("tray config URL = %q", configURL)
+		}
+		return true, wantErr
+	})
+	if !trayCalled || !restart || !errors.Is(err, wantErr) {
+		t.Fatalf("normal lifecycle = (called=%v, restart=%v, err=%v)", trayCalled, restart, err)
+	}
+}
+
 func TestListenWithFallbackUsesRequestedPortWhenAvailable(t *testing.T) {
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

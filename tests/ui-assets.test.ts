@@ -48,4 +48,43 @@ describe('embedded UI asset mirroring', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('excludes release staging artifacts from the embedded UI manifest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gift-panel-ui-assets-release-'));
+    const source = join(root, 'source');
+    const target = join(root, 'target');
+    mkdirSync(join(source, 'ffmpeg-component-download'), { recursive: true });
+    mkdirSync(join(source, 'ffmpeg-component-published'), { recursive: true });
+    mkdirSync(join(source, 'ffmpeg-component-publish'), { recursive: true });
+    mkdirSync(join(source, 'standalone-ffmpeg'), { recursive: true });
+    writeFileSync(join(source, 'index.html'), '<main>gift panel</main>');
+    writeFileSync(join(source, 'ffmpeg-component-download', 'ffmpeg.zip'), 'signed component');
+    writeFileSync(join(source, 'ffmpeg-component-published', 'ffmpeg.zip'), 'new component');
+    writeFileSync(join(source, 'ffmpeg-component-publish', 'ffmpeg.zip'), 'component staging');
+    writeFileSync(join(source, 'standalone-ffmpeg', 'ffmpeg.exe'), 'standalone executable');
+    writeFileSync(join(source, 'ffmpeg-component-release.json'), '{}');
+    writeFileSync(join(source, 'ffmpeg-windows-x64.exe'), 'release executable');
+    writeFileSync(join(source, 'ffmpeg-windows-x64.exe.sha256'), 'release checksum');
+    writeFileSync(join(source, 'gift-clip-test-tools.zip'), 'test tools archive');
+    writeFileSync(join(source, 'standalone-component-manifest.json'), '{}');
+
+    try {
+      const moduleURL = new URL('../scripts/ui-assets.mjs', import.meta.url).href;
+      const script = `
+        import { mirrorUiAssets } from ${JSON.stringify(moduleURL)};
+        const manifest = mirrorUiAssets(${JSON.stringify(source)}, ${JSON.stringify(target)});
+        process.stdout.write(JSON.stringify(manifest));
+      `;
+      const manifest = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' }));
+
+      expect(manifest).toEqual({
+        version: 1,
+        files: [
+          { path: 'index.html', size: 23, sha256: expect.any(String) },
+        ],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

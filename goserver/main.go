@@ -179,6 +179,28 @@ func announceStartup(notifications *notificationCenter, installedVersion string)
 	return true
 }
 
+type appLifecycleRunner func(string, *notificationCenter, <-chan struct{}, <-chan struct{}) (bool, error)
+
+func ciSmokeHeadlessMode(version, marker string) bool {
+	return version == "0.0.0" && marker == "true"
+}
+
+func shouldOpenStartupConfig(openRequested, ciSmokeHeadless bool) bool {
+	return openRequested && !ciSmokeHeadless
+}
+
+func runAppLifecycle(ciSmokeHeadless bool, configURL string, notifications *notificationCenter, updateExit, instanceExit <-chan struct{}, trayRunner appLifecycleRunner) (bool, error) {
+	if !ciSmokeHeadless {
+		return trayRunner(configURL, notifications, updateExit, instanceExit)
+	}
+	select {
+	case <-updateExit:
+		return true, nil
+	case <-instanceExit:
+		return false, nil
+	}
+}
+
 func newMainGiftClipJobs(store *configStore, media *giftReceiptAPI, diagnostics *diagnosticLogger, loadPayload func(string) (*giftClipPayload, error), newManager func(string, giftClipSourceResolver, giftClipEncoder, *diagnosticLogger) *giftClipJobManager) (*giftClipJobManager, error) {
 	payload, err := loadPayload(defaultGiftClipCacheRoot())
 	if err != nil {
@@ -379,10 +401,11 @@ func main() {
 	go updater.Run(runtimeContext)
 
 	configURL := fmt.Sprintf("http://localhost:%d/?mode=config", port)
-	if openConfigOnStartup {
+	ciSmokeHeadless := ciSmokeHeadlessMode(appVersion, os.Getenv("GIFT_PANEL_CI_SMOKE"))
+	if shouldOpenStartupConfig(openConfigOnStartup, ciSmokeHeadless) {
 		go openURL(configURL)
 	}
-	restartAfterUpdate, trayErr := runTrayApp(configURL, notifications, updateExit, instanceExit)
+	restartAfterUpdate, trayErr := runAppLifecycle(ciSmokeHeadless, configURL, notifications, updateExit, instanceExit, runTrayApp)
 	if trayErr != nil {
 		diagnostics.Error("tray_failed", "error", trayErr)
 		showStartupError(fmt.Sprintf("系统托盘启动失败：%v", trayErr))

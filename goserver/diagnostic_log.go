@@ -302,7 +302,7 @@ func validateDiagnosticParseStage(value any) (any, bool) {
 		return nil, false
 	}
 	switch text {
-	case "payload_too_large", "data_decode", "data_type", "gift_list_missing", "gift_list_type", "gift_list_empty", "gift_item_type",
+	case "payload_too_large", "data_decode", "data_type", "protobuf_decode", "gift_list_missing", "gift_list_type", "gift_list_empty", "gift_item_type",
 		"gift_item_missing_id", "gift_item_id_type", "gift_item_missing_name", "gift_item_name_type":
 		return text, true
 	default:

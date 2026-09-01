@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { resolveBuildGoPolicy } from './build-go-policy.mjs';
 import { mirrorUiAssets } from './ui-assets.mjs';
 import { resolveUpdateAPIBaseURLHex } from './update-api-build-config.mjs';
 
@@ -94,17 +95,17 @@ export function runGoCompilerCandidates(options) {
 }
 
 export async function resolveGoLdflags(environment = process.env) {
-  const appVersion = (environment.APP_VERSION || 'dev').replace(/^v/, '');
-  const appCommit = environment.APP_COMMIT || 'local';
+  const buildPolicy = resolveBuildGoPolicy(environment);
+  const { appVersion, appCommit, updateAPIURL, updatePublisher } = buildPolicy;
   for (const [label, value] of [['APP_VERSION', appVersion], ['APP_COMMIT', appCommit]]) {
     if (!/^[0-9A-Za-z.+-]+$/.test(value)) throw new Error(`${label} contains unsupported characters`);
   }
-  const updateAPIBaseURLHex = resolveUpdateAPIBaseURLHex(appVersion, environment.APP_UPDATE_API_URL);
-  const updateExpectedPublisher = (environment.APP_UPDATE_PUBLISHER || '').trim();
-  if (appVersion !== 'dev' && !updateExpectedPublisher) {
+  const updateAPIBaseURLHex = resolveUpdateAPIBaseURLHex(appVersion, updateAPIURL);
+  const updateExpectedPublisher = updatePublisher;
+  if (buildPolicy.requireAuthenticode && !updateExpectedPublisher) {
     throw new Error('Release build requires APP_UPDATE_PUBLISHER.');
   }
-  if (appVersion !== 'dev' && !reviewedUpdatePublishers.has(updateExpectedPublisher)) {
+  if (buildPolicy.requireAuthenticode && !reviewedUpdatePublishers.has(updateExpectedPublisher)) {
     throw new Error('APP_UPDATE_PUBLISHER is not a reviewed update publisher.');
   }
   const updateExpectedPublisherHex = Buffer.from(updateExpectedPublisher, 'utf8').toString('hex');
@@ -112,6 +113,7 @@ export async function resolveGoLdflags(environment = process.env) {
   return {
     appVersion,
     appCommit,
+    buildPolicy,
     trustDigests: updateTrust.trustDigests,
     trustInputs: updateTrust.trustDigests ? {
       rootSPKIBase64: updateTrust.rootSPKIBase64,
@@ -123,7 +125,7 @@ export async function resolveGoLdflags(environment = process.env) {
 
 async function runBuild() {
   const build = await resolveGoLdflags(process.env);
-  if (build.appVersion !== 'dev') {
+  if (build.buildPolicy.requireAuthenticode) {
     const manifestPath = join(root, 'goserver', 'ffmpeg', 'manifest.json');
     let manifest;
     try {
@@ -135,10 +137,10 @@ async function runBuild() {
       throw new Error('Release build requires an Authenticode-signed embedded FFmpeg payload.');
     }
   }
-  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), ...(build.appVersion === 'dev' ? ['--payload-only'] : [])], {
+  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), ...(build.buildPolicy.verifyPayloadOnly ? ['--payload-only'] : [])], {
     cwd: root,
     stdio: 'inherit',
-    env: process.env,
+    env: { ...process.env, APP_VERSION: build.buildPolicy.verificationAppVersion },
   });
   const resource = join(root, 'goserver', 'rsrc_windows_amd64.syso');
   if (!existsSync(resource)) {

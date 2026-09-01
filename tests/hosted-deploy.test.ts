@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
+import { resolveValidatedBashBinary } from './bash-test-runtime';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const deploymentFiles = [
@@ -38,6 +40,12 @@ const operationsFiles = [
 
 function readProjectFile(path: string): string {
   return readFileSync(resolve(projectRoot, path), 'utf8');
+}
+
+function createHostedHealthRoot(root: string): string {
+  const cacheRoot = join(root, '.cache');
+  mkdirSync(cacheRoot, { recursive: true });
+  return mkdtempSync(join(cacheRoot, 'hosted-health-'));
 }
 
 function expectSafeAdministratorInitialization(initialization: string): void {
@@ -315,7 +323,7 @@ fi
 }
 
 function runBash(script: string, environment: NodeJS.ProcessEnv, args: string[] = []) {
-  const command = existsSync('C:\\Program Files\\Git\\bin\\bash.exe') ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
+  const command = resolveValidatedBashBinary(process.platform, { ...process.env, ...environment });
   return spawnSync(command, [bashPath(resolve(projectRoot, script)), ...args], {
     cwd: projectRoot,
     env: environment,
@@ -1710,8 +1718,21 @@ describe('hosted operations runbook and private monitoring', () => {
     expect(checklist).not.toMatch(/\b(?:uid|cookie|nickname)\b/i);
   });
 
+  it('creates a health-check temporary root when the project cache parent is fresh', () => {
+    const freshProjectRoot = mkdtempSync(join(tmpdir(), 'hosted-health-project-'));
+    try {
+      const cacheRoot = join(freshProjectRoot, '.cache');
+      expect(existsSync(cacheRoot)).toBe(false);
+      const root = createHostedHealthRoot(freshProjectRoot);
+      expect(existsSync(cacheRoot)).toBe(true);
+      expect(root.startsWith(`${cacheRoot}\\`) || root.startsWith(`${cacheRoot}/`)).toBe(true);
+    } finally {
+      rmSync(freshProjectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('returns stable health-check codes for loopback, disk, compose, backup, cert, and archive failures', () => {
-    const root = mkdtempSync(join(projectRoot, '.cache', 'hosted-health-'));
+    const root = createHostedHealthRoot(projectRoot);
     try {
       const fake = fakeBackupTools(root);
       const backupState = join(root, 'backup-state');
@@ -1764,7 +1785,7 @@ exit 4
       chmodSync(join(fake.bin, 'hosted-health-date'), 0o755);
 
       const environment: NodeJS.ProcessEnv = {
-        PATH: `${bashPath(fake.bin)}${process.env.PATH ? `:${process.env.PATH.replaceAll('\\', '/')}` : ''}`,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
         FAKE_CALLS: bashPath(fake.calls),
         HOSTED_CURL_BIN: bashPath(join(fake.bin, 'hosted-curl')),
         HOSTED_DF_BIN: bashPath(join(fake.bin, 'hosted-df')),
