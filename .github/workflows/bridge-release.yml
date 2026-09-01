@@ -645,11 +645,18 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
           BRIDGE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}
         run: |
           $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
           $ref=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/ref/tags/v0.4.11" -Headers $headers
-          if($env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $ref.ref -cne 'refs/tags/v0.4.11' -or $ref.object.sha -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA){throw 'Reviewed bridge tag moved.'}
+          if($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $ref.ref -cne 'refs/tags/v0.4.11' -or $ref.object.sha -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA){throw 'Reviewed bridge tag moved.'}
+          if($ref.object.type -ceq 'tag'){
+            $tag=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/tags/$env:BRIDGE_REVIEWED_TAG_OBJECT_SHA" -Headers $headers
+            if($tag.sha -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -or $tag.object.type -cne 'commit' -or $tag.object.sha -cne $env:BRIDGE_REVIEWED_COMMIT_SHA){throw 'Reviewed annotated bridge tag binding changed.'}
+          }elseif($ref.object.type -ceq 'commit'){
+            if($env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cne $env:BRIDGE_REVIEWED_COMMIT_SHA){throw 'Reviewed lightweight bridge tag binding changed.'}
+          }else{throw 'Reviewed bridge tag object type is invalid.'}
       - name: Attest bridge release assets
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:

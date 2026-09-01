@@ -908,6 +908,15 @@ describe('exact RushRush bridge release workflow contract', () => {
     expect(semanticCommands(jobs['bridge-publish']).join('\n')).not.toMatch(/EVSIGN_|SignByAsymmetricKey|channels\/|COS_|--latest(?:\s|$)(?!false)/i);
   });
 
+  it('rechecks the raw and peeled reviewed bridge tag in the signer-free publisher', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const publish=jobSteps(jobs['bridge-publish']);
+    const recheck=publish[stepIndex(publish,'Recheck reviewed bridge tag through GitHub API')];
+    expect(recheck?.env).toMatchObject({BRIDGE_REVIEWED_COMMIT_SHA:'${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}',BRIDGE_REVIEWED_TAG_OBJECT_SHA:'${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}'});
+    expect(recheck?.run).toContain('/git/tags/');
+    expect(recheck?.run).toContain('BRIDGE_REVIEWED_COMMIT_SHA');
+    expect(recheck?.run).toContain("object.type -ceq 'tag'");
+  });
+
   it('pins every external Action and cannot mutate stable, legacy, COS, or KMS state', () => {
     const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;
     for(const job of Object.values(jobs))for(const step of jobSteps(job))if(step.uses)expect(step.uses).toMatch(/^[^@]+@[0-9a-f]{40}$/);
