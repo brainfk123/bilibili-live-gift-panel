@@ -12,6 +12,14 @@ function stageBlock(stage: string): string {
   return checklist.slice(start, next < 0 ? undefined : next);
 }
 
+function stageSection(stage: string, heading: string): string {
+  const block = stageBlock(stage);
+  const start = block.indexOf(heading);
+  expect(start, `missing ${heading} in Stage ${stage}`).toBeGreaterThanOrEqual(0);
+  const next = block.indexOf('\n### ', start + heading.length);
+  return block.slice(start, next < 0 ? undefined : next);
+}
+
 it('keeps every EXE retirement stage structurally evidence-gated and initially unchecked', () => {
   for (const stage of stages) {
     const block = stageBlock(stage);
@@ -34,6 +42,22 @@ it('keeps Stage C and D support and provenance gates explicit', () => {
   for (const gate of ['user notification', 'support policy']) expect(stageC).toContain(gate);
   const stageD = stageBlock('D: maintenance-ended');
   for (const gate of ['signed EXE', 'SHA-256', 'signer subject', 'source commit', 'build instructions', 'migration instructions', 'old migration-package policy']) expect(stageD).toContain(gate);
+});
+
+it('gates Stage C on migration success-rate evidence and returns when that evidence fails', () => {
+  const entry = stageSection('C: exe-feature-freeze', '### Entry evidence');
+  expect(entry).toContain('migration success-rate evidence pointer');
+  const rollback = stageSection('C: exe-feature-freeze', '### Return to previous stage when');
+  expect(rollback).toContain('migration success-rate evidence fails');
+});
+
+it('gates Stage D on the completed announcement window and every remaining user disposition', () => {
+  const entry = stageSection('D: maintenance-ended', '### Entry evidence');
+  expect(entry).toContain('announcement-window completion evidence');
+  expect(entry).toContain('every remaining user migrated or has an explicit offline disposition');
+  const rollback = stageSection('D: maintenance-ended', '### Return to previous stage when');
+  expect(rollback).toContain('announcement window is unfinished');
+  expect(rollback).toContain('remaining users are unresolved');
 });
 
 it('links only existing tracked authority documents', () => {

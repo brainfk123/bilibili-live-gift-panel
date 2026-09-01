@@ -8,12 +8,12 @@ const viewports = [
   ['mobile-390x844', 390, 844],
 ];
 const features = [
-  ['overview', ['empty', 'populated', 'loading', 'error'], ['navigate', 'refresh', 'open-settings']],
-  ['attributes', ['empty', 'populated', 'loading', 'error', 'editing', 'validation-error'], ['create', 'edit', 'save', 'cancel', 'delete-confirm']],
-  ['activities', ['empty', 'populated', 'loading', 'error', 'active', 'locked', 'settled'], ['create', 'start', 'lock', 'settle', 'cancel']],
-  ['gift-targets', ['empty', 'populated', 'loading', 'error', 'editing'], ['create', 'edit', 'save', 'cancel', 'delete-confirm']],
-  ['obs', ['empty', 'populated', 'loading', 'error', 'preview'], ['create', 'preview', 'copy', 'reset-link', 'delete-confirm']],
-  ['analytics', ['empty', 'populated', 'loading', 'error', 'filtered'], ['filter', 'paginate', 'open-viewer', 'clear-history']],
+  ['overview', ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open'], ['navigate', 'refresh', 'open-settings']],
+  ['attributes', ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open', 'editing', 'validation-error'], ['create', 'edit', 'save', 'cancel', 'delete-confirm']],
+  ['activities', ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open', 'active', 'locked', 'settled'], ['create', 'start', 'lock', 'settle', 'cancel']],
+  ['gift-targets', ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open', 'editing'], ['create', 'edit', 'save', 'cancel', 'delete-confirm']],
+  ['obs', ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open', 'preview'], ['create', 'preview', 'copy', 'reset-link', 'delete-confirm']],
+  ['analytics', ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open', 'filtered'], ['filter', 'paginate', 'open-viewer', 'clear-history']],
 ];
 const compare = ['structure', 'hierarchy', 'spacing', 'controls', 'states', 'responsive', 'interactions'];
 

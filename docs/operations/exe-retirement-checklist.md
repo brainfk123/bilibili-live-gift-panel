@@ -67,6 +67,7 @@ Stage B requires closed-pilot evidence from real Bilibili connections and volunt
 - [ ] Hong Kong backup restore evidence:
 - [ ] real Bilibili connections and seven-day pilot decision:
 - [ ] user notification, support owner, and support policy:
+- [ ] migration success-rate evidence pointer:
 
 ### Windows policy after entry
 
@@ -75,9 +76,9 @@ Stage B requires closed-pilot evidence from real Bilibili connections and volunt
 
 ### Return to previous stage when
 
-- Any declared migration content is lost, any parity state is missing, rollback fails, pilot go/no-go returns no-go, or user support coverage is insufficient.
+- Any declared migration content is lost, any parity state is missing, rollback fails, pilot go/no-go returns no-go, migration success-rate evidence fails, or user support coverage is insufficient.
 
-Stage C may begin only after migration and parity evidence is complete and users have been notified with a supported return path.
+Stage C may begin only after migration and parity evidence is complete, the migration success-rate evidence pointer demonstrates the approved threshold, and users have been notified with a supported return path.
 
 ## Stage D: maintenance-ended
 
@@ -90,6 +91,8 @@ Stage C may begin only after migration and parity evidence is complete and users
 - [ ] Hong Kong backup restore evidence:
 - [ ] real Bilibili connections and seven-day pilot decision:
 - [ ] user notification, support owner, and support policy:
+- [ ] announcement-window completion evidence:
+- [ ] evidence that every remaining user migrated or has an explicit offline disposition:
 - [ ] archived signed EXE, SHA-256, signer subject, and source commit:
 - [ ] reproducible build instructions and migration instructions:
 - [ ] explicit old-package distribution, update, and rollback policy (old migration-package policy):
@@ -101,6 +104,6 @@ Stage C may begin only after migration and parity evidence is complete and users
 
 ### Return to previous stage when
 
-- Any declared migration content is lost, any parity state is missing, rollback fails, pilot go/no-go returns no-go, support obligations cannot be met, or archived provenance/package policy is unavailable.
+- Any declared migration content is lost, any parity state is missing, rollback fails, pilot go/no-go returns no-go, the announcement window is unfinished, remaining users are unresolved, support obligations cannot be met, or archived provenance/package policy is unavailable.
 
-Maintenance can end only with explicit old-package policy and reproducible provenance. A date, a green CI run, or a successful build alone never satisfies this stage.
+Maintenance can end only after the announcement-window completion evidence is recorded and every remaining user migrated or has an explicit offline disposition, with explicit old-package policy and reproducible provenance. A date, a green CI run, or a successful build alone never satisfies this stage.
