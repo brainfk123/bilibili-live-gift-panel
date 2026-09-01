@@ -23,6 +23,8 @@ func TestFFmpegClosureCommandsFailClosedOnMissingExplicitPaths(t *testing.T) {
 	}{
 		{command: "seal-ffmpeg", want: "FFmpeg seal arguments"},
 		{command: "publish-ffmpeg", want: "FFmpeg publication arguments"},
+		{command: "verify-enrollment", want: "enrollment arguments"},
+		{command: "verify-enrollment-policies", want: "enrollment policy arguments"},
 	} {
 		t.Run(test.command, func(t *testing.T) {
 			err := run([]string{test.command}, &bytes.Buffer{})

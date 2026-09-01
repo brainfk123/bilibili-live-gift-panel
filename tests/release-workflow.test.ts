@@ -50,6 +50,7 @@ function releaseWorkflow() {
 
   const workflow = document.toJS() as {
     concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+	permissions?: Record<string, string>;
     jobs?: {
       release?: {
         env?: Record<string, string>;
@@ -395,7 +396,7 @@ describe('release workflow supply-chain contract', () => {
   it('validates release publication timestamps without producing unused publisher metadata', () => {
     const { steps } = releaseWorkflow();
 
-    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
+	for (const name of ['Inspect existing GitHub release', 'Verify published stable is latest']) {
       const run = steps[stepIndex(steps, name)]?.run ?? '';
       expect(run, name).toContain('$publishedAt = [DateTimeOffset]$release.published_at');
       expect(run, name).not.toContain('$publishedAtRFC3339');
@@ -519,7 +520,7 @@ describe('release workflow supply-chain contract', () => {
     const installComponent = stepIndex(steps, 'Verify and install signed FFmpeg component');
     const prepareStandalone = stepIndex(steps, 'Prepare standalone FFmpeg release asset');
     const prepareRelease = stepIndex(steps, 'Prepare release assets');
-    const createRelease = stepIndex(steps, 'Create GitHub release');
+	const createRelease = stepIndex(steps, 'Create immutable-shaped stable draft');
     const redownloadStandalone = stepIndex(steps, 'Redownload published standalone FFmpeg');
     const verifyRepairComponent = stepIndex(steps, 'Verify standalone FFmpeg repair component');
     const validatePublished = stepIndex(steps, 'Validate published release assets');
@@ -588,7 +589,7 @@ describe('release workflow supply-chain contract', () => {
       expect(steps[index]?.env ?? {}).not.toHaveProperty('EVSIGN_CERT');
       expect(steps[index]?.env ?? {}).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
     }
-    expect(steps[buildOuter]?.env).not.toHaveProperty('APP_UPDATE_PUBLISHER');
+	expect(steps[buildOuter]?.env?.APP_UPDATE_PUBLISHER).toBe('NaisNet Technology Co., Ltd.');
     expect(steps[signInner]?.env).toMatchObject({
       EVSIGN_CERTIFICATE: '${{ vars.EVSIGN_CERTIFICATE }}',
       EVSIGN_PUBLISHER_IDENTITY: '${{ vars.EVSIGN_PUBLISHER_IDENTITY }}',
@@ -610,7 +611,7 @@ describe('release workflow supply-chain contract', () => {
     const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
     const signOuter = stepIndex(steps, 'Prepare and sign release executable');
 	const sealOuter = stepIndex(steps, 'Seal final stable executable');
-    const githubRelease = stepIndex(steps, 'Create GitHub release');
+	const githubRelease = stepIndex(steps, 'Create immutable-shaped stable draft');
 
     expect(steps[testUpdateApi]?.run)
       .toBe('go -C updateapi test ./... -race -count=1');
@@ -628,14 +629,14 @@ describe('release workflow supply-chain contract', () => {
     const { steps } = releaseWorkflow();
     const build = stepIndex(steps, 'Build release executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
-    const githubRelease = stepIndex(steps, 'Create GitHub release');
+	const githubRelease = stepIndex(steps, 'Create immutable-shaped stable draft');
     const validate = stepIndex(steps, 'Validate published release assets');
 
     expect(steps[build]?.env).toMatchObject({
       APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
       APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
     });
-    expect(steps[build]?.env).not.toHaveProperty('APP_UPDATE_PUBLISHER');
+	expect(steps[build]?.env?.APP_UPDATE_PUBLISHER).toBe('NaisNet Technology Co., Ltd.');
     expect(steps[build]?.env).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
     expect(build).toBeLessThan(sign);
     expect(steps.some((step) => step.name === 'Prepare pinned EVSign CLI for outer executable')).toBe(false);
@@ -669,7 +670,7 @@ describe('release workflow supply-chain contract', () => {
     const build = stepIndex(steps, 'Build release executable');
     const sign = stepIndex(steps, 'Prepare and sign release executable');
     const prepare = stepIndex(steps, 'Prepare release assets');
-    const create = stepIndex(steps, 'Create GitHub release');
+	const create = stepIndex(steps, 'Create immutable-shaped stable draft');
     const validate = stepIndex(steps, 'Validate published release assets');
 
     expect(inspect).toBeLessThan(download);
@@ -881,7 +882,7 @@ describe('publisher rotation workflow contract', () => {
 	const stableInspect = stable[stepIndex(stable, 'Seal final stable executable')];
 	const stableAssets = stable[stepIndex(stable, 'Prepare release assets')];
 	const stableAttest = stable[stepIndex(stable, 'Attest executable provenance')];
-	const stablePublish = stable[stepIndex(stable, 'Create GitHub release')];
+	const stablePublish = stable[stepIndex(stable, 'Create immutable-shaped stable draft')];
 	expect(stableSign?.run).toContain('gift-panel-windows-x64.signed-candidate.exe');
 	expect(stableInspect?.run).toContain('--sealed-directory dist/stable-sealed-executable');
 	expect(stableInspect?.run).toContain('signedFileSha256');
@@ -910,8 +911,9 @@ describe('publisher rotation workflow contract', () => {
   it('executes no target code after final sealing before either publication', () => {
 	const stable = releaseWorkflow().steps;
 	const stableSeal = stepIndex(stable, 'Seal final stable executable');
-	const stablePublish = stepIndex(stable, 'Create GitHub release');
+	const stablePublish = stepIndex(stable, 'Create immutable-shaped stable draft');
 	for (const step of stable.slice(stableSeal + 1, stablePublish)) {
+	  if (step.name === 'Verify sealed enrollment release closure') continue;
 	  expect(step.run ?? '', step.name).not.toMatch(/(?:^|\n)\s*(?:npm|node|go\s+-C\s+(?!release-tools))\b/i);
 	}
 
@@ -942,6 +944,123 @@ describe('publisher rotation workflow contract', () => {
 	expect(verify?.run).not.toContain('Get-Content "$componentDirectory/manifest.json"');
 	expect(after?.run).toContain('dist/bridge-ffmpeg-sealed/ffmpeg.zip');
 	expect(after?.run).toContain('dist/bridge-ffmpeg-sealed/manifest.json');
+  });
+
+  it('requires reviewed enrollment inputs before every new stable build while keeping verified historical repair data-only', () => {
+	const { source, steps } = releaseWorkflow();
+	const inspectExisting = stepIndex(steps, 'Inspect existing GitHub release');
+	const classify = stepIndex(steps, 'Classify verified stable Release state');
+	const validateInputs = stepIndex(steps, 'Validate stable enrollment inputs');
+	const build = stepIndex(steps, 'Build release executable');
+	expect(inspectExisting).toBeLessThan(classify);
+	expect(classify).toBeLessThan(validateInputs);
+	expect(validateInputs).toBeLessThan(build);
+	expect(steps[classify]?.run).toContain("[Version]'0.4.12'");
+	expect(steps[classify]?.run).toContain("$env:RELEASE_EXISTS -eq 'true'");
+	expect(steps[classify]?.run).toContain('Historical stable tags are repair-only');
+	expect(steps[classify]?.run).toContain('Existing enrollment stable Releases are immutable');
+	expect(steps[validateInputs]?.if).toBe("env.RELEASE_EXISTS != 'true'");
+	expect(steps[validateInputs]?.env).toEqual({
+	  STABLE_REVIEWED_COMMIT_SHA: '${{ vars.STABLE_REVIEWED_COMMIT_SHA }}',
+	  STABLE_REVIEWED_TAG_OBJECT_SHA: '${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}',
+	  STABLE_TRUST_ROOT_SPKI_B64: '${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}',
+	  STABLE_TRUST_ROOT_SPKI_SHA256: '${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}',
+	  STABLE_TRUST_ROOT_KEY_ID: '${{ vars.STABLE_TRUST_ROOT_KEY_ID }}',
+	  STABLE_BOOTSTRAP_POLICY_B64: '${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}',
+	  STABLE_BOOTSTRAP_POLICY_SHA256: '${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}',
+	  STABLE_BOOTSTRAP_POLICY_EPOCH: '${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}',
+	  STABLE_AUTHORIZATION_POLICY_B64: '${{ vars.STABLE_AUTHORIZATION_POLICY_B64 }}',
+	  STABLE_AUTHORIZATION_POLICY_SHA256: '${{ vars.STABLE_AUTHORIZATION_POLICY_SHA256 }}',
+	  STABLE_AUTHORIZATION_POLICY_EPOCH: '${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}',
+	  STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: '${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}',
+	});
+	expect(steps[validateInputs]?.run).toContain('stable enrollment input is missing');
+	expect(steps[validateInputs]?.run).toContain('known Task 1 test fixture');
+	expect(steps[validateInputs]?.run).toContain('[uint64]$env:STABLE_AUTHORIZATION_POLICY_EPOCH -le [uint64]$env:STABLE_BOOTSTRAP_POLICY_EPOCH');
+	expect(steps[validateInputs]?.run).toContain('STABLE_ENROLLMENT_ROOT');
+	expect(steps[validateInputs]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-policies');
+	expect(steps[validateInputs]?.run).toContain('STABLE_AUTHORIZED_ARTIFACT_SHA256');
+	expect(steps[build]?.env).toMatchObject({
+	  APP_UPDATE_PUBLISHER: 'NaisNet Technology Co., Ltd.',
+	  APP_UPDATE_TRUST_REQUIRED: '1',
+	  APP_UPDATE_TRUST_ROOT_SPKI_B64: '${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}',
+	  APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: '${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}',
+	});
+	expect(source).not.toContain('RELEASE_ENROLLMENT_OVERRIDE');
+	const repairExecuted = new Set(steps.filter((step) => releaseStepRuns(step, { RELEASE_EXISTS: 'true', RELEASE_STANDALONE_FFMPEG: 'true', FFMPEG_COMPONENT_EXISTS: 'true' })).map((step) => step.name));
+	expect(repairExecuted).not.toContain('Validate stable enrollment inputs');
+	expect(repairExecuted).not.toContain('Verify sealed enrollment release closure');
+  });
+
+  it('behaviorally verifies the sealed enrollment closure and publishes only its public cross-bound evidence', () => {
+	const { steps } = releaseWorkflow();
+	const tools = steps[stepIndex(steps, 'Build reviewed release security tools')];
+	const prepare = stepIndex(steps, 'Prepare release assets');
+	const verify = stepIndex(steps, 'Verify sealed enrollment release closure');
+	const attest = stepIndex(steps, 'Attest executable provenance');
+	expect(tools?.run).toContain('verify-enrollment-build.mjs');
+	expect(tools?.run).toContain('ENROLLMENT_VERIFIER_SCRIPT_PATH');
+	expect(prepare).toBeLessThan(verify);
+	expect(verify).toBeLessThan(attest);
+	const run = steps[verify]?.run ?? '';
+	expect(run).toContain('node $env:ENROLLMENT_VERIFIER_SCRIPT_PATH');
+	for (const binding of ['--inspector', '--artifact', '--artifact-inspection', '--artifact-sidecar', '--standalone-ffmpeg', '--ffmpeg-sidecar', '--ffmpeg-archive', '--ffmpeg-manifest', '--ffmpeg-manifest-sha256', '--root-spki', '--root-sha256', '--root-key-id', '--bootstrap-policy', '--bootstrap-policy-sha256', '--bootstrap-policy-epoch', '--authorization-policy', '--authorization-policy-sha256', '--authorization-policy-epoch', '--version', '--tag', '--commit', '--output']) {
+	  expect(run).toContain(binding);
+	}
+	expect(run).toContain('$env:STABLE_SEALED_EXE_PATH');
+	expect(run).toContain('stable-release-evidence.json');
+	expect(run).not.toMatch(/strings|Select-String|certificate table/i);
+	expect(String(steps[attest]?.with?.['subject-path'])).toContain('stable-release-evidence.json');
+  });
+
+  it('reads back the exact stable draft before latest=true and confirms releases/latest afterwards', () => {
+	const { steps } = releaseWorkflow();
+	const verifyEnrollment = stepIndex(steps, 'Verify sealed enrollment release closure');
+	const create = stepIndex(steps, 'Create immutable-shaped stable draft');
+	const readback = stepIndex(steps, 'Read back and verify stable draft');
+	const publish = stepIndex(steps, 'Publish stable as latest');
+	const verifyLatest = stepIndex(steps, 'Verify published stable is latest');
+	expect(verifyEnrollment).toBeLessThan(create);
+	expect(create).toBeLessThan(readback);
+	expect(readback).toBeLessThan(publish);
+	expect(publish).toBeLessThan(verifyLatest);
+	expect(steps[create]?.run).toContain('gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG --latest=false');
+	expect(steps[create]?.run).toContain('$env:STABLE_SEALED_EXE_PATH#gift-panel-windows-x64.exe');
+	expect(steps[create]?.run).toContain('stable-release-evidence.json');
+	expect(steps[readback]?.run).toContain('stable-draft-readback');
+	expect(steps[readback]?.run).toContain('[string]$asset.digest');
+	expect(steps[readback]?.run).toContain('Get-FileHash');
+	expect(steps[publish]?.run).toContain('gh release edit $env:RELEASE_TAG --draft=false --latest');
+	expect(steps[verifyLatest]?.run).toContain('/releases/latest');
+	expect(steps[verifyLatest]?.run).toContain('$latest.id -ne $release.id');
+	expect(steps[verifyLatest]?.run).toContain('stable-published-readback');
+	for (const step of steps.slice(0, publish)) expect(step.run ?? '', step.name).not.toMatch(/--latest(?:\s|$)(?!false)/);
+  });
+
+  it('rechecks the protected stable tag object and peeled commit before draft and publication', () => {
+	const { steps } = releaseWorkflow();
+	const beforeDraft = stepIndex(steps, 'Recheck reviewed stable tag before draft');
+	const create = stepIndex(steps, 'Create immutable-shaped stable draft');
+	const beforePublish = stepIndex(steps, 'Recheck reviewed stable tag before publication');
+	const publish = stepIndex(steps, 'Publish stable as latest');
+	expect(beforeDraft).toBeLessThan(create);
+	expect(create).toBeLessThan(beforePublish);
+	expect(beforePublish).toBeLessThan(publish);
+	for (const index of [beforeDraft, beforePublish]) {
+	  expect(steps[index]?.env).toEqual({
+		STABLE_REVIEWED_COMMIT_SHA: '${{ vars.STABLE_REVIEWED_COMMIT_SHA }}',
+		STABLE_REVIEWED_TAG_OBJECT_SHA: '${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}',
+	  });
+	  expect(steps[index]?.run).toContain('git rev-parse "$rawRef^{commit}"');
+	  expect(steps[index]?.run).toContain('git ls-remote origin $rawRef $peeledRef');
+	  expect(steps[index]?.run).toContain('reviewed stable tag binding failed');
+	}
+  });
+
+  it('keeps stable Release permissions isolated from bridge, KMS, legacy pointers, and COS', () => {
+	const { source, workflow } = releaseWorkflow();
+	expect(workflow.permissions).toEqual({ contents: 'write', 'id-token': 'write', attestations: 'write' });
+	expect(source).not.toMatch(/EVSIGN_BRIDGE_|SignByAsymmetricKey|TENCENTCLOUD_|GIFT_PANEL_KMS_|channels\/legacy-rushrush\/latest\.json|\bCOS_/);
   });
 
   it('has one manual trigger with explicit epoch transition and pointer choice', () => {

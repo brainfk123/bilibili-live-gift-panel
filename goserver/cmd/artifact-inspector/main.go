@@ -45,9 +45,82 @@ func run(args []string, output io.Writer) error {
 		return runSealFFmpeg(args[1:], output)
 	case "publish-ffmpeg":
 		return runPublishFFmpeg(args[1:], output)
+	case "verify-enrollment":
+		return runVerifyEnrollment(args[1:], output)
+	case "verify-enrollment-policies":
+		return runVerifyEnrollmentPolicies(args[1:], output)
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func runVerifyEnrollmentPolicies(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("verify-enrollment-policies", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var options artifactinspect.VerifyEnrollmentPoliciesOptions
+	flags.StringVar(&options.RootSPKIPath, "root-spki", "", "reviewed root SPKI")
+	flags.StringVar(&options.ExpectedRootSHA256, "root-sha256", "", "reviewed root digest")
+	flags.StringVar(&options.BootstrapPolicyPath, "bootstrap-policy", "", "embedded bootstrap policy")
+	flags.StringVar(&options.ExpectedBootstrapPolicySHA256, "bootstrap-policy-sha256", "", "bootstrap policy digest")
+	bootstrapEpoch := flags.String("bootstrap-policy-epoch", "", "bootstrap policy epoch")
+	flags.StringVar(&options.AuthorizationPolicyPath, "authorization-policy", "", "final artifact authorization policy")
+	flags.StringVar(&options.ExpectedAuthorizationPolicySHA256, "authorization-policy-sha256", "", "authorization policy digest")
+	authorizationEpoch := flags.String("authorization-policy-epoch", "", "authorization policy epoch")
+	flags.StringVar(&options.Tag, "tag", "", "stable tag")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return errors.New("enrollment policy arguments are invalid")
+	}
+	parsedBootstrapEpoch, bootstrapErr := strconv.ParseUint(*bootstrapEpoch, 10, 64)
+	parsedAuthorizationEpoch, authorizationErr := strconv.ParseUint(*authorizationEpoch, 10, 64)
+	if bootstrapErr != nil || authorizationErr != nil || parsedBootstrapEpoch == 0 || parsedAuthorizationEpoch <= parsedBootstrapEpoch || options.RootSPKIPath == "" || options.BootstrapPolicyPath == "" || options.AuthorizationPolicyPath == "" || options.Tag == "" {
+		return errors.New("enrollment policy arguments are invalid")
+	}
+	options.ExpectedBootstrapPolicyEpoch = parsedBootstrapEpoch
+	options.ExpectedAuthorizationPolicyEpoch = parsedAuthorizationEpoch
+	options.Now = time.Now().UTC()
+	evidence, err := artifactinspect.VerifyEnrollmentPolicies(options)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(evidence)
+}
+
+func runVerifyEnrollment(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("verify-enrollment", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var options artifactinspect.VerifyEnrollmentOptions
+	flags.StringVar(&options.ArtifactPath, "artifact", "", "content-addressed sealed executable")
+	flags.StringVar(&options.ExpectedPEContentSHA256, "pe-content-sha256", "", "covered PE digest")
+	flags.StringVar(&options.Version, "version", "", "application version")
+	flags.StringVar(&options.Tag, "tag", "", "stable tag")
+	flags.StringVar(&options.Commit, "commit", "", "release commit")
+	flags.StringVar(&options.RootSPKIPath, "root-spki", "", "reviewed root SPKI")
+	flags.StringVar(&options.ExpectedRootSHA256, "root-sha256", "", "reviewed root digest")
+	flags.StringVar(&options.BootstrapPolicyPath, "bootstrap-policy", "", "embedded bootstrap policy")
+	flags.StringVar(&options.ExpectedBootstrapPolicySHA256, "bootstrap-policy-sha256", "", "bootstrap policy digest")
+	bootstrapEpoch := flags.String("bootstrap-policy-epoch", "", "bootstrap policy epoch")
+	flags.StringVar(&options.AuthorizationPolicyPath, "authorization-policy", "", "final artifact authorization policy")
+	flags.StringVar(&options.ExpectedAuthorizationPolicySHA256, "authorization-policy-sha256", "", "authorization policy digest")
+	authorizationEpoch := flags.String("authorization-policy-epoch", "", "authorization policy epoch")
+	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "sealed FFmpeg archive")
+	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "sealed FFmpeg manifest")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return errors.New("enrollment arguments are invalid")
+	}
+	parsedBootstrapEpoch, bootstrapErr := strconv.ParseUint(*bootstrapEpoch, 10, 64)
+	parsedAuthorizationEpoch, authorizationErr := strconv.ParseUint(*authorizationEpoch, 10, 64)
+	if bootstrapErr != nil || authorizationErr != nil || parsedBootstrapEpoch == 0 || parsedAuthorizationEpoch == 0 ||
+		options.ArtifactPath == "" || options.RootSPKIPath == "" || options.BootstrapPolicyPath == "" || options.AuthorizationPolicyPath == "" || options.FFmpegArchivePath == "" || options.FFmpegManifestPath == "" {
+		return errors.New("enrollment arguments are invalid")
+	}
+	options.ExpectedBootstrapPolicyEpoch = parsedBootstrapEpoch
+	options.ExpectedAuthorizationPolicyEpoch = parsedAuthorizationEpoch
+	options.Now = time.Now().UTC()
+	evidence, err := artifactinspect.VerifyEnrollmentArtifact(options)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(evidence)
 }
 
 func runSealFFmpeg(args []string, output io.Writer) error {
