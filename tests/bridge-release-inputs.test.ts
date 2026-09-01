@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { verifyBridgeReadiness } from '../scripts/bridge-release-inputs.mjs';
-import { publishTrustPolicy } from '../scripts/publish-trust-policy.mjs';
+import { publishTrustPolicy, type PublisherAdapters } from '../scripts/publish-trust-policy.mjs';
 import { mapPolicyReleaseToLocalBundle } from '../scripts/publisher-policy-release-contract.mjs';
 
 const sha256 = (value: Buffer) => createHash('sha256').update(value).digest('hex');
@@ -94,36 +94,38 @@ function readinessFixture(manifestScoped = true) {
 describe('bridge readiness reviewed evidence', () => {
   it('adapts the actual Task9 publisher closure into the strict bridge bundle and readiness gate', async () => {
     const fixture = readinessFixture();
-    let published: { tag: string; assets: Array<{ name: string; bytes: Buffer; sha256: string }> } | undefined;
+    let published: Parameters<PublisherAdapters['github']['publishImmutableRelease']>[0] | undefined;
     const cos = new Map<string, Buffer>();
-    await publishTrustPolicy({
-      mode: 'publish-immutable', policyPath: 'bundle/policy.json', auditPath: 'bundle/audit.json', reviewedSPKIPath: 'root.der',
-      expectedSPKISHA256: sha256(fixture.rootSPKI), expectedPreviousEpoch: 1, advanceDiscovery: false, now: fixture.now,
-    }, {
+    const adapters: PublisherAdapters = {
       process: { run: async () => ({ code: 0, stdout: `${fixture.authorizationVerifiedBundleBytes.toString()}\n`, stderr: '' }) },
       files: { readFile: async () => fixture.rootSPKI },
       cos: {
-        putImmutable: async (key: string, bytes: Buffer) => { cos.set(key, Buffer.from(bytes)); },
-        read: async (key: string) => { const bytes = cos.get(key); return bytes ? { bytes, version: 'v1', sha256: sha256(bytes), contentType: 'application/json' } : null; },
+        putImmutable: async (key, bytes) => { cos.set(key, Buffer.from(bytes)); },
+        read: async (key) => { const bytes = cos.get(key); return bytes ? { bytes, version: 'v1', sha256: sha256(bytes), contentType: 'application/json' } : null; },
         compareAndSwapPointer: async () => {},
       },
       github: {
-        publishImmutableRelease: async (release: typeof published) => { published = release; },
-        downloadReleaseAsset: async (tag: string, name: string) => Buffer.from(published!.tag === tag ? published!.assets.find((asset) => asset.name === name)!.bytes : []),
+        publishImmutableRelease: async (release) => { published = release; },
+        downloadReleaseAsset: async (tag, name) => Buffer.from(published?.tag === tag ? published.assets.find((asset) => asset.name === name)!.bytes : []),
         readPointer: async () => null,
         compareAndSwapPointer: async () => {},
       },
-    });
-    expect(published).toBeDefined();
-    const release = {
-      id: 502, tag_name: published!.tag, draft: false, prerelease: false, published_at: '2026-08-09T00:00:00Z',
-      assets: published!.assets.map((asset, index) => ({ name: asset.name, size: asset.bytes.length, digest: `sha256:${asset.sha256}`, content_type: 'application/json', url: `https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/${5001 + index}` })),
     };
-    const local = mapPolicyReleaseToLocalBundle(release, new Map(published!.assets.map((asset) => [asset.name, asset.bytes])));
+    await publishTrustPolicy({
+      mode: 'publish-immutable', policyPath: 'bundle/policy.json', auditPath: 'bundle/audit.json', reviewedSPKIPath: 'root.der',
+      expectedSPKISHA256: sha256(fixture.rootSPKI), expectedPreviousEpoch: 1, advanceDiscovery: false, now: fixture.now,
+    }, adapters);
+    if (!published) throw new Error('Task9 publisher fake did not capture a Release');
+    const captured = published;
+    const release = {
+      id: 502, tag_name: captured.tag, draft: false, prerelease: false, published_at: '2026-08-09T00:00:00Z',
+      assets: captured.assets.map((asset, index) => ({ name: asset.name, size: asset.bytes.length, digest: `sha256:${asset.sha256}`, content_type: 'application/json', url: `https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/${5001 + index}` })),
+    };
+    const local = mapPolicyReleaseToLocalBundle(release, new Map(captured.assets.map((asset) => [asset.name, asset.bytes])));
     expect(Object.keys(local).sort()).toEqual(['audit', 'commit', 'policy']);
-    fixture.authorizationPolicyBytes = local.policy;
-    fixture.authorizationAuditBytes = local.audit;
-    fixture.commitBytes = local.commit;
+    fixture.authorizationPolicyBytes = Buffer.from(local.policy);
+    fixture.authorizationAuditBytes = Buffer.from(local.audit);
+    fixture.commitBytes = Buffer.from(local.commit);
     fixture.authorizationPolicyReleaseBytes = Buffer.from(JSON.stringify(release));
     expect(verifyBridgeReadiness(fixture)).toMatchObject({ authorizationPolicyEpoch: 2, authorizationPolicyReleaseId: 502 });
   });

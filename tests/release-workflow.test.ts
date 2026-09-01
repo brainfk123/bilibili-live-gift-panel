@@ -273,76 +273,6 @@ ${validation}
   }
 }
 
-function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
-  const temporaryRoot = mkdtempSync(join(tmpdir(), 'gift-panel-bridge-evidence-'));
-  try {
-    const dist = join(temporaryRoot, 'dist');
-    mkdirSync(dist);
-    const readinessRoot = join(temporaryRoot, 'bridge-readiness');
-    mkdirSync(readinessRoot);
-    const executable = Buffer.from('rushrush-signed-executable');
-    const ffmpeg = Buffer.from('naisnet-signed-ffmpeg');
-    const componentManifest = Buffer.from('{"version":"9.0"}');
-	const sealedExecutableDirectory = join(dist, 'bridge-sealed-executable');
-	mkdirSync(sealedExecutableDirectory);
-	const executableHash = createHash('sha256').update(executable).digest('hex');
-	const sealedExecutablePath = join(sealedExecutableDirectory, `${executableHash}.exe`);
-    const ffmpegHash = createHash('sha256').update(ffmpeg).digest('hex');
-    const manifestHash = createHash('sha256').update(componentManifest).digest('hex');
-	writeFileSync(sealedExecutablePath, executable);
-	writeFileSync(join(dist, 'gift-panel-windows-x64.exe'), executable);
-    writeFileSync(join(dist, 'ffmpeg-windows-x64.exe'), ffmpeg);
-    writeFileSync(join(dist, 'ffmpeg-component-manifest.json'), componentManifest);
-    writeFileSync(join(dist, 'bridge-artifact-inspection.json'), JSON.stringify({
-	  version: '0.4.11', tag: 'v0.4.11', commit: 'a'.repeat(40), peContentSha256: 'd'.repeat(64), signedFileSha256: executableHash, signedFileSize: executable.length,
-      rootSpkiSha256: 'b'.repeat(64), policySha256: 'c'.repeat(64), policyEpoch: 1,
-      outerIdentity: { country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P' },
-      ffmpegVersion: '9.0', ffmpegSha256: ffmpegHash, ffmpegSize: ffmpeg.length,
-      ffmpegIdentity: { country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094' },
-    }));
-    writeFileSync(join(readinessRoot, 'readiness.json'), JSON.stringify({
-      schemaVersion: 1, stableReleaseId: 412, stablePublishedAt: '2026-08-01T00:00:00Z', stableArtifactSha256:'1'.repeat(64), observationEndedAt: '2026-08-08T00:00:00Z', observationEvidenceSha256: 'e'.repeat(64),
-      policyReleaseId: 501, policyEpoch: 1, policySha256: 'c'.repeat(64), rootSpkiSha256: 'b'.repeat(64), kmsKeyId: 'kms-production-key', kmsRequestId: 'kms-request-1', trustAttestationSha256: 'f'.repeat(64),
-    }));
-    writeFileSync(join(temporaryRoot, 'gift-panel-changelog.json'), '{"schemaVersion":1,"releases":[{"version":"0.4.11"}]}');
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const evidence = steps[stepIndex(steps, 'Prepare public bridge evidence')]?.run;
-    expect(evidence).toBeTypeOf('string');
-    const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', '-'], {
-      cwd: temporaryRoot,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        BRIDGE_TAG: 'v0.4.11',
-        BRIDGE_COMMIT: 'a'.repeat(40),
-        GITHUB_REPOSITORY: 'brainfk123/bilibili-live-gift-panel',
-        BRIDGE_TRUST_ROOT_SPKI_SHA256: 'b'.repeat(64),
-        BRIDGE_BOOTSTRAP_POLICY_SHA256: 'c'.repeat(64),
-        BRIDGE_BOOTSTRAP_POLICY_EPOCH: '1',
-        BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: manifestHash,
-        BRIDGE_FFMPEG_SHA256: expectedFFmpegHash ?? ffmpegHash,
-        BRIDGE_FFMPEG_SIZE: String(ffmpeg.length),
-        BRIDGE_READINESS_ROOT: readinessRoot,
-		BRIDGE_SEALED_EXE_PATH: sealedExecutablePath,
-		BRIDGE_EXPECTED_EXE_PATH: join(dist, 'gift-panel-windows-x64.exe'),
-      },
-      input: `$ErrorActionPreference = 'Stop'\n${evidence}\n`,
-      timeout: 30_000,
-    });
-    return {
-      result,
-      evidence: existsSync(join(dist, 'bridge-release-evidence.json'))
-        ? JSON.parse(readFileSync(join(dist, 'bridge-release-evidence.json'), 'utf8'))
-        : undefined,
-      checksums: existsSync(join(dist, 'SHA256SUMS.txt'))
-        ? readFileSync(join(dist, 'SHA256SUMS.txt'), 'utf8')
-        : '',
-    };
-  } finally {
-    rmSync(temporaryRoot, { recursive: true, force: true });
-  }
-}
-
 describe('release workflow supply-chain contract', () => {
 	it('hands an unsigned closed candidate to a fresh protected stable signing runner', () => {
 	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
@@ -719,7 +649,6 @@ describe('release workflow supply-chain contract', () => {
 	  expect(bridgeDraft?.run).not.toContain('#gift-panel-windows-x64.exe');
 	});
 });
-
 describe('publisher rotation workflow contract', () => {
   it('pins every external Action to one immutable commit', () => {
     const workflow = publisherRotationWorkflow();

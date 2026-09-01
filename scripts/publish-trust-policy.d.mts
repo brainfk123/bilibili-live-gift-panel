@@ -57,10 +57,12 @@ export interface PublisherSummary {
   expectedPreviousEpoch: number;
   policySHA256: string;
   auditSHA256: string;
+  commitSHA256: string;
   cosImmutableKey: string;
   githubReleaseTag: string;
   githubPolicyAsset: string;
   githubAuditAsset: string;
+  githubCommitAsset: string;
   cosPointerKey: string;
   githubPointerRef: string;
   githubPointerPath: string;
@@ -68,7 +70,7 @@ export interface PublisherSummary {
 }
 
 export function publisherTargets(epoch: number): Pick<PublisherSummary,
-  'cosImmutableKey' | 'githubReleaseTag' | 'githubPolicyAsset' | 'githubAuditAsset' |
+  'cosImmutableKey' | 'githubReleaseTag' | 'githubPolicyAsset' | 'githubAuditAsset' | 'githubCommitAsset' |
   'cosPointerKey' | 'githubPointerRef' | 'githubPointerPath'>;
 export function formatPublisherSummary(summary: PublisherSummary): string;
 export function publishTrustPolicy(options: PublisherOptions, adapters: PublisherAdapters): Promise<PublisherSummary>;

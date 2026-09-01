@@ -1,7 +1,6 @@
 export interface SignFileOptions {
   inputPath: string;
   outputPath: string;
-  endpoint: string;
   headers: Record<string, string>;
   maxAttempts?: number;
   attemptTimeoutMs?: number;
@@ -12,6 +11,7 @@ export interface SignDependencies {
   sleep?: (milliseconds: number) => Promise<void>;
   log?: (message: string) => void;
 }
+export const EVSIGN_API_ENDPOINT: 'https://api.evsign.cn/v1';
 export interface EVSignPublisherIdentity {
   country: 'CN';
   organization: string;
@@ -30,5 +30,5 @@ export function signWithProfile(options: {
   inputPath: string;
   outputPath?: string;
 }, dependencies?: SignDependencies): Promise<void>;
-export function requestSignedBytes(source: Buffer, request: { endpoint: string; headers: Record<string, string>; attemptTimeoutMs: number; maximumResponseBytes: number }): Promise<Buffer>;
+export function requestSignedBytes(source: Buffer, request: { headers: Record<string, string>; attemptTimeoutMs: number; maximumResponseBytes: number; fetchImpl?: typeof fetch }): Promise<Buffer>;
 export function signFileWithRetry(options: SignFileOptions, dependencies?: SignDependencies): Promise<void>;

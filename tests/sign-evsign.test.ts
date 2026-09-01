@@ -10,7 +10,6 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
-
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'sign-evsign-'));
   roots.push(root);
@@ -49,7 +48,7 @@ describe('EV Sign retry orchestration', () => {
     const bodies: Buffer[] = [];
     const delays: number[] = [];
     let attempt = 0;
-    await signFileWithRetry({ inputPath, outputPath, endpoint: 'https://example.invalid/v1', headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
+    await signFileWithRetry({ inputPath, outputPath, headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
       request: async (body) => {
         bodies.push(Buffer.from(body));
         if (attempt++ === 0) throw firstFailure;
@@ -66,7 +65,7 @@ describe('EV Sign retry orchestration', () => {
   it.each([400, 401, 403, 404, 409, 422])('does not retry terminal HTTP %s', async (statusCode) => {
     const { inputPath, outputPath } = fixture();
     let attempts = 0;
-    await expect(signFileWithRetry({ inputPath, outputPath, endpoint: 'https://example.invalid/v1', headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
+    await expect(signFileWithRetry({ inputPath, outputPath, headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
       request: async () => { attempts += 1; throw failure({ statusCode }); },
       sleep: async () => {},
       log: () => {},
@@ -79,7 +78,7 @@ describe('EV Sign retry orchestration', () => {
     const { inputPath, outputPath } = fixture();
     const delays: number[] = [];
     let attempts = 0;
-    await expect(signFileWithRetry({ inputPath, outputPath, endpoint: 'https://example.invalid/v1', headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
+    await expect(signFileWithRetry({ inputPath, outputPath, headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
       request: async () => { attempts += 1; throw failure({ statusCode: 503 }); },
       sleep: async (milliseconds) => { delays.push(milliseconds); },
       log: () => {},
@@ -92,7 +91,7 @@ describe('EV Sign retry orchestration', () => {
   it('rejects empty responses without retrying or replacing output', async () => {
     const { inputPath, outputPath } = fixture();
     let attempts = 0;
-    await expect(signFileWithRetry({ inputPath, outputPath, endpoint: 'https://example.invalid/v1', headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
+    await expect(signFileWithRetry({ inputPath, outputPath, headers: {}, maxAttempts: 3, attemptTimeoutMs: 600_000, retryDelaysMs: [15_000, 45_000] }, {
       request: async () => { attempts += 1; return Buffer.alloc(0); },
       sleep: async () => {},
       log: () => {},
