@@ -128,7 +128,7 @@ describe('CI scope classification', () => {
     }]));
     expect(summary).toContain('| Overall level | Run Windows | Run MySQL | Path | Classified level | Reason |');
     expect(summary).toContain('| desktop-high-risk | true | false |');
-    expect(summary).toContain('danger&#124;&#96;line&#13;&#10;&#60;unsafe&#62;&#38;&#92;path');
+    expect(summary).toContain('&#100;&#97;&#110;&#103;&#101;&#114;&#124;&#96;&#108;&#105;&#110;&#101;&#13;&#10;&#60;&#117;&#110;&#115;&#97;&#102;&#101;&#62;&#38;&#92;&#112;&#97;&#116;&#104;');
     expect(summary).not.toContain('danger|`line');
   });
 
@@ -138,7 +138,17 @@ describe('CI scope classification', () => {
       path: '![probe](https://example.test/pixel) @owner #123 | \u0001 中文',
     }]));
 
-    expect(summary).toContain('&#33;&#91;probe&#93;&#40;https&#58;//example.test/pixel&#41; &#64;owner &#35;123 &#124; &#1; &#20013;&#25991;');
+    expect(summary).toContain('&#33;&#91;&#112;&#114;&#111;&#98;&#101;&#93;&#40;&#104;&#116;&#116;&#112;&#115;&#58;&#47;&#47;&#101;&#120;&#97;&#109;&#112;&#108;&#101;&#46;&#116;&#101;&#115;&#116;&#47;&#112;&#105;&#120;&#101;&#108;&#41;&#32;&#64;&#111;&#119;&#110;&#101;&#114;&#32;&#35;&#49;&#50;&#51;&#32;&#124;&#32;&#1;&#32;&#20013;&#25991;');
+  });
+
+  it('encodes whitelist-only Markdown activity in Git paths', () => {
+    const path = '_probe_ www.example.com';
+    const summary = formatGitHubSummary(classifyChanges([{ status: 'M', path }]));
+
+    expect(summary).not.toContain(path);
+    expect(summary).not.toContain('_probe_');
+    expect(summary).not.toContain('www.example.com');
+    expect(summary).toContain('&#95;&#112;&#114;&#111;&#98;&#101;&#95;&#32;&#119;&#119;&#119;&#46;&#101;&#120;&#97;&#109;&#112;&#108;&#101;&#46;&#99;&#111;&#109;');
   });
 
   it('writes all CLI outputs and the human-readable summary without shell interpolation', () => {
@@ -180,6 +190,6 @@ describe('CI scope classification', () => {
     expect(JSON.parse(lines.find((line) => line.startsWith('reasons_json='))!.slice('reasons_json='.length)))
       .toEqual([{ path: '<unknown-git-diff>', level: 'desktop-high-risk', reason: 'unknown-path-fail-closed' }]);
     expect(readFileSync(summary, 'utf8'))
-      .toContain('| desktop-high-risk | true | false | &#60;unknown-git-diff&#62; | desktop-high-risk | unknown-path-fail-closed |');
+      .toContain('| desktop-high-risk | true | false | &#60;&#117;&#110;&#107;&#110;&#111;&#119;&#110;&#45;&#103;&#105;&#116;&#45;&#100;&#105;&#102;&#102;&#62; | desktop-high-risk | unknown-path-fail-closed |');
   });
 });
