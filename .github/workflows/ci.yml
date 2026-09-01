@@ -105,6 +105,27 @@ jobs:
         with:
           go-version-file: goserver/go.mod
           cache-dependency-path: goserver/go.sum
+      - name: Prepare canonical Windows test temp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:USERPROFILE "AppData\Local\Temp\gift-panel-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $item = Get-Item -LiteralPath $root -Force
+          if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Windows test temp must not be a reparse point.'
+          }
+          $resolved = [string](& node -e "const fs=require('node:fs');process.stdout.write(fs.realpathSync(process.argv[1]))" $item.FullName)
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
+            throw 'Windows test temp realpath resolution failed.'
+          }
+          $expected = [IO.Path]::GetFullPath($item.FullName)
+          $actual = [IO.Path]::GetFullPath($resolved)
+          if (-not [StringComparer]::OrdinalIgnoreCase.Equals($expected, $actual)) {
+            throw 'Windows test temp contains a reparse traversal.'
+          }
+          "TEMP=$actual" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$actual" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: npm ci
       - run: npm exec -- playwright install chromium
       - run: npm run build:ui

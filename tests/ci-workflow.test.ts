@@ -143,6 +143,16 @@ describe('mainline CI workflow', () => {
       'npm run smoke:windows-exe',
     ]));
     const windowsCommands = commands(windows);
+    const canonicalTempIndex = windows?.steps?.findIndex((step) => step.name === 'Prepare canonical Windows test temp') ?? -1;
+    const fullTestIndex = windows?.steps?.findIndex((step) => step.run === 'npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2') ?? -1;
+    expect(canonicalTempIndex).toBeGreaterThanOrEqual(0);
+    expect(canonicalTempIndex).toBeLessThan(fullTestIndex);
+    const canonicalTemp = windows?.steps?.[canonicalTempIndex]?.run ?? '';
+    expect(canonicalTemp).toContain('$env:USERPROFILE');
+    expect(canonicalTemp).toContain('realpathSync');
+    expect(canonicalTemp).toContain('TEMP=');
+    expect(canonicalTemp).toContain('TMP=');
+    expect(canonicalTemp).toContain('$env:GITHUB_ENV');
     expect(windowsCommands.filter((command) => command === 'npm run build:ui')).toHaveLength(1);
     expect(windowsCommands.indexOf('npm run build:ui')).toBeLessThan(windowsCommands.indexOf('npm run prepare:go-assets'));
     expect(windowsCommands.indexOf('npm run prepare:go-assets')).toBeLessThan(windowsCommands.indexOf('go -C goserver test ./... -race -count=1'));
