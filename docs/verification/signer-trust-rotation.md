@@ -1,5 +1,40 @@
 # Signer trust rotation final local verification
 
+## 2026-09-02 protected GitHub key amendment
+
+Commit `870da76` replaces Tencent KMS/CAM/OIDC policy signing with one protected
+GitHub Environment Secret containing an ECDSA P-256 PKCS#8 PEM. The signing job
+alone references that Secret; immutable COS/GitHub publication jobs receive no
+root private key. Tencent KMS SDK modules and the OIDC/STS exchange code were
+removed. Follow-up commit `2682f7a` permits the existing permanent COS
+SecretId/SecretKey shape while retaining optional temporary-token signing.
+Client policy bytes, embedded SPKI verification, epoch monotonicity,
+immutable targets, and dual-source discovery semantics are unchanged.
+
+The production public root is `publisher/rotation-root-spki.der`, 91 bytes,
+ECDSA `nistP256`, SHA-256
+`891cd121df6b10499e9057fff2e0efad69d75343a497e00c32858a24e0577cb6`.
+The matching private key has no plaintext file; the retained local copy is
+machine-DPAPI encrypted and its ACL is limited to the owner, current Codex
+sandbox identity, Administrators, and SYSTEM pending GitHub Secret upload.
+
+Current verification:
+
+- `go test ./... -count=1` in `updateapi`: pass;
+- `go vet ./...` in `updateapi`: pass;
+- publisher/bridge workflow regressions at final HEAD: 135/135 pass;
+- full Vitest: 89 files and 1,330 tests pass; the two existing browser suites
+  fail only because Chromium launch is denied with `spawn EPERM`; 41 tests are
+  skipped including those browser cases;
+- `tsc --noEmit` reaches the unchanged existing missing declaration for
+  `scripts/build-go.mjs`; no error names a file changed by this amendment;
+- `git diff --check`: pass;
+- production epoch-1 candidate strict validation: pass;
+- public SPKI independent .NET import, curve, length, and digest check: pass.
+
+No GitHub Environment, Secret, variable, workflow, Release, tag, COS object,
+server, or pointer mutation had occurred when this local evidence was recorded.
+
 ## Result and exact scope
 
 This record covers the user-authorized narrow bridge readiness module-closure
