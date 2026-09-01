@@ -216,6 +216,85 @@ function streamingResponse(
 
 describe('real publisher remote adapters', () => {
   it.each([
+    { name: 'malformed length', headers: { 'content-length': 'not-a-number' } },
+    { name: 'negative length', headers: { 'content-length': '-1' } },
+    { name: 'oversized length', headers: { 'content-length': String((256 << 10) + 1) } },
+    { name: 'unknown encoding', headers: { 'content-encoding': 'compress' } },
+  ])('cancels the response stream on early $name rejection', async ({ headers }) => {
+    let cancelled = 0;
+    let emitted = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!emitted) {
+          emitted = true;
+          controller.enqueue(Buffer.from('{}'));
+        } else {
+          controller.close();
+        }
+      },
+      cancel() { cancelled += 1; },
+    }), { status: 200, headers: new Headers(headers as unknown as Record<string, string>) });
+    const adapter = createCOSPublisherAdapter(remoteEnvironment, async () => response, () => new Date('2029-01-02T03:04:05Z'));
+
+    await expect(adapter.read('trust/publisher/latest.json')).rejects.toThrow('publisher policy publication failed');
+    expect(cancelled).toBe(1);
+  });
+
+  it('rejects a declared nonempty response with no body without exposing metadata', async () => {
+    const adapter = createCOSPublisherAdapter(remoteEnvironment, async () => new Response(null, {
+      status: 200, headers: { 'content-length': '1' },
+    }), () => new Date('2029-01-02T03:04:05Z'));
+    await expect(adapter.read('trust/publisher/latest.json')).rejects.toThrow('publisher policy publication failed');
+  });
+
+  it.each(['gzip', 'deflate'])('accepts a bounded Fetch-decoded %s response without comparing decoded bytes to encoded length', async (encoding) => {
+    const decoded = Buffer.from('{"decoded":"policy-content"}');
+    const adapter = createCOSPublisherAdapter(remoteEnvironment, async () => streamingResponse([decoded], { headers: {
+      'content-encoding': encoding,
+      'content-length': '7',
+      'content-type': 'application/json',
+      'etag': '"compressed-version"',
+      'x-cos-meta-sha256': sha256(decoded),
+    } }), () => new Date('2029-01-02T03:04:05Z'));
+
+    await expect(adapter.read('trust/publisher/latest.json')).resolves.toMatchObject({ bytes: decoded });
+  });
+
+  it('cancels a compressed response whose decoded expansion exceeds the policy cap', async () => {
+    let cancelled = 0;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Buffer.alloc(256 << 10));
+        controller.enqueue(Buffer.from('x'));
+      },
+      cancel() { cancelled += 1; },
+    }), { status: 200, headers: { 'content-encoding': 'gzip', 'content-length': '100' } });
+    const adapter = createCOSPublisherAdapter(remoteEnvironment, async () => response, () => new Date('2029-01-02T03:04:05Z'));
+
+    await expect(adapter.read('trust/publisher/latest.json')).rejects.toThrow('publisher policy publication failed');
+    expect(cancelled).toBe(1);
+  });
+
+  it('still rejects an uncompressed declared/actual length mismatch', async () => {
+    const adapter = createCOSPublisherAdapter(remoteEnvironment, async () => streamingResponse([Buffer.from('{}')], {
+      headers: { 'content-length': '1', 'content-encoding': 'identity' },
+    }), () => new Date('2029-01-02T03:04:05Z'));
+    await expect(adapter.read('trust/publisher/latest.json')).rejects.toThrow('publisher policy publication failed');
+  });
+
+  it('requests identity encoding from COS while retaining decoded-stream enforcement', async () => {
+    let requestedEncoding = '';
+    const bytes = Buffer.from('{}');
+    const adapter = createCOSPublisherAdapter(remoteEnvironment, async (_input, init) => {
+      requestedEncoding = new Headers(init?.headers).get('accept-encoding') ?? '';
+      return streamingResponse([bytes]);
+    }, () => new Date('2029-01-02T03:04:05Z'));
+
+    await adapter.read('trust/publisher/latest.json');
+    expect(requestedEncoding).toBe('identity');
+  });
+
+  it.each([
     { name: 'direct 200', redirect: false },
     { name: 'one reviewed 302', redirect: true },
   ])('downloads a bounded GitHub policy asset through $name', async ({ redirect }) => {
@@ -403,7 +482,7 @@ describe('real publisher remote adapters', () => {
 
     await expect(adapter.downloadReleaseAsset(tag, 'gift-panel-publisher-policy.json'))
       .rejects.toThrow('publisher policy publication failed');
-    if (length && Number(length) > (256 << 10)) expect(bodyAccesses).toBe(0);
+    if (length && Number(length) > (256 << 10)) expect(bodyAccesses).toBe(1);
     else expect(pulls).toBeGreaterThan(0);
   });
 
@@ -585,6 +664,33 @@ describe('real publisher remote adapters', () => {
     expect(code).toBe('publisher-pointer-cas-conflict');
   });
 
+  it.each([409, 422])('marks missing publisher-trust ref creation HTTP %d as one typed create conflict', async (status) => {
+    const calls: string[] = [];
+    const adapter = createGitHubPublisherAdapter(remoteEnvironment, async (input, init) => {
+      calls.push(`${init?.method ?? 'GET'}:${String(input)}`);
+      if ((init?.method ?? 'GET') === 'GET') return new Response(null, { status: 404 });
+      return new Response(JSON.stringify({ message: 'secret-query-must-not-leak' }), { status });
+    });
+    let code = '';
+    let message = '';
+    try {
+      await adapter.compareAndSwapPointer({
+        ref: 'refs/heads/publisher-trust',
+        path: 'gift-panel-publisher-policy.json',
+        bytes: Buffer.from('{}'),
+        expectedVersion: null,
+      });
+    } catch (error) {
+      code = String((error as { code?: string }).code ?? '');
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(code).toBe('publisher-pointer-cas-conflict');
+    expect(message).toBe('publisher policy publication failed');
+    expect(message).not.toContain('secret-query');
+    expect(calls.filter((call) => call.startsWith('POST:'))).toHaveLength(1);
+    expect(calls.some((call) => call.startsWith('PUT:'))).toBe(false);
+  });
+
   it('rejects a malformed GitHub blob SHA before a pointer request', async () => {
     let requests = 0;
     const adapter = createGitHubPublisherAdapter(remoteEnvironment, async () => {
@@ -682,15 +788,16 @@ describe('real publisher remote adapters', () => {
   });
 
   it.each([
-    { name: 'COS-first partial', cosCandidate: true },
-    { name: 'GitHub-first partial', cosCandidate: false },
-  ])('completes only the stale pointer through real adapters after a $name', async ({ cosCandidate }) => {
+    { name: 'COS-first partial', cosCandidate: true, githubCandidate: false, regressCOS: false, succeeds: true, expectedPuts: ['github'] },
+    { name: 'GitHub-first partial', cosCandidate: false, githubCandidate: true, regressCOS: false, succeeds: true, expectedPuts: ['cos'] },
+    { name: 'final cross-side regression', cosCandidate: false, githubCandidate: false, regressCOS: true, succeeds: false, expectedPuts: ['cos', 'github'] },
+  ])('handles $name through real adapters with a final paired reread', async ({ cosCandidate, githubCandidate, regressCOS, succeeds, expectedPuts }) => {
     const fixture = await epochTwoFixture();
     const policy = fixture.candidate;
     const audit = Buffer.from(fixture.envelope.audit.bytesBase64, 'base64');
     const targets = publisherTargets(2);
     let cosPointer = cosCandidate ? fixture.candidate : fixture.previous;
-    let githubPointer = cosCandidate ? fixture.previous : fixture.candidate;
+    let githubPointer = githubCandidate ? fixture.candidate : fixture.previous;
     const puts: string[] = [];
     const release = {
       id: 99, tag_name: targets.githubReleaseTag, draft: false, prerelease: false,
@@ -726,6 +833,7 @@ describe('real publisher remote adapters', () => {
           expect(body.sha).toBe(gitVersion(githubPointer));
           puts.push('github');
           githubPointer = policy;
+          if (regressCOS) cosPointer = fixture.previous;
           return new Response('{}', { status: 200 });
         }
         return new Response(JSON.stringify({ encoding: 'base64', content: githubPointer.toString('base64'), sha: gitVersion(githubPointer) }), { status: 200 });
@@ -735,11 +843,14 @@ describe('real publisher remote adapters', () => {
     fixture.adapters.cos = createCOSPublisherAdapter(remoteEnvironment, fetchFake, () => new Date('2029-01-02T03:04:05Z'));
     fixture.adapters.github = createGitHubPublisherAdapter(remoteEnvironment, fetchFake);
 
-    await expect(publishTrustPolicy({ ...fixture.options, mode: 'advance-discovery', advanceDiscovery: true }, fixture.adapters))
-      .resolves.toMatchObject({ epoch: 2 });
-    expect(puts).toEqual(cosCandidate ? ['github'] : ['cos']);
-    expect(cosPointer).toEqual(policy);
-    expect(githubPointer).toEqual(policy);
+    const operation = publishTrustPolicy({ ...fixture.options, mode: 'advance-discovery', advanceDiscovery: true }, fixture.adapters);
+    if (succeeds) await expect(operation).resolves.toMatchObject({ epoch: 2 });
+    else await expect(operation).rejects.toThrow('publisher policy publication failed');
+    expect(puts).toEqual(expectedPuts);
+    if (succeeds) {
+      expect(cosPointer).toEqual(policy);
+      expect(githubPointer).toEqual(policy);
+    }
   });
 });
 
@@ -852,6 +963,45 @@ describe('protected publisher-policy transaction', () => {
 
 describe('publisher discovery partial completion', () => {
   it.each([
+    { name: 'candidate created by peer', peer: 'candidate', status: 409, succeeds: true },
+    { name: 'ref still absent', peer: 'absent', status: 422, succeeds: false },
+    { name: 'invalid peer content', peer: 'invalid', status: 409, succeeds: false },
+  ])('rereads exactly once after a missing-ref $status conflict with $name', async ({ peer, status, succeeds }) => {
+    const envelope = await verifiedEnvelope();
+    const candidate = Buffer.from(envelope.policy.bytesBase64, 'base64');
+    const state = await fakeAdapters(envelope);
+    await publishTrustPolicy(await testOptions({ mode: 'publish-immutable' }), state.adapters);
+    let contentReads = 0;
+    let createCalls = 0;
+    let pointerPuts = 0;
+    const realGitHub = createGitHubPublisherAdapter(remoteEnvironment, async (input, init) => {
+      const url = String(input);
+      if (url.includes('/contents/gift-panel-publisher-policy.json')) {
+        if (init?.method === 'PUT') { pointerPuts += 1; return new Response('{}', { status: 200 }); }
+        contentReads += 1;
+        if (contentReads === 1 || peer === 'absent') return new Response(null, { status: 404 });
+        const bytes = peer === 'candidate' ? candidate : Buffer.from('{}');
+        return new Response(JSON.stringify({ encoding: 'base64', content: bytes.toString('base64'), sha: gitVersion(bytes) }), { status: 200 });
+      }
+      if (url.includes('/git/ref/heads/')) return new Response(null, { status: 404 });
+      if (url.endsWith('/git/refs') && init?.method === 'POST') {
+        createCalls += 1;
+        return new Response(null, { status });
+      }
+      throw new Error('unexpected missing-ref fake request');
+    });
+    state.adapters.github.readPointer = realGitHub.readPointer;
+    state.adapters.github.compareAndSwapPointer = realGitHub.compareAndSwapPointer;
+    const operation = publishTrustPolicy(await testOptions({ mode: 'advance-discovery', advanceDiscovery: true }), state.adapters);
+
+    if (succeeds) await expect(operation).resolves.toMatchObject({ epoch: 1 });
+    else await expect(operation).rejects.toThrow('publisher policy publication failed');
+    expect(createCalls).toBe(1);
+    expect(pointerPuts).toBe(0);
+    expect(contentReads).toBe(succeeds ? 3 : 2);
+  });
+
+  it.each([
     { name: 'COS already candidate', candidateSide: 'cos' as const },
     { name: 'GitHub already candidate', candidateSide: 'github' as const },
   ])('updates only the stale authenticated previous side when $name', async ({ candidateSide }) => {
@@ -905,6 +1055,26 @@ describe('publisher discovery partial completion', () => {
     await expect(publishTrustPolicy({ ...fixture.options, mode: 'advance-discovery', advanceDiscovery: true }, fixture.adapters))
       .rejects.toThrow('publisher policy publication failed');
     expect(fixture.pointerWrites).toEqual([]);
+  });
+
+  it('fails the final paired reread when COS regresses while GitHub is being advanced', async () => {
+    const fixture = await epochTwoFixture();
+    await publishTrustPolicy({ ...fixture.options, mode: 'publish-immutable' }, fixture.adapters);
+    const targets = publisherTargets(2);
+    fixture.cosObjects.set(targets.cosPointerKey, fixture.previous);
+    fixture.githubAssets.set(`${targets.githubPointerRef}/${targets.githubPointerPath}`, fixture.previous);
+    const writeGitHub = fixture.adapters.github.compareAndSwapPointer;
+    fixture.adapters.github.compareAndSwapPointer = async (input) => {
+      fixture.cosObjects.set(targets.cosPointerKey, fixture.previous);
+      await writeGitHub(input);
+    };
+
+    await expect(publishTrustPolicy({ ...fixture.options, mode: 'advance-discovery', advanceDiscovery: true }, fixture.adapters))
+      .rejects.toThrow('publisher policy publication failed');
+    expect(fixture.pointerWrites).toEqual([
+      `cos:${targets.cosPointerKey}`,
+      `github:${targets.githubPointerRef}:${targets.githubPointerPath}`,
+    ]);
   });
 
   it('rereads and reclassifies a COS CAS conflict that another writer completed, then advances GitHub once', async () => {
@@ -967,6 +1137,7 @@ describe('publisher discovery partial completion', () => {
 describe('publisher Tencent session exchange', () => {
   it('exports and masks all three temporary STS values without a static or tokenless fallback', async () => {
     const requests: string[] = [];
+    const requestedEncodings: string[] = [];
     const writes: string[] = [];
     const masks: string[] = [];
     const environment = {
@@ -980,9 +1151,10 @@ describe('publisher Tencent session exchange', () => {
       GITHUB_RUN_ATTEMPT: '2',
     };
     const result = await exchangeTencentSession(environment, {
-      fetch: async (input) => {
+      fetch: async (input, init) => {
         const url = String(input);
         requests.push(url);
+        requestedEncodings.push(new Headers(init?.headers).get('accept-encoding') ?? '');
         if (requests.length === 1) return new Response(JSON.stringify({ value: 'github-oidc-token' }), { status: 200 });
         return new Response(JSON.stringify({ Response: {
           Credentials: { TmpSecretId: 'temporary-id', TmpSecretKey: 'temporary-key', Token: 'temporary-token' },
@@ -997,6 +1169,7 @@ describe('publisher Tencent session exchange', () => {
       'https://github-actions.example.test/oidc?audience=publisher-rotation',
       'https://sts.tencentcloudapi.com',
     ]);
+    expect(requestedEncodings).toEqual(['identity', 'identity']);
     expect(writes.join('')).toContain('secret-id<<PUBLISHER_EOF\ntemporary-id');
     expect(writes.join('')).toContain('secret-key<<PUBLISHER_EOF\ntemporary-key');
     expect(writes.join('')).toContain('session-token<<PUBLISHER_EOF\ntemporary-token');
@@ -1037,5 +1210,41 @@ describe('publisher Tencent session exchange', () => {
       appendFile: async () => undefined,
       mask: () => undefined,
     })).rejects.toThrow('publisher session exchange failed');
+  });
+
+  it.each([
+    { compressedStage: 'OIDC', encoding: 'gzip' },
+    { compressedStage: 'STS', encoding: 'deflate' },
+  ])('accepts bounded Fetch-decoded $encoding JSON from $compressedStage despite encoded Content-Length', async ({ compressedStage, encoding }) => {
+    const environment = {
+      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://github-actions.example.test/oidc',
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'github-request-token',
+      PUBLISHER_TENCENT_OIDC_AUDIENCE: 'publisher-rotation',
+      PUBLISHER_TENCENT_ROLE_ARN: 'qcs::cam::uin/123456789:roleName/publisher-kms',
+      PUBLISHER_TENCENT_OIDC_PROVIDER_ID: 'github-actions-provider',
+      GITHUB_OUTPUT: 'captured-output',
+      GITHUB_RUN_ID: '1234',
+      GITHUB_RUN_ATTEMPT: '2',
+    };
+    let calls = 0;
+    const result = await exchangeTencentSession(environment, {
+      fetch: async () => {
+        calls += 1;
+        const bytes = calls === 1
+          ? Buffer.from(JSON.stringify({ value: 'github-oidc-token' }))
+          : Buffer.from(JSON.stringify({ Response: {
+            Credentials: { TmpSecretId: 'temporary-id', TmpSecretKey: 'temporary-key', Token: 'temporary-token' },
+            RequestId: 'compressed-sts-request',
+          } }));
+        const compressed = (compressedStage === 'OIDC' && calls === 1) || (compressedStage === 'STS' && calls === 2);
+        return streamingResponse([bytes], { headers: compressed ? {
+          'content-encoding': encoding,
+          'content-length': '1',
+        } : { 'content-length': String(bytes.length) } });
+      },
+      appendFile: async () => undefined,
+      mask: () => undefined,
+    });
+    expect(result).toEqual({ requestId: 'compressed-sts-request' });
   });
 });

@@ -43,16 +43,24 @@ function sha256(bytes) {
 
 async function readBoundedResponse(response, maximum) {
   if (!Number.isSafeInteger(maximum) || maximum < 0) throw new PublicationFailure();
+  const rejectEarly = async () => {
+    try {
+      if (response?.body && !response.body.locked) await response.body.cancel();
+    } catch { /* fixed bounded failure */ }
+    throw new PublicationFailure();
+  };
+  const contentEncoding = (response.headers.get('content-encoding') ?? '').trim().toLowerCase();
+  const compressed = contentEncoding === 'gzip' || contentEncoding === 'deflate' || contentEncoding === 'br';
+  if (contentEncoding !== '' && contentEncoding !== 'identity' && !compressed) await rejectEarly();
   const declaredText = response.headers.get('content-length');
   let declared = null;
   if (declaredText !== null) {
-    if (!/^(?:0|[1-9][0-9]*)$/.test(declaredText)) throw new PublicationFailure();
+    if (!/^(?:0|[1-9][0-9]*)$/.test(declaredText)) await rejectEarly();
     declared = Number(declaredText);
-    if (!Number.isSafeInteger(declared) || declared > maximum) throw new PublicationFailure();
+    if (!Number.isSafeInteger(declared) || declared > maximum) await rejectEarly();
   }
   if (response.body === null) {
-    if (declared !== null && declared !== 0) throw new PublicationFailure();
-    return Buffer.alloc(0);
+    await rejectEarly();
   }
   const reader = response.body.getReader();
   const chunks = [];
@@ -70,7 +78,7 @@ async function readBoundedResponse(response, maximum) {
     try { await reader.cancel(); } catch { /* bounded failure */ }
     throw new PublicationFailure();
   }
-  if (declared !== null && declared !== total) throw new PublicationFailure();
+  if (!compressed && declared !== null && declared !== total) throw new PublicationFailure();
   return Buffer.concat(chunks, total);
 }
 
@@ -415,6 +423,13 @@ async function advanceDiscovery(bundle, adapters) {
     githubState,
     bundle,
   );
+  const [finalCOS, finalGitHub] = await Promise.all([
+    adapters.cos.read(targets.cosPointerKey),
+    adapters.github.readPointer(targets.githubPointerRef, targets.githubPointerPath),
+  ]);
+  if (classifyPointer(finalCOS, bundle).kind !== 'candidate' || classifyPointer(finalGitHub, bundle).kind !== 'candidate') {
+    throw new PublicationFailure();
+  }
 }
 
 export async function publishTrustPolicy(options, adapters) {
@@ -499,7 +514,7 @@ export function createCOSPublisherAdapter(environment, fetchImpl = fetch, now = 
   async function request(method, key, body, extraHeaders = {}) {
     if (!/^trust\/publisher\/(?:epochs\/[0-9]{8}\.json|latest\.json)$/.test(key)) throw new PublicationFailure();
     const url = new URL(`https://${endpoint}/${key.split('/').map(safeEncode).join('/')}`);
-    const headers = new Headers({ host: endpoint, 'x-cos-security-token': sessionToken, ...extraHeaders });
+    const headers = new Headers({ host: endpoint, 'x-cos-security-token': sessionToken, 'accept-encoding': 'identity', ...extraHeaders });
     if (body !== undefined) {
       headers.set('content-length', String(body.length));
       headers.set('content-type', 'application/json');
@@ -703,6 +718,7 @@ export function createGitHubPublisherAdapter(environment, fetchImpl = fetch) {
           const create = await request(`${api}/git/refs`, {
             method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ref, sha: commit }),
           });
+          if (create.status === 409 || create.status === 422) throw new PointerCASConflict();
           if (!create.ok) throw new PublicationFailure();
         } else if (!inspect.ok) {
           throw new PublicationFailure();
@@ -758,7 +774,10 @@ export async function exchangeTencentSession(environment, adapters = { fetch, ap
   try {
     const oidcURL = new URL(requestURL);
     oidcURL.searchParams.set('audience', audience);
-    const oidcResponse = await adapters.fetch(oidcURL, { headers: { authorization: `Bearer ${requestToken}` }, redirect: 'error' });
+    const oidcResponse = await adapters.fetch(oidcURL, {
+      headers: { authorization: `Bearer ${requestToken}`, 'accept-encoding': 'identity' },
+      redirect: 'error',
+    });
     if (!oidcResponse.ok) throw new Error();
     const oidc = await readRemoteJSON(oidcResponse, MAX_AUDIT_BYTES);
     if (!validSessionValue(oidc?.value, 16 << 10)) throw new Error();
@@ -767,6 +786,7 @@ export async function exchangeTencentSession(environment, adapters = { fetch, ap
       redirect: 'error',
       headers: {
         'content-type': 'application/json',
+        'accept-encoding': 'identity',
         'x-tc-action': 'AssumeRoleWithWebIdentity',
         'x-tc-version': '2018-08-13',
         'x-tc-region': 'ap-shanghai',
