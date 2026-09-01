@@ -2,22 +2,22 @@
 
 ## Result and exact scope
 
-This record covers the final-review fix wave at source commit
-`22d59058fff9d35bd7cf9ce1e390d7bf589ae520` on Windows amd64 on
-2026-09-01 UTC. Go was `go1.26.5 windows/amd64`; Node was `v24.18.0`.
-Go/npm caches were worktree-local, Go dependency lookup was disabled with
-`GOPROXY=off`, and the build used `GOFLAGS=-buildvcs=false` because this
-sandbox-owned linked worktree cannot satisfy Go's VCS ownership probe.
+This record covers the user-authorized narrow bridge readiness module-closure
+cycle at product commit `5fb99d80792e14f539fe073745b6b35d102a23da` on
+Windows amd64 on 2026-09-01 UTC. Node was `v24.18.0`. The prior final-review Go,
+Go-vet, and desktop-build evidence at `22d59058fff9d35bd7cf9ce1e390d7bf589ae520`
+remains unchanged; this cycle changed only the bridge workflow and its Vitest
+regression coverage and did not rerun those Go/build gates.
 
-The signer-rotation code, focused security tests, both Go repositories, Go vet,
-the desktop build, and the JavaScript-aware TypeScript check passed. The exact
-full Vitest snapshot passed 90 of 91 files and 1,343 tests with 31 skipped. Its
-only failure was the unrelated existing real-Chromium Hosted-auth layout case:
-the first harness navigation/test exceeded its 30/40-second bound. That same
-case failed in two isolated retries; the other four tests in that browser file
-and all five tests in the administrator browser file passed. This environmental
-browser limitation is recorded below and is not represented as a green full
-Vitest run.
+The focused bridge readiness and release-workflow tests passed 70/70. The exact
+current-product-HEAD full Vitest sandbox run passed all 89 non-browser files and
+1,335 tests, skipped the 10 browser tests after Chromium launch was denied with
+`spawn EPERM`, and retained the ordinary 31 skips. A permissioned rerun of only
+the two browser files passed the administrator suite 5/5 and the Hosted-auth
+suite 4/5; the existing first multi-state Hosted-auth case again exceeded its
+40-second bound. Combining the full non-browser run with that browser rerun
+gives 1,344 passing tests, 1 failed test, and 31 skipped. This unrelated browser
+limitation is recorded below and is not represented as a green full Vitest run.
 
 This is local implementation evidence, not production acceptance. No workflow
 was dispatched. No EVSign, RFC3161, KMS, COS, GitHub API, tag, Release, server,
@@ -25,6 +25,22 @@ credential, certificate-store, or update-pointer mutation occurred. No
 production signing or root-rotation claim is made.
 
 ## Final-review findings closed locally
+
+### Bridge readiness module closure
+
+- The workflow no longer runs a lone copied `bridge-release-inputs.mjs`.
+  `BRIDGE_READINESS_SCRIPT_PATH` points into the private
+  `RUNNER_TEMP/release-tools/scripts` copy of the complete reviewed tooling
+  checkout, which survives the later exact-target checkout.
+- The reviewed tooling commit binding is unchanged: the complete private copy
+  is still made from `release-tools` before target checkout, and no target
+  checkout module or unreviewed `PATH` entry is used.
+- A behavior test parses the actual workflow, executes its copy/path layout in
+  a fresh directory, imports the isolated runtime module, and performs a
+  representative readiness validation. Removing
+  `publisher-policy-release-contract.mjs` produces `ERR_MODULE_NOT_FOUND`.
+- The setup/import tests assert no unexpected stdout or stderr, and readiness
+  continues to emit only its existing machine summary.
 
 ### Protected signer isolation
 
@@ -89,29 +105,31 @@ production signing or root-rotation claim is made.
   add only separately approved public SPKI/candidate/attestation/evidence paths
   and cannot change product behavior.
 
-## Exact current-HEAD commands
+## Exact current-product-HEAD commands
 
 | Working directory | Command | Exit | Current result |
 | --- | --- | ---: | --- |
-| `goserver` | `go test ./... -count=1` | 0 | All 26 reported packages passed. |
-| `updateapi` | `go test ./... -count=1` | 0 | All 15 reported packages completed (14 test-bearing plus `cmd/release-closure` with no tests). |
-| `updateapi` | `go vet ./...` | 0 | No diagnostics. |
-| repository root | `node node_modules/vitest/vitest.mjs run tests/sign-evsign.test.ts tests/bridge-release-inputs.test.ts tests/publish-trust-policy.test.ts tests/release-workflow.test.ts` | 0 | 4 files, 166 tests passed. |
-| repository root | `node node_modules/vitest/vitest.mjs run` with local headless-Chromium permission | 1 | 90 files passed, 1 browser file failed; 1,343 tests passed, 1 failed, 31 skipped. The failure was only `hosted-auth-layout-browser` first-harness navigation/test timeout. |
-| repository root | direct npm CLI `run build` with local caches and `GOFLAGS=-buildvcs=false` | 0 | Vite transformed 95 modules; the Go build embedded 87 UI assets and built the local dev EXE after verifying FFmpeg 9.0. |
+| repository root | `node node_modules/vitest/vitest.mjs run tests/bridge-release-inputs.test.ts --reporter=dot --minWorkers=1 --maxWorkers=1` | 0 | 1 file, 11 tests passed, including isolated import, representative readiness, and missing-sibling mutation. |
+| repository root | `node node_modules/vitest/vitest.mjs run tests/release-workflow.test.ts --reporter=dot --minWorkers=2 --maxWorkers=2` | 0 | 1 file, 59 tests passed. |
+| repository root | `node node_modules/vitest/vitest.mjs run --reporter=dot --minWorkers=2 --maxWorkers=2` in the sandbox | 1 | 89 files and 1,335 tests passed; both browser files could not launch Chromium (`spawn EPERM`); 41 tests were skipped, including those 10 browser cases. |
+| repository root | `node node_modules/vitest/vitest.mjs run tests/hosted-admin-layout-browser.test.ts tests/hosted-auth-layout-browser.test.ts --reporter=dot --minWorkers=1 --maxWorkers=1` with local Chromium permission | 1 | Administrator browser 5/5 and Hosted-auth 4/5 passed; only the existing first Hosted-auth multi-state case timed out at 40 seconds. |
+| repository root | `node --check scripts/bridge-release-inputs.mjs` and `node --check scripts/publisher-policy-release-contract.mjs` | 0 | No syntax diagnostics. |
+| repository root | YAML parse plus PowerShell AST parse of `Build reviewed bridge security tools` and `Verify reviewed bridge readiness` | 0 | Workflow YAML and both relevant `pwsh` steps parsed without diagnostics. |
 | repository root | `node node_modules/typescript/bin/tsc --noEmit --allowJs` | 0 | No diagnostics across the configured program with JavaScript module resolution enabled. |
 | repository root | `node node_modules/typescript/bin/tsc --noEmit` | 1 | Exactly the existing baseline `tests/build-go.test.ts(7,59) TS7016` for undeclared `scripts/build-go.mjs`; no other diagnostic. |
 
-The initial sandbox-only full Vitest attempt also passed every non-browser file
-but could not spawn either Chromium process (`spawn EPERM`). The permissioned
-snapshot above is the authoritative browser result. The administrator browser
-suite passed 5/5; the Hosted-auth browser suite passed 4/5 and repeatedly timed
-out only in its first multi-state navigation case.
+The permissioned two-file snapshot is the authoritative current-HEAD browser
+result. Go tests, Go vet, and the desktop build were intentionally not rerun for
+this workflow/test-only closure cycle; their exact prior-HEAD evidence remains
+in the preceding verification commit and was not relabeled as newly tested.
 
 ## Tested, simulated, and deferred boundaries
 
-**Tested directly:** workflow YAML parsing and executable PowerShell handoff
-gates; target/signer/publisher job capability separation; poisoning rejection;
+**Tested directly:** workflow YAML parsing, relevant PowerShell syntax, the
+actual workflow-derived private tooling copy/path layout, isolated ESM import,
+representative bridge readiness validation, missing-sibling mutation, and
+executable PowerShell handoff gates; target/signer/publisher job capability
+separation; poisoning rejection;
 fixed EVSign endpoint selection; Windows system-directory PowerShell selection;
 strict policy/audit/commit bytes; real local ECDSA policy verification; shared
 `AuthorizeAt`; actual local PE/ZIP/filesystem operations; 40 MiB inflation
