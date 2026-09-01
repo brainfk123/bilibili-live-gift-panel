@@ -8,6 +8,8 @@ alone references that Secret; immutable COS/GitHub publication jobs receive no
 root private key. Tencent KMS SDK modules and the OIDC/STS exchange code were
 removed. Follow-up commit `2682f7a` permits the existing permanent COS
 SecretId/SecretKey shape while retaining optional temporary-token signing.
+Merge commit `1f0a43a` integrates the current local master, preserving both the
+publisher trust inputs and the Mac/Windows CI build-profile policy.
 Client policy bytes, embedded SPKI verification, epoch monotonicity,
 immutable targets, and dual-source discovery semantics are unchanged.
 
@@ -26,8 +28,8 @@ Current verification:
 - full Vitest: 89 files and 1,330 tests pass; the two existing browser suites
   fail only because Chromium launch is denied with `spawn EPERM`; 41 tests are
   skipped including those browser cases;
-- `tsc --noEmit` reaches the unchanged existing missing declaration for
-  `scripts/build-go.mjs`; no error names a file changed by this amendment;
+- post-merge CI/build/publisher/deployment regression set: 269/269 pass;
+- `tsc --noEmit`: pass after adding the merged `build-go.mjs` declaration;
 - `git diff --check`: pass;
 - production epoch-1 candidate strict validation: pass;
 - public SPKI independent .NET import, curve, length, and digest check: pass.
