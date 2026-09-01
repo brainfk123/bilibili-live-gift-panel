@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 function temporaryRoot() {
-  const root = mkdtempSync(join(tmpdir(), 'ffmpeg-component-assets-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ffmpeg-component-assets-')));
   roots.push(root);
   return root;
 }

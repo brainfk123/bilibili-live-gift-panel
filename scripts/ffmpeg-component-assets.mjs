@@ -295,7 +295,7 @@ async function readComponentSnapshot(directory, sealedFiles) {
 async function createSealedFFmpegClosure({ projectRoot, archivePath, manifestPath, sealedOutputDirectory, sealFFmpegClosure }) {
 	const temporary = !sealedOutputDirectory;
 	const directory = temporary
-	  ? await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-sealed-'))
+	  ? await realpath(await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-sealed-')))
 	  : resolve(sealedOutputDirectory);
 	if (temporary) await chmod(directory, 0o700);
 	else {
@@ -394,7 +394,7 @@ function sameFileSnapshot(left, right) {
 }
 
 async function withPrivateComponentSnapshot(files, callback) {
-  const directory = await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-component-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'gift-panel-ffmpeg-component-')));
   let callbackError;
   try {
     await chmod(directory, 0o700);

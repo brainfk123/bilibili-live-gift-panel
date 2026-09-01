@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,7 +17,7 @@ function sha256(contents: Buffer) {
 }
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'enrollment-build-test-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'enrollment-build-test-')));
   roots.push(root);
   const outputDirectory = join(root, 'output');
   mkdirSync(outputDirectory);
