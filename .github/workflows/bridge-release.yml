@@ -37,14 +37,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate exact checked-out tag and version
+      - name: Bind exact reviewed bridge tag after checkout
         shell: pwsh
+        env:
+          BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
         run: |
-          $tagCommit = git rev-list -n 1 refs/tags/v0.4.11
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          $tagCommit = git rev-parse refs/tags/v0.4.11^{commit}
           $headCommit = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit) -or $tagCommit -cne $headCommit) {
-            throw 'The exact v0.4.11 tag does not resolve to the checked-out commit.'
+          $remoteLines = @(git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{})
+          if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed bridge tag binding failed' }
+          $remote = @{}
+          foreach ($line in $remoteLines) {
+            $parts = $line -split "`t", 2
+            if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @('refs/tags/v0.4.11','refs/tags/v0.4.11^{}')) { throw 'reviewed bridge tag binding failed' }
+            $remote[$parts[1]] = $parts[0]
           }
+          $remoteCommit = if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { $remote['refs/tags/v0.4.11^{}'] } else { $remote['refs/tags/v0.4.11'] }
+          if ($tagCommit -cne $headCommit -or $tagCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $remoteCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($packageVersion -cne '0.4.11') {
             throw 'The exact v0.4.11 tag does not contain package version 0.4.11.'
@@ -69,6 +79,7 @@ jobs:
       - name: Validate reviewed bridge inputs
         shell: pwsh
         env:
+          BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
           BRIDGE_TRUST_ROOT_SPKI_B64: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}
           BRIDGE_TRUST_ROOT_SPKI_SHA256: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_SHA256 }}
           BRIDGE_BOOTSTRAP_POLICY_B64: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}
@@ -76,10 +87,13 @@ jobs:
           BRIDGE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}
           BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
           BRIDGE_UPDATE_API_BASE_URL: ${{ vars.UPDATE_API_BASE_URL }}
-          BRIDGE_STABLE_PUBLISHED_AT: ${{ vars.BRIDGE_STABLE_PUBLISHED_AT }}
-          BRIDGE_STABLE_OBSERVATION_APPROVED_AT: ${{ vars.BRIDGE_STABLE_OBSERVATION_APPROVED_AT }}
+          BRIDGE_OBSERVATION_EVIDENCE_B64: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_B64 }}
+          BRIDGE_OBSERVATION_EVIDENCE_SHA256: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_SHA256 }}
+          BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64 }}
+          BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 }}
         run: |
           $required = @(
+            'BRIDGE_REVIEWED_COMMIT_SHA',
             'BRIDGE_TRUST_ROOT_SPKI_B64',
             'BRIDGE_TRUST_ROOT_SPKI_SHA256',
             'BRIDGE_BOOTSTRAP_POLICY_B64',
@@ -87,8 +101,10 @@ jobs:
             'BRIDGE_BOOTSTRAP_POLICY_EPOCH',
             'BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256',
             'BRIDGE_UPDATE_API_BASE_URL',
-            'BRIDGE_STABLE_PUBLISHED_AT',
-            'BRIDGE_STABLE_OBSERVATION_APPROVED_AT'
+            'BRIDGE_OBSERVATION_EVIDENCE_B64',
+            'BRIDGE_OBSERVATION_EVIDENCE_SHA256',
+            'BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64',
+            'BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256'
           )
           foreach ($name in $required) {
             $value = [Environment]::GetEnvironmentVariable($name)
@@ -99,17 +115,23 @@ jobs:
           if ($env:BRIDGE_TRUST_ROOT_SPKI_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
               $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
               $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:BRIDGE_OBSERVATION_EVIDENCE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
               $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH -cnotmatch '^[1-9][0-9]*$') {
             throw 'A reviewed bridge digest or epoch is malformed.'
           }
           try {
             $rootBytes = [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64)
             $policyBytes = [Convert]::FromBase64String($env:BRIDGE_BOOTSTRAP_POLICY_B64)
+            $observationBytes = [Convert]::FromBase64String($env:BRIDGE_OBSERVATION_EVIDENCE_B64)
+            $attestationBytes = [Convert]::FromBase64String($env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64)
           } catch {
             throw 'A reviewed bridge public input is not Base64.'
           }
           if ([Convert]::ToBase64String($rootBytes) -cne $env:BRIDGE_TRUST_ROOT_SPKI_B64 -or
-              [Convert]::ToBase64String($policyBytes) -cne $env:BRIDGE_BOOTSTRAP_POLICY_B64) {
+              [Convert]::ToBase64String($policyBytes) -cne $env:BRIDGE_BOOTSTRAP_POLICY_B64 -or
+              [Convert]::ToBase64String($observationBytes) -cne $env:BRIDGE_OBSERVATION_EVIDENCE_B64 -or
+              [Convert]::ToBase64String($attestationBytes) -cne $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64) {
             throw 'A reviewed bridge public input is not canonical Base64.'
           }
           $rootHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($rootBytes)).ToLowerInvariant()
@@ -117,32 +139,7 @@ jobs:
           if ($rootHash -cne $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 -or $policyHash -cne $env:BRIDGE_BOOTSTRAP_POLICY_SHA256) {
             throw 'A reviewed bridge public digest does not match its bytes.'
           }
-          try {
-            $policy = [Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
-          } catch {
-            throw 'The reviewed bootstrap policy is malformed.'
-          }
-          if ([uint64]$policy.signed.epoch -ne [uint64]$env:BRIDGE_BOOTSTRAP_POLICY_EPOCH) {
-            throw 'The reviewed bootstrap policy epoch does not match.'
-          }
-          $stable = @($policy.signed.publishers | Where-Object {
-            $_.country -ceq 'CN' -and
-            $_.organization -ceq 'NaisNet Technology Co., Ltd.' -and
-            $_.organizationId -ceq '91210103MA7CJ3C094' -and
-            $_.role -ceq 'primary' -and
-            $_.allowedChannel -ceq 'stable' -and
-            @($_.allowedTags | Where-Object { $_ -ceq 'v0.4.12' }).Count -eq 1
-          })
-          if ($stable.Count -ne 1) { throw 'The reviewed bootstrap policy does not authorize exact NaisNet stable convergence.' }
-          try {
-            $stablePublished = [DateTimeOffset]::ParseExact($env:BRIDGE_STABLE_PUBLISHED_AT, 'O', [Globalization.CultureInfo]::InvariantCulture)
-            $observationApproved = [DateTimeOffset]::ParseExact($env:BRIDGE_STABLE_OBSERVATION_APPROVED_AT, 'O', [Globalization.CultureInfo]::InvariantCulture)
-          } catch {
-            throw 'The reviewed stable observation timestamps are malformed.'
-          }
-          if ($observationApproved -lt $stablePublished.AddDays(7) -or $observationApproved -gt [DateTimeOffset]::UtcNow) {
-            throw 'The reviewed v0.4.12 seven-day stable observation gate has not passed.'
-          }
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'The reviewed bridge commit is malformed.' }
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -155,6 +152,69 @@ jobs:
         with:
           go-version-file: goserver/go.mod
           cache-dependency-path: goserver/go.sum
+
+      - name: Fetch immutable v0.4.12 observation binding
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRIDGE_OBSERVATION_EVIDENCE_B64: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_B64 }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/bridge-readiness | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          try {
+            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/v0.4.12" -Headers $headers
+          } catch { throw 'Immutable v0.4.12 Release metadata is unavailable.' }
+          if ($release.tag_name -cne 'v0.4.12' -or $release.draft -or $release.prerelease -or -not $release.published_at -or [int64]$release.id -le 0) {
+            throw 'Immutable v0.4.12 Release metadata is invalid.'
+          }
+          [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at } |
+            ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/stable-release.json
+          [IO.File]::WriteAllBytes('dist/bridge-readiness/observation-evidence.json', [Convert]::FromBase64String($env:BRIDGE_OBSERVATION_EVIDENCE_B64))
+
+      - name: Fetch immutable production trust binding
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRIDGE_TRUST_ROOT_SPKI_B64: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}
+          BRIDGE_BOOTSTRAP_POLICY_B64: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}
+          BRIDGE_BOOTSTRAP_POLICY_SHA256: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}
+          BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64 }}
+        run: |
+          $policyTag = 'publisher-policy-epoch-00000001'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          try {
+            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$policyTag" -Headers $headers
+          } catch { throw 'Immutable epoch-1 policy Release metadata is unavailable.' }
+          $assets = @($release.assets)
+          if ($release.tag_name -cne $policyTag -or $release.draft -or $release.prerelease -or -not $release.published_at -or [int64]$release.id -le 0 -or $assets.Count -ne 2) {
+            throw 'Immutable epoch-1 policy Release metadata is invalid.'
+          }
+          foreach ($name in @('policy.json','audit.json')) {
+            if (@($assets | Where-Object { $_.name -ceq $name }).Count -ne 1) { throw 'Immutable epoch-1 policy asset closure is invalid.' }
+          }
+          gh release download $policyTag --dir dist/bridge-readiness --pattern policy.json --pattern audit.json
+          if ($LASTEXITCODE -ne 0) { throw 'Immutable epoch-1 policy assets could not be downloaded.' }
+          $selectedAssets = foreach ($asset in $assets) { [ordered]@{ name = [string]$asset.name; size = [int64]$asset.size; digest = [string]$asset.digest } }
+          [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at; assets = @($selectedAssets) } |
+            ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/policy-release.json
+          [IO.File]::WriteAllBytes('dist/bridge-readiness/root-spki.der', [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
+          $bootstrapBytes = [Convert]::FromBase64String($env:BRIDGE_BOOTSTRAP_POLICY_B64)
+          [IO.File]::WriteAllBytes('dist/bridge-readiness/bootstrap-policy.json', $bootstrapBytes)
+          $downloadedPolicy = [IO.File]::ReadAllBytes('dist/bridge-readiness/policy.json')
+          $downloadedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($downloadedPolicy)).ToLowerInvariant()
+          if ($downloadedHash -cne $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 -or -not [Linq.Enumerable]::SequenceEqual[byte]($downloadedPolicy, $bootstrapBytes)) {
+            throw 'Bootstrap policy bytes do not match the immutable epoch-1 policy Release.'
+          }
+          [IO.File]::WriteAllBytes('dist/bridge-readiness/trust-attestation.json', [Convert]::FromBase64String($env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64))
+
+      - name: Verify reviewed bridge readiness
+        shell: pwsh
+        env:
+          BRIDGE_OBSERVATION_EVIDENCE_SHA256: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_SHA256 }}
+          BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 }}
+        run: |
+          node scripts/bridge-release-inputs.mjs verify --stable-release dist/bridge-readiness/stable-release.json --observation-evidence dist/bridge-readiness/observation-evidence.json --observation-sha256 $env:BRIDGE_OBSERVATION_EVIDENCE_SHA256 --root-spki dist/bridge-readiness/root-spki.der --policy dist/bridge-readiness/policy.json --audit dist/bridge-readiness/audit.json --policy-release dist/bridge-readiness/policy-release.json --trust-attestation dist/bridge-readiness/trust-attestation.json --trust-attestation-sha256 $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness.json
+          if ($LASTEXITCODE -ne 0) { throw 'Reviewed bridge readiness verification failed.' }
 
       - name: Install dependencies
         run: npm ci
@@ -170,54 +230,6 @@ jobs:
 
       - name: Prepare backend UI assets
         run: npm run prepare:go-assets
-
-      - name: Write structured Authenticode verifier
-        shell: pwsh
-        run: |
-          @'
-          function Read-X500DirectoryString {
-            param([System.Formats.Asn1.AsnReader]$Reader)
-            $tag = $Reader.PeekTag()
-            if ($tag.TagClass -ne [System.Formats.Asn1.TagClass]::Universal) { throw 'Unsupported X.500 identity encoding.' }
-            switch ($tag.TagValue) {
-              12 { return $Reader.ReadCharacterString([System.Formats.Asn1.UniversalTagNumber]::UTF8String) }
-              19 { return $Reader.ReadCharacterString([System.Formats.Asn1.UniversalTagNumber]::PrintableString) }
-              20 { return $Reader.ReadCharacterString([System.Formats.Asn1.UniversalTagNumber]::T61String) }
-              22 { return $Reader.ReadCharacterString([System.Formats.Asn1.UniversalTagNumber]::IA5String) }
-              30 { return $Reader.ReadCharacterString([System.Formats.Asn1.UniversalTagNumber]::BMPString) }
-              default { throw 'Unsupported X.500 identity string type.' }
-            }
-          }
-          function Assert-ExactCertificateIdentity {
-            param($Certificate, [string]$Country, [string]$Organization, [string]$OrganizationId)
-            if ($null -eq $Certificate) { throw 'Authenticode signer certificate is missing.' }
-            $reader = [System.Formats.Asn1.AsnReader]::new($Certificate.SubjectName.RawData, [System.Formats.Asn1.AsnEncodingRules]::DER)
-            $sequence = $reader.ReadSequence()
-            $values = @{}
-            while ($sequence.HasData) {
-              $set = $sequence.ReadSetOf($true)
-              while ($set.HasData) {
-                $attribute = $set.ReadSequence()
-                $oid = $attribute.ReadObjectIdentifier()
-                $value = Read-X500DirectoryString $attribute
-                $attribute.ThrowIfNotEmpty()
-                if (-not $values.ContainsKey($oid)) { $values[$oid] = [Collections.Generic.List[string]]::new() }
-                $values[$oid].Add($value)
-              }
-            }
-            $sequence.ThrowIfNotEmpty()
-            $reader.ThrowIfNotEmpty()
-            foreach ($expected in @(
-              @('2.5.4.6', $Country),
-              @('2.5.4.10', $Organization),
-              @('2.5.4.97', $OrganizationId)
-            )) {
-              if (-not $values.ContainsKey($expected[0]) -or $values[$expected[0]].Count -ne 1 -or $values[$expected[0]][0] -cne $expected[1]) {
-                throw 'Authenticode signer structured legal identity does not match the reviewed profile.'
-              }
-            }
-          }
-          '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP/verify-certificate-identity.ps1" -Encoding utf8
 
       - name: Resolve fixed signed FFmpeg component
         shell: pwsh
@@ -259,7 +271,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          . "$env:RUNNER_TEMP/verify-certificate-identity.ps1"
           $componentDirectory = 'dist/bridge-ffmpeg-component'
           node scripts/ffmpeg-component-assets.mjs verify-metadata --metadata dist/bridge-ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
           if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg component metadata or download bytes failed verification.' }
@@ -281,11 +292,11 @@ jobs:
           $ffmpegPath = 'dist/bridge-ffmpeg-expanded/ffmpeg.exe'
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpegPath).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath $ffmpegPath).Length
-          $signature = Get-AuthenticodeSignature -LiteralPath $ffmpegPath
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
+          if ($componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Fixed FFmpeg version/hash/size/AuthentiCode verification failed before packaging.'
           }
-          Assert-ExactCertificateIdentity $signature.SignerCertificate 'CN' 'NaisNet Technology Co., Ltd.' '91210103MA7CJ3C094'
+          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg structured Authenticode inspection failed before packaging.' }
           "BRIDGE_FFMPEG_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BRIDGE_FFMPEG_SIZE=$size" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -304,58 +315,11 @@ jobs:
           APP_UPDATE_TRUST_ROOT_SPKI_B64: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}
           APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}
 
-      - name: Client-verify embedded enrollment contract
-        shell: pwsh
-        env:
-          APP_UPDATE_TRUST_ROOT_SPKI_B64: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}
-          APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}
-          BRIDGE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}
-        run: |
-          $testPath = 'goserver/bridge_enrollment_release_test.go'
-          @'
-          package main
-
-          import (
-              "os"
-              "strconv"
-              "testing"
-              "time"
-          )
-
-          func TestBridgeEnrollmentContract(t *testing.T) {
-              root, policyBytes, err := embeddedUpdateTrust()
-              if err != nil { t.Fatal(err) }
-              policy, err := parseAndVerifyUpdateTrustPolicy(policyBytes, root, time.Now().UTC())
-              if err != nil { t.Fatal(err) }
-              expectedEpoch, err := strconv.ParseUint(os.Getenv("BRIDGE_BOOTSTRAP_POLICY_EPOCH"), 10, 64)
-              if err != nil || policy.Epoch != expectedEpoch { t.Fatal("embedded bootstrap policy epoch mismatch") }
-              found := false
-              for _, rule := range policy.Rules {
-                  if rule.Country == "CN" && rule.Organization == "NaisNet Technology Co., Ltd." &&
-                      rule.OrganizationID == "91210103MA7CJ3C094" && rule.Role == "primary" &&
-                      rule.AllowedChannel == updateChannelStable && rule.allowsTag("v0.4.12") { found = true }
-              }
-              if !found { t.Fatal("embedded bootstrap policy does not authorize NaisNet stable v0.4.12") }
-          }
-          '@ | Set-Content -LiteralPath $testPath -Encoding utf8
-          try {
-            $ldflags = "-X main.updateTrustRootSPKIBase64=$env:APP_UPDATE_TRUST_ROOT_SPKI_B64 -X main.updateTrustBootstrapPolicyBase64=$env:APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64"
-            go -C goserver test . -run '^TestBridgeEnrollmentContract$' -count=1 -ldflags $ldflags
-            if ($LASTEXITCODE -ne 0) { throw 'The client rejected the embedded enrollment contract.' }
-          } finally {
-            Remove-Item -LiteralPath $testPath -Force
-          }
-          $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes('dist/gift-panel.exe'))
-          if (-not $binaryText.Contains($env:APP_UPDATE_TRUST_ROOT_SPKI_B64) -or -not $binaryText.Contains($env:APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64)) {
-            throw 'The built bridge executable does not contain the client-verified enrollment inputs.'
-          }
-
       - name: Verify NaisNet FFmpeg after packaging
         shell: pwsh
         env:
           BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          . "$env:RUNNER_TEMP/verify-certificate-identity.ps1"
           $componentManifest = Get-Content goserver/ffmpeg/manifest.json -Raw | ConvertFrom-Json
           $manifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/manifest.json).Hash.ToLowerInvariant()
           $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/ffmpeg.zip).Hash.ToLowerInvariant()
@@ -363,14 +327,13 @@ jobs:
           $ffmpegPath = 'dist/bridge-ffmpeg-expanded/ffmpeg.exe'
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpegPath).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath $ffmpegPath).Length
-          $signature = Get-AuthenticodeSignature -LiteralPath $ffmpegPath
           if ($componentManifest.version -cne '9.0' -or $manifestHash -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
               $archiveHash -cne $downloadArchiveHash -or $hash -cne $env:BRIDGE_FFMPEG_SHA256 -or $size -ne [int64]$env:BRIDGE_FFMPEG_SIZE -or
-              $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size -or
-              $signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Fixed FFmpeg changed during bridge packaging.'
           }
-          Assert-ExactCertificateIdentity $signature.SignerCertificate 'CN' 'NaisNet Technology Co., Ltd.' '91210103MA7CJ3C094'
+          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg structured Authenticode inspection failed after packaging.' }
           Copy-Item -LiteralPath $ffmpegPath -Destination dist/ffmpeg-windows-x64.exe
           Copy-Item -LiteralPath goserver/ffmpeg/manifest.json -Destination dist/ffmpeg-component-manifest.json
 
@@ -385,7 +348,7 @@ jobs:
             throw 'The protected bridge signer profile is invalid.'
           }
 
-      - name: Sign and verify RushRush outer executable
+      - name: Sign RushRush outer executable
         shell: pwsh
         env:
           EVSIGN_BRIDGE_CERTIFICATE: ${{ vars.EVSIGN_BRIDGE_CERTIFICATE }}
@@ -393,15 +356,23 @@ jobs:
           EVSIGN_KEY: ${{ secrets.EVSIGN_BRIDGE_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_BRIDGE_PASSWORD }}
         run: |
-          . "$env:RUNNER_TEMP/verify-certificate-identity.ps1"
-          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
-          node scripts/sign-evsign.mjs --profile bridge dist/gift-panel-windows-x64.exe
+          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
+          node scripts/sign-evsign.mjs --profile bridge dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
           if ($LASTEXITCODE -ne 0) { throw 'RushRush bridge outer signing failed.' }
-          $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw 'RushRush bridge outer Authenticode status is not Valid.'
-          }
-          Assert-ExactCertificateIdentity $signature.SignerCertificate 'CN' 'RushRush Network Technology Ltd' '91450900MADM3GLG5P'
+
+      - name: Inspect final bound bridge artifact
+        shell: pwsh
+        env:
+          BRIDGE_TRUST_ROOT_SPKI_B64: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}
+          BRIDGE_TRUST_ROOT_SPKI_SHA256: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_SHA256 }}
+          BRIDGE_BOOTSTRAP_POLICY_B64: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}
+          BRIDGE_BOOTSTRAP_POLICY_SHA256: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}
+          BRIDGE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}
+        run: |
+          [IO.File]::WriteAllBytes('dist/bridge-root-spki.der', [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
+          [IO.File]::WriteAllBytes('dist/bridge-bootstrap-policy.json', [Convert]::FromBase64String($env:BRIDGE_BOOTSTRAP_POLICY_B64))
+          go -C goserver run ./cmd/artifact-inspector verify-artifact --unsigned ../dist/gift-panel-windows-x64.unsigned.exe --signed ../dist/gift-panel-windows-x64.exe --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki ../dist/bridge-root-spki.der --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy ../dist/bridge-bootstrap-policy.json --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive ffmpeg/ffmpeg.zip --ffmpeg-manifest ffmpeg/manifest.json | Set-Content -NoNewline -Encoding utf8 ../dist/bridge-artifact-inspection.json
+          if ($LASTEXITCODE -ne 0) { throw 'Final bound bridge artifact inspection failed.' }
 
       - name: Prepare public bridge evidence
         shell: pwsh
@@ -416,8 +387,30 @@ jobs:
           if (@($changelog.releases | Where-Object { $_.version -ceq '0.4.11' }).Count -ne 1) {
             throw 'The bridge changelog must contain exactly one v0.4.11 entry.'
           }
+          $inspection = Get-Content dist/bridge-artifact-inspection.json -Raw | ConvertFrom-Json
+          $readiness = Get-Content dist/bridge-readiness.json -Raw | ConvertFrom-Json
+          if ($inspection.version -cne '0.4.11' -or $inspection.tag -cne $env:BRIDGE_TAG -or $inspection.commit -cne $env:BRIDGE_COMMIT -or
+              $inspection.rootSpkiSha256 -cne $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 -or $inspection.policySha256 -cne $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 -or
+              [uint64]$inspection.policyEpoch -ne [uint64]$env:BRIDGE_BOOTSTRAP_POLICY_EPOCH -or
+              $inspection.outerIdentity.country -cne 'CN' -or $inspection.outerIdentity.organization -cne 'RushRush Network Technology Ltd' -or $inspection.outerIdentity.organizationId -cne '91450900MADM3GLG5P' -or
+              $inspection.ffmpegIdentity.country -cne 'CN' -or $inspection.ffmpegIdentity.organization -cne 'NaisNet Technology Co., Ltd.' -or $inspection.ffmpegIdentity.organizationId -cne '91210103MA7CJ3C094' -or
+              $readiness.rootSpkiSha256 -cne $inspection.rootSpkiSha256 -or $readiness.policySha256 -cne $inspection.policySha256 -or [uint64]$readiness.policyEpoch -ne [uint64]$inspection.policyEpoch) {
+            throw 'Final artifact inspection and reviewed readiness evidence are inconsistent.'
+          }
           $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
           $exeSize = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
+          "$exeHash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
+          [ordered]@{
+            tag_name = $env:BRIDGE_TAG
+            draft = $false
+            prerelease = $false
+            assets = @([ordered]@{
+              name = 'gift-panel-windows-x64.exe'
+              browser_download_url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:BRIDGE_TAG/gift-panel-windows-x64.exe"
+              size = $exeSize
+              digest = "sha256:$exeHash"
+            })
+          } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-update.json
           $ffmpegHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/ffmpeg-windows-x64.exe).Hash.ToLowerInvariant()
           $ffmpegSize = (Get-Item -LiteralPath dist/ffmpeg-windows-x64.exe).Length
           if ($ffmpegHash -cne $env:BRIDGE_FFMPEG_SHA256 -or $ffmpegSize -ne [int64]$env:BRIDGE_FFMPEG_SIZE) {
@@ -432,13 +425,24 @@ jobs:
             tag = $env:BRIDGE_TAG
             commit = $env:BRIDGE_COMMIT
             latest = $false
-            outerIdentity = [ordered]@{ country = 'CN'; organization = 'RushRush Network Technology Ltd'; organizationId = '91450900MADM3GLG5P'; authenticode = 'Valid' }
-            ffmpegIdentity = [ordered]@{ country = 'CN'; organization = 'NaisNet Technology Co., Ltd.'; organizationId = '91210103MA7CJ3C094'; authenticode = 'Valid'; version = '9.0' }
-            rootSpkiSha256 = $env:BRIDGE_TRUST_ROOT_SPKI_SHA256
-            bootstrapPolicyEpoch = [uint64]$env:BRIDGE_BOOTSTRAP_POLICY_EPOCH
-            bootstrapPolicySha256 = $env:BRIDGE_BOOTSTRAP_POLICY_SHA256
+            outerIdentity = [ordered]@{ country = [string]$inspection.outerIdentity.country; organization = [string]$inspection.outerIdentity.organization; organizationId = [string]$inspection.outerIdentity.organizationId; authenticode = 'Valid' }
+            ffmpegIdentity = [ordered]@{ country = [string]$inspection.ffmpegIdentity.country; organization = [string]$inspection.ffmpegIdentity.organization; organizationId = [string]$inspection.ffmpegIdentity.organizationId; authenticode = 'Valid'; version = [string]$inspection.ffmpegVersion }
+            peContentSha256 = [string]$inspection.peContentSha256
+            rootSpkiSha256 = [string]$inspection.rootSpkiSha256
+            bootstrapPolicyEpoch = [uint64]$inspection.policyEpoch
+            bootstrapPolicySha256 = [string]$inspection.policySha256
+            stableReleaseId = [int64]$readiness.stableReleaseId
+            stablePublishedAt = [string]$readiness.stablePublishedAt
+            observationEndedAt = [string]$readiness.observationEndedAt
+            observationEvidenceSha256 = [string]$readiness.observationEvidenceSha256
+            policyReleaseId = [int64]$readiness.policyReleaseId
+            kmsKeyId = [string]$readiness.kmsKeyId
+            kmsRequestId = [string]$readiness.kmsRequestId
+            trustAttestationSha256 = [string]$readiness.trustAttestationSha256
             assets = @(
               [ordered]@{ name = 'gift-panel-windows-x64.exe'; sha256 = $exeHash; size = $exeSize },
+              [ordered]@{ name = 'gift-panel-windows-x64.exe.sha256'; sha256 = (Get-FileHash -Algorithm SHA256 dist/gift-panel-windows-x64.exe.sha256).Hash.ToLowerInvariant(); size = (Get-Item dist/gift-panel-windows-x64.exe.sha256).Length },
+              [ordered]@{ name = 'gift-panel-update.json'; sha256 = (Get-FileHash -Algorithm SHA256 dist/gift-panel-update.json).Hash.ToLowerInvariant(); size = (Get-Item dist/gift-panel-update.json).Length },
               [ordered]@{ name = 'ffmpeg-windows-x64.exe'; sha256 = $ffmpegHash; size = $ffmpegSize },
               [ordered]@{ name = 'gift-panel-changelog.json'; sha256 = $changelogHash; size = (Get-Item dist/gift-panel-changelog.json).Length },
               [ordered]@{ name = 'ffmpeg-component-manifest.json'; sha256 = $manifestHash; size = (Get-Item dist/ffmpeg-component-manifest.json).Length }
@@ -446,6 +450,8 @@ jobs:
           } | ConvertTo-Json -Depth 8 | Set-Content -NoNewline -Encoding utf8 dist/bridge-release-evidence.json
           $checksumPaths = @(
             'dist/gift-panel-windows-x64.exe',
+            'dist/gift-panel-windows-x64.exe.sha256',
+            'dist/gift-panel-update.json',
             'dist/ffmpeg-windows-x64.exe',
             'dist/gift-panel-changelog.json',
             'dist/ffmpeg-component-manifest.json',
@@ -456,6 +462,35 @@ jobs:
             "$hash  $([IO.Path]::GetFileName($path))"
           }
           $lines -join "`n" | Set-Content -NoNewline -Encoding ascii dist/SHA256SUMS.txt
+          $required = @(
+            @('gift-panel-windows-x64.exe', 1001),
+            @('gift-panel-windows-x64.exe.sha256', 1002),
+            @('gift-panel-update.json', 1003),
+            @('gift-panel-changelog.json', 1004)
+          )
+          $releaseAssets = foreach ($entry in $required) {
+            $name = [string]$entry[0]
+            $id = [int]$entry[1]
+            $path = "dist/$name"
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            [ordered]@{
+              url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$id"
+              name = $name
+              size = (Get-Item -LiteralPath $path).Length
+              digest = "sha256:$hash"
+              browser_download_url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:BRIDGE_TAG/$name"
+            }
+          }
+          [ordered]@{
+            tag_name = $env:BRIDGE_TAG
+            draft = $false
+            prerelease = $false
+            published_at = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            assets = @($releaseAssets)
+          } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/local-bridge-release.json
+
+      - name: Validate local bridge mirror closure
+        run: go -C updateapi run ./cmd/release-closure --metadata ../dist/local-bridge-release.json --assets ../dist --tag v0.4.11
 
       - name: Attest bridge release assets
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
@@ -466,6 +501,24 @@ jobs:
             dist/ffmpeg-component-manifest.json
             dist/bridge-release-evidence.json
 
+      - name: Recheck reviewed bridge tag before draft
+        shell: pwsh
+        env:
+          BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
+        run: |
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          $localCommit = git rev-parse refs/tags/v0.4.11^{commit}
+          $remoteLines = @(git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{})
+          if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed bridge tag binding failed' }
+          $remote = @{}
+          foreach ($line in $remoteLines) {
+            $parts = $line -split "`t", 2
+            if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @('refs/tags/v0.4.11','refs/tags/v0.4.11^{}')) { throw 'reviewed bridge tag binding failed' }
+            $remote[$parts[1]] = $parts[0]
+          }
+          $remoteCommit = if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { $remote['refs/tags/v0.4.11^{}'] } else { $remote['refs/tags/v0.4.11'] }
+          if ($localCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $remoteCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+
       - name: Create immutable-shaped bridge draft
         shell: pwsh
         env:
@@ -473,7 +526,7 @@ jobs:
         run: |
           gh release create $env:BRIDGE_TAG --draft --verify-tag --title $env:BRIDGE_TAG --latest=false
           if ($LASTEXITCODE -ne 0) { throw 'Bridge GitHub Release draft creation failed.' }
-          gh release upload $env:BRIDGE_TAG dist/gift-panel-windows-x64.exe dist/ffmpeg-windows-x64.exe dist/gift-panel-changelog.json dist/ffmpeg-component-manifest.json dist/bridge-release-evidence.json dist/SHA256SUMS.txt
+          gh release upload $env:BRIDGE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/ffmpeg-windows-x64.exe dist/gift-panel-changelog.json dist/ffmpeg-component-manifest.json dist/bridge-release-evidence.json dist/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw 'Bridge asset upload failed; the draft remains unpublished.' }
 
       - name: Read back and verify bridge draft
@@ -484,7 +537,7 @@ jobs:
           $encodedTag = [Uri]::EscapeDataString($env:BRIDGE_TAG)
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
           $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-          $required = @('gift-panel-windows-x64.exe','ffmpeg-windows-x64.exe','gift-panel-changelog.json','ffmpeg-component-manifest.json','bridge-release-evidence.json','SHA256SUMS.txt')
+          $required = @('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','ffmpeg-windows-x64.exe','gift-panel-changelog.json','ffmpeg-component-manifest.json','bridge-release-evidence.json','SHA256SUMS.txt')
           $names = @($release.assets | ForEach-Object { [string]$_.name })
           if ($release.tag_name -cne $env:BRIDGE_TAG -or -not $release.draft -or $release.prerelease -or $names.Count -ne $required.Count) {
             throw 'Bridge draft metadata is not the exact immutable-shaped closure.'
@@ -506,6 +559,24 @@ jobs:
               throw 'Bridge draft asset digest, size, or downloaded bytes differ.'
             }
           }
+
+      - name: Recheck reviewed bridge tag before publication
+        shell: pwsh
+        env:
+          BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
+        run: |
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          $localCommit = git rev-parse refs/tags/v0.4.11^{commit}
+          $remoteLines = @(git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{})
+          if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed bridge tag binding failed' }
+          $remote = @{}
+          foreach ($line in $remoteLines) {
+            $parts = $line -split "`t", 2
+            if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @('refs/tags/v0.4.11','refs/tags/v0.4.11^{}')) { throw 'reviewed bridge tag binding failed' }
+            $remote[$parts[1]] = $parts[0]
+          }
+          $remoteCommit = if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { $remote['refs/tags/v0.4.11^{}'] } else { $remote['refs/tags/v0.4.11'] }
+          if ($localCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $remoteCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
 
       - name: Publish bridge as non-latest
         shell: pwsh
@@ -530,7 +601,7 @@ jobs:
           if ($latest.id -eq $release.id -or $latest.tag_name -ceq $env:BRIDGE_TAG) {
             throw 'The bridge Release incorrectly became GitHub latest.'
           }
-          $required = @('gift-panel-windows-x64.exe','ffmpeg-windows-x64.exe','gift-panel-changelog.json','ffmpeg-component-manifest.json','bridge-release-evidence.json','SHA256SUMS.txt')
+          $required = @('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','ffmpeg-windows-x64.exe','gift-panel-changelog.json','ffmpeg-component-manifest.json','bridge-release-evidence.json','SHA256SUMS.txt')
           $names = @($release.assets | ForEach-Object { [string]$_.name })
           if ($names.Count -ne $required.Count) { throw 'Published bridge asset closure changed.' }
           New-Item -ItemType Directory -Force -Path dist/bridge-published-readback | Out-Null

@@ -139,6 +139,36 @@ export async function signFileWithRetry(options, dependencies = {}) {
   }
 }
 
+export async function signWithProfile(options, dependencies = {}) {
+  const environment = options.environment || process.env;
+  const signerProfile = resolveEVSignSignerProfile(options.profile, environment);
+  const key = environment.EVSIGN_KEY?.trim();
+  if (!key) throw new Error('EVSIGN_KEY is required. Store the EV Sign license UUID in GitHub Actions Secrets.');
+  const inputPath = resolve(options.inputPath);
+  const outputPath = resolve(options.outputPath || options.inputPath);
+  const endpoint = environment.EVSIGN_ENDPOINT?.trim() || 'https://api.evsign.cn/v1';
+  const headers = {
+    'Content-Type': 'application/octet-stream',
+    'X-Key': key,
+    'X-Action': 'api-sign',
+    'X-Algorithm': 'sha256',
+    'X-File-Name': encodeURIComponent(basename(outputPath)),
+    'X-Timestamp': environment.EVSIGN_TIMESTAMP?.trim() || 'auto',
+    'X-Append': 'no',
+    'X-Cert': signerProfile.certificate,
+  };
+  if (environment.EVSIGN_PASSWORD?.trim()) headers['X-Password'] = environment.EVSIGN_PASSWORD.trim();
+  await signFileWithRetry({
+    inputPath,
+    outputPath,
+    endpoint,
+    headers,
+    maxAttempts: readIntegerEnvironmentFrom(environment, 'EVSIGN_MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS),
+    attemptTimeoutMs: readIntegerEnvironmentFrom(environment, 'EVSIGN_ATTEMPT_TIMEOUT_MS', DEFAULT_ATTEMPT_TIMEOUT_MS),
+    retryDelaysMs: readRetryDelaysFrom(environment),
+  }, dependencies);
+}
+
 function signingErrorCategory(error) {
   if (error?.integrityFailure) return 'integrity';
   if (error?.code === 'ETIMEDOUT' || error?.name === 'AbortError') return 'timeout';
@@ -170,14 +200,22 @@ function validateRetryPolicy(maxAttempts, attemptTimeoutMs, retryDelaysMs) {
 }
 
 function readIntegerEnvironment(name, fallback) {
-  const value = process.env[name]?.trim();
+  return readIntegerEnvironmentFrom(process.env, name, fallback);
+}
+
+function readIntegerEnvironmentFrom(environment, name, fallback) {
+  const value = environment[name]?.trim();
   if (!value) return fallback;
   if (!/^\d+$/.test(value)) throw new Error(`${name} must contain one decimal integer.`);
   return Number(value);
 }
 
 function readRetryDelays() {
-  const value = process.env.EVSIGN_RETRY_DELAYS_MS?.trim();
+  return readRetryDelaysFrom(process.env);
+}
+
+function readRetryDelaysFrom(environment) {
+  const value = environment.EVSIGN_RETRY_DELAYS_MS?.trim();
   if (!value) return [...DEFAULT_RETRY_DELAYS_MS];
   if (!/^\d+(?:,\d+)*$/.test(value)) throw new Error('EVSIGN_RETRY_DELAYS_MS must be comma-separated decimal integers.');
   return value.split(',').map(Number);
@@ -197,16 +235,7 @@ async function main() {
   const outputArg = (explicitProfile ? args[3] : args[1]) || inputArg;
   if (explicitProfile && (args.length < 3 || args.length > 4)) throw new Error('Usage: node scripts/sign-evsign.mjs --profile stable|bridge <input.exe> [output.exe]');
   if (!inputArg) throw new Error('Usage: node scripts/sign-evsign.mjs <input.exe> [output.exe]');
-  const signerProfile = resolveEVSignSignerProfile(profileName, process.env);
-  const key = process.env.EVSIGN_KEY?.trim();
-  if (!key) throw new Error('EVSIGN_KEY is required. Store the EV Sign license UUID in GitHub Actions Secrets.');
-  const inputPath = resolve(inputArg);
-  const outputPath = resolve(outputArg);
-  const endpoint = process.env.EVSIGN_ENDPOINT?.trim() || 'https://api.evsign.cn/v1';
-  const headers = { 'Content-Type': 'application/octet-stream', 'X-Key': key, 'X-Action': 'api-sign', 'X-Algorithm': 'sha256', 'X-File-Name': encodeURIComponent(basename(outputPath)), 'X-Timestamp': process.env.EVSIGN_TIMESTAMP?.trim() || 'auto', 'X-Append': 'no' };
-  headers['X-Cert'] = signerProfile.certificate;
-  if (process.env.EVSIGN_PASSWORD?.trim()) headers['X-Password'] = process.env.EVSIGN_PASSWORD.trim();
-  await signFileWithRetry({ inputPath, outputPath, endpoint, headers, maxAttempts: readIntegerEnvironment('EVSIGN_MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS), attemptTimeoutMs: readIntegerEnvironment('EVSIGN_ATTEMPT_TIMEOUT_MS', DEFAULT_ATTEMPT_TIMEOUT_MS), retryDelaysMs: readRetryDelays() });
+  await signWithProfile({ profile: profileName, environment: process.env, inputPath: inputArg, outputPath: outputArg });
   const signed = await readFile(outputPath);
   console.log(`Signed ${basename(outputPath)} via EV Sign (${signed.length} bytes).`);
 }

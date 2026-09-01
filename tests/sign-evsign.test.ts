@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as evsign from '../scripts/sign-evsign.mjs';
-import { signFileWithRetry } from '../scripts/sign-evsign.mjs';
+import { signFileWithRetry, signWithProfile } from '../scripts/sign-evsign.mjs';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -211,5 +211,57 @@ describe('EV Sign signer profile resolution', () => {
     for (const value of Object.values(environment)) {
       if (value) expect((error as Error).message).not.toContain(value);
     }
+  });
+});
+
+describe('closed-profile signing entry point', () => {
+  it('runs the stable signing fake with only the stable certificate selector', async () => {
+    const { inputPath, outputPath } = fixture();
+    const seenHeaders: Record<string, string>[] = [];
+    await signWithProfile({
+      profile: 'stable',
+      environment: {
+        EVSIGN_CERTIFICATE: 'stable-selector',
+        EVSIGN_PUBLISHER_IDENTITY: JSON.stringify({
+          country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094',
+        }),
+        EVSIGN_KEY: 'synthetic-key',
+      },
+      inputPath,
+      outputPath,
+    }, {
+      request: async (_source, request) => {
+        seenHeaders.push(request.headers);
+        return Buffer.from('stable-signed-output');
+      },
+      sleep: async () => {},
+      log: () => {},
+    });
+    expect(seenHeaders).toHaveLength(1);
+    expect(seenHeaders[0]).toMatchObject({ 'X-Cert': 'stable-selector', 'X-Key': 'synthetic-key' });
+    expect(JSON.stringify(seenHeaders[0])).not.toContain('bridge');
+    expect(readFileSync(outputPath, 'utf8')).toBe('stable-signed-output');
+  });
+
+  it('rejects bridge-only configuration before the stable signing fake runs', async () => {
+    const { inputPath, outputPath } = fixture();
+    let requests = 0;
+    await expect(signWithProfile({
+      profile: 'stable',
+      environment: {
+        EVSIGN_BRIDGE_CERTIFICATE: 'bridge-selector',
+        EVSIGN_BRIDGE_PUBLISHER_IDENTITY: JSON.stringify({
+          country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P',
+        }),
+        EVSIGN_KEY: 'synthetic-key',
+      },
+      inputPath,
+      outputPath,
+    }, {
+      request: async () => { requests += 1; return Buffer.from('must-not-sign'); },
+      sleep: async () => {},
+      log: () => {},
+    })).rejects.toThrow(/stable EVSign profile is not configured|cross-profile EVSign configuration/);
+    expect(requests).toBe(0);
   });
 });

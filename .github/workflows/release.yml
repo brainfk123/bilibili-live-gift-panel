@@ -119,21 +119,17 @@ jobs:
       - name: Resolve EVSign signer profile
         shell: pwsh
         env:
-          EVSIGN_ACTIVE_PROFILE: ${{ vars.EVSIGN_ACTIVE_PROFILE }}
-          EVSIGN_SIGNER_PROFILES_JSON: ${{ vars.EVSIGN_SIGNER_PROFILES_JSON }}
-          EVSIGN_CERT: ${{ vars.EVSIGN_CERT }}
-          EVSIGN_EXPECTED_SUBJECT: ${{ vars.EVSIGN_EXPECTED_SUBJECT }}
+          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
+          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
         run: |
-          $profileJSON = node scripts/sign-evsign.mjs --resolve-profile
+          $profileJSON = node scripts/sign-evsign.mjs --resolve-profile stable
           if ($LASTEXITCODE -ne 0) { throw "EVSign signer profile resolution failed" }
           $profile = $profileJSON | ConvertFrom-Json
-          if ($profile.schema -ne 1 -or [string]::IsNullOrWhiteSpace([string]$profile.profile) -or [string]::IsNullOrWhiteSpace([string]$profile.subject)) {
+          if ($profile.schema -ne 2 -or $profile.profile -cne 'stable' -or $profile.certificateConfigured -ne $true) {
             throw "EVSign signer profile output is invalid"
           }
-          "EVSIGN_CERT=$($profile.cert)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "EVSIGN_EXPECTED_SUBJECT=$($profile.subject)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "APP_UPDATE_PUBLISHER=$($profile.subject)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Resolved EVSign signer profile '$($profile.profile)' from '$($profile.source)' configuration."
+          "APP_UPDATE_PUBLISHER=NaisNet Technology Co., Ltd." | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved closed EVSign signer profile '$($profile.profile)'."
 
       - name: Test domestic update tooling
         env:
@@ -179,6 +175,10 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
+          $componentSignerSubject = [string](Get-Content goserver/ffmpeg/manifest.json -Raw | ConvertFrom-Json).signer_subject
+          if ([string]::IsNullOrWhiteSpace($componentSignerSubject)) { throw 'Reviewed FFmpeg component signer metadata is missing.' }
+          $env:EVSIGN_EXPECTED_SUBJECT = $componentSignerSubject
+          "EVSIGN_EXPECTED_SUBJECT=$componentSignerSubject" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
           $identity = $identityJSON | ConvertFrom-Json
@@ -275,20 +275,17 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
         shell: pwsh
         env:
+          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
+          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
         run: |
-          node scripts/sign-evsign.mjs dist/ffmpeg/ffmpeg.exe
+          node scripts/sign-evsign.mjs --profile stable dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
             throw "FFmpeg signing failed with exit code $LASTEXITCODE"
           }
-          $signature = Get-AuthenticodeSignature -LiteralPath dist/ffmpeg/ffmpeg.exe
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "Inner FFmpeg Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
-          }
-          if ($null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
-            throw "Inner FFmpeg Authenticode signer does not match EVSIGN_EXPECTED_SUBJECT"
-          }
+          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/ffmpeg/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Inner FFmpeg structured Authenticode inspection failed.' }
           Write-Host 'Verified inner FFmpeg Authenticode signature.'
 
       - name: Package and verify signed FFmpeg payload
@@ -415,16 +412,11 @@ jobs:
           $componentManifest = Get-Content -LiteralPath "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath $destination).Length
-          $signature = Get-AuthenticodeSignature -LiteralPath $destination
           if ($componentManifest.authenticode -ne $true -or $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Standalone FFmpeg does not match the verified component manifest.'
           }
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $signature.SignerCertificate) {
-            throw 'Standalone FFmpeg Authenticode signature is invalid.'
-          }
-          if ($signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
-            throw 'Standalone FFmpeg signer does not match EVSIGN_EXPECTED_SUBJECT.'
-          }
+          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone FFmpeg structured Authenticode inspection failed.' }
           "$hash  ffmpeg-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/ffmpeg-windows-x64.exe.sha256
 
       - name: Build release executable
@@ -440,45 +432,20 @@ jobs:
         working-directory: goserver
         run: go test ./...
 
-      - name: Prepare pinned EVSign CLI for outer executable
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        run: |
-          $cliPath = Join-Path $env:RUNNER_TEMP 'evsign-client-1.0.1.exe'
-          Invoke-WebRequest -Uri 'https://mc.evsign.cn/evsign-client-cli-windows-latest' -OutFile $cliPath -TimeoutSec 120
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $cliPath).Hash.ToLowerInvariant()
-          if ($hash -cne 'b1b2168a1d0ea757f26db18ac2e2b14e06fb74021f0d67add5e6be1a47dffd97') {
-            throw 'Pinned EVSign CLI SHA-256 verification failed.'
-          }
-          $signature = Get-AuthenticodeSignature -LiteralPath $cliPath
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "Pinned EVSign CLI Authenticode verification failed: $($signature.Status)"
-          }
-          if ($null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -cne '6DCBCC70A507DCAE74135DCB57047CC3365E9F03') {
-            throw 'Pinned EVSign CLI signer certificate does not match the reviewed binary.'
-          }
-
       - name: Prepare and sign release executable
         if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
         env:
+          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
+          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
-          EVSIGN_CLI_PATH: ${{ runner.temp }}\evsign-client-1.0.1.exe
         run: |
-          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.exe
-          node scripts/sign-evsign-cli.mjs dist/gift-panel-windows-x64.exe
-
-          $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "Authenticode verification failed: $($signature.Status) - $($signature.StatusMessage)"
-          }
-          if ($null -eq $signature.SignerCertificate) {
-            throw "Authenticode signer certificate is missing"
-          }
-          if ($signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
-            throw "Authenticode signer subject does not match EVSIGN_EXPECTED_SUBJECT. Actual signer: $($signature.SignerCertificate.Subject)"
-          }
+          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
+          node scripts/sign-evsign.mjs --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Stable outer signing failed.' }
+          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Stable outer structured Authenticode inspection failed.' }
           Write-Host 'Verified outer application Authenticode signature.'
 
       - name: Verify deterministic gift clip exports from signed package chain
@@ -631,13 +598,8 @@ jobs:
             }
           }
           if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
-            $ffmpegSignature = Get-AuthenticodeSignature -LiteralPath dist/ffmpeg-windows-x64.exe
-            if ($ffmpegSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $ffmpegSignature.SignerCertificate) {
-              throw "Published standalone FFmpeg Authenticode signature is invalid. Manual recovery required."
-            }
-            if ($ffmpegSignature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
-              throw "Published standalone FFmpeg signer does not match EVSIGN_EXPECTED_SUBJECT. Manual recovery required."
-            }
+            go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+            if ($LASTEXITCODE -ne 0) { throw 'Published standalone FFmpeg structured Authenticode inspection failed. Manual recovery required.' }
             $ffmpegChecksum = Get-Content -LiteralPath dist/ffmpeg-windows-x64.exe.sha256 -Raw
             if ($ffmpegChecksum -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+ffmpeg-windows-x64\.exe\s*$') {
               $expectedFFmpegHash = $Matches.digest
@@ -655,16 +617,8 @@ jobs:
               throw "Published standalone FFmpeg does not match the verified signed component manifest. Manual recovery required."
             }
           }
-          $signature = Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe
-          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-            throw "Published EXE Authenticode signature is invalid. Manual recovery required."
-          }
-          if ($null -eq $signature.SignerCertificate) {
-            throw "Published EXE signer certificate is missing. Manual recovery required."
-          }
-          if ($signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT) {
-            throw "Published EXE signer subject does not match EVSIGN_EXPECTED_SUBJECT. Manual recovery required."
-          }
+          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Published EXE structured Authenticode inspection failed. Manual recovery required.' }
           $checksumText = Get-Content -LiteralPath dist/gift-panel-windows-x64.exe.sha256 -Raw
           if ($checksumText -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+gift-panel-windows-x64\.exe\s*$') {
             $expectedHash = $Matches.digest

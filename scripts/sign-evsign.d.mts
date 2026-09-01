@@ -24,5 +24,11 @@ export interface EVSignSignerProfile {
   identity: EVSignPublisherIdentity;
 }
 export function resolveEVSignSignerProfile(profile: string, environment?: Record<string, string | undefined>): EVSignSignerProfile;
+export function signWithProfile(options: {
+  profile: string;
+  environment?: Record<string, string | undefined>;
+  inputPath: string;
+  outputPath?: string;
+}, dependencies?: SignDependencies): Promise<void>;
 export function requestSignedBytes(source: Buffer, request: { endpoint: string; headers: Record<string, string>; attemptTimeoutMs: number; maximumResponseBytes: number }): Promise<Buffer>;
 export function signFileWithRetry(options: SignFileOptions, dependencies?: SignDependencies): Promise<void>;

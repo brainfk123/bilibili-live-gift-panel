@@ -56,14 +56,27 @@ Required reviewed environment variables:
 - `BRIDGE_BOOTSTRAP_POLICY_SHA256`
 - `BRIDGE_BOOTSTRAP_POLICY_EPOCH`
 - `BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256`
-- `BRIDGE_STABLE_PUBLISHED_AT`
-- `BRIDGE_STABLE_OBSERVATION_APPROVED_AT`
+- `BRIDGE_REVIEWED_COMMIT_SHA`, the independently reviewed lowercase 40-hex
+  commit peeled from immutable `refs/tags/v0.4.11`
+- `BRIDGE_OBSERVATION_EVIDENCE_B64` and
+  `BRIDGE_OBSERVATION_EVIDENCE_SHA256`
+- `BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64` and
+  `BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256`
 - the existing reviewed `UPDATE_API_BASE_URL`
 
 There are no production root, digest, policy, certificate selector, or
-observation values in the repository. Until protected reviewers supply them,
+observation or trust-attestation values in the repository. The known Task 1
+test root and policy digests are explicitly rejected. Until protected reviewers supply them,
 the workflow intentionally fails before build. Never fill these fields with
 test fixtures, placeholder digests, or locally generated production claims.
+
+Protect `v0.4.11` with the repository tag ruleset: creation requires the
+release-maintainer path, update and deletion are forbidden, and bypass is not
+available to the bridge workflow. Record the ruleset ID and reviewed peeled
+commit in the approval evidence. The workflow checks local and remote peeled
+tag commits after checkout, immediately before draft creation, and immediately
+before `draft=false`; any movement, noncommit target, duplicate/ambiguous ref,
+or mismatch with `BRIDGE_REVIEWED_COMMIT_SHA` stops publication.
 
 ## Gate A: later GitHub bridge publication
 
@@ -71,10 +84,17 @@ Before requesting approval, record read-only evidence for:
 
 - `refs/tags/v0.4.11` commit and `package.json` version `0.4.11`;
 - absence of an existing GitHub Release for `v0.4.11`;
-- the `v0.4.12` publication timestamp and the end of its seven-day observation;
+- the actual immutable GitHub `v0.4.12` Release ID, tag, and `published_at`;
+- a reviewed observation-evidence artifact whose digest binds that Release ID,
+  tag, `published_at`, seven-day end, passing result, and review time;
 - daily bounded updater and policy result counts for the full observation;
-- two-reviewer agreement on root SPKI SHA-256, bootstrap policy SHA-256 and
-  epoch, and fixed FFmpeg component-manifest SHA-256;
+- the immutable `publisher-policy-epoch-00000001` Release and exact
+  `policy.json`/`audit.json` bytes;
+- a reviewed production-trust attestation binding root SPKI SHA-256, exact
+  epoch-1 policy bytes/hash/epoch, KMS key ID/request ID/audit digest, immutable
+  policy Release ID/tag/time/assets, and review time;
+- two-reviewer agreement on all of those digests and the fixed FFmpeg
+  component-manifest SHA-256;
 - exact protected environment variable names and bridge-only secret names,
   without printing their values.
 
@@ -94,11 +114,18 @@ Acceptance evidence must include:
   `/releases/latest` result;
 - exact asset names, sizes, API digests, downloaded bytes, and
   `SHA256SUMS.txt`;
+- the Task 7 mirror closure assets `gift-panel-windows-x64.exe`, its strict
+  `.sha256`, `gift-panel-update.json`, and schema-valid
+  `gift-panel-changelog.json`, revalidated with the updateapi ByTag/mirror
+  implementation before the draft is created;
 - RushRush outer structured identity and Authenticode status;
 - NaisNet standalone FFmpeg structured identity, version, hash, size, and
   component-manifest hash;
 - embedded root digest, bootstrap policy epoch/hash, and client-side policy
   verification authorizing NaisNet stable `v0.4.12`;
+- matching Authenticode PE-content digest between preserved unsigned bytes and
+  the signed output, plus final extraction/reverification of embedded trust and
+  FFmpeg from the bound signed artifact;
 - proof that stable and legacy pointers did not change.
 
 GitHub acceptance completes Gate A only. Keep legacy routing inactive.

@@ -46,14 +46,14 @@ func TestCertificateLegalIdentityRejectsAmbiguousStructuredFields(t *testing.T) 
 		input updateCertificateFixture
 		want  string
 	}{
-		{name: "missing country", input: updateCertificateFixture{Countries: []string{}, OrganizationID: "91210103MA7CJ3C094"}, want: "国家"},
-		{name: "multiple countries", input: updateCertificateFixture{Countries: []string{"CN", "US"}, OrganizationID: "91210103MA7CJ3C094"}, want: "国家"},
-		{name: "empty country", input: updateCertificateFixture{Countries: []string{""}, OrganizationID: "91210103MA7CJ3C094"}, want: "国家"},
-		{name: "missing organization", input: updateCertificateFixture{Organizations: []string{}, OrganizationID: "91210103MA7CJ3C094"}, want: "组织"},
-		{name: "multiple organizations", input: updateCertificateFixture{Organizations: []string{"NaisNet Technology Co., Ltd.", "Other"}, OrganizationID: "91210103MA7CJ3C094"}, want: "组织"},
-		{name: "empty organization", input: updateCertificateFixture{Organizations: []string{""}, OrganizationID: "91210103MA7CJ3C094"}, want: "组织"},
-		{name: "missing organization ID", input: updateCertificateFixture{OrganizationID: ""}, want: "组织标识"},
-		{name: "empty organization ID", input: updateCertificateFixture{OrganizationID: "   "}, want: "组织标识"},
+		{name: "missing country", input: updateCertificateFixture{Countries: []string{}, OrganizationID: "91210103MA7CJ3C094"}, want: "结构化身份"},
+		{name: "multiple countries", input: updateCertificateFixture{Countries: []string{"CN", "US"}, OrganizationID: "91210103MA7CJ3C094"}, want: "结构化身份"},
+		{name: "empty country", input: updateCertificateFixture{Countries: []string{""}, OrganizationID: "91210103MA7CJ3C094"}, want: "结构化身份"},
+		{name: "missing organization", input: updateCertificateFixture{Organizations: []string{}, OrganizationID: "91210103MA7CJ3C094"}, want: "结构化身份"},
+		{name: "multiple organizations", input: updateCertificateFixture{Organizations: []string{"NaisNet Technology Co., Ltd.", "Other"}, OrganizationID: "91210103MA7CJ3C094"}, want: "结构化身份"},
+		{name: "empty organization", input: updateCertificateFixture{Organizations: []string{""}, OrganizationID: "91210103MA7CJ3C094"}, want: "结构化身份"},
+		{name: "missing organization ID", input: updateCertificateFixture{OrganizationID: ""}, want: "结构化身份"},
+		{name: "empty organization ID", input: updateCertificateFixture{OrganizationID: "   "}, want: "结构化身份"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
