@@ -453,7 +453,7 @@ func testBundlePayload(t *testing.T) ([]byte, []byte) {
 	}
 	signer := newBundleTestSigner(t)
 	signed, audit, err := trustpolicy.Sign(context.Background(), signer, candidate, trustpolicy.SignOptions{
-		KeyID:                 "kms-key-id",
+		KeyID:                 "publisher-root-v1",
 		ExpectedPreviousEpoch: 0,
 		ExpectedSPKISHA256:    signer.digest,
 		Now:                   time.Date(2029, 1, 2, 3, 4, 5, 0, time.UTC),

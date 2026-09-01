@@ -29,7 +29,7 @@ import (
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy/bundlefs"
 )
 
-func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
+func TestPrivateKeySignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 	fake := newCommandSigner(t)
 	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
@@ -37,10 +37,11 @@ func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 	auditPath := filepath.Join(bundlePath, "audit.json")
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	environment := map[string]string{
-		"REVIEWED_KMS_KEY_ID":          "kms-key-id",
-		"REVIEWED_KMS_SPKI_SHA256":     fake.digest,
-		"GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session",
-		"GITHUB_ACTOR":                 "release-approver",
+		"PUBLISHER_ROTATION_PRIVATE_KEY_PEM": "protected-private-key-pem",
+		"PUBLISHER_ROTATION_KEY_ID":          "publisher-root-v1",
+		"PUBLISHER_ROTATION_SPKI_SHA256":     fake.digest,
+		"PUBLISHER_ROTATION_REQUEST_ID":      "github-run:1234:attempt:2",
+		"GITHUB_ACTOR":                       "release-approver",
 	}
 	var output bytes.Buffer
 	factoryCalls := 0
@@ -48,18 +49,19 @@ func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 		"sign",
 		"--candidate", candidatePath,
 		"--expected-previous-epoch", "0",
-		"--kms-region", "ap-shanghai",
-		"--kms-key-id-env", "REVIEWED_KMS_KEY_ID",
-		"--expected-spki-sha256-env", "REVIEWED_KMS_SPKI_SHA256",
+		"--private-key-env", "PUBLISHER_ROTATION_PRIVATE_KEY_PEM",
+		"--key-id-env", "PUBLISHER_ROTATION_KEY_ID",
+		"--expected-spki-sha256-env", "PUBLISHER_ROTATION_SPKI_SHA256",
+		"--request-id-env", "PUBLISHER_ROTATION_REQUEST_ID",
 		"--output", policyPath,
 		"--audit-output", auditPath,
 	}, func(name string) (string, bool) {
 		value, ok := environment[name]
 		return value, ok
-	}, func(region, expectedDigest, providerMode string) (trustpolicy.Signer, error) {
+	}, func(privateKeyPEM []byte, expectedDigest, requestID string) (trustpolicy.Signer, error) {
 		factoryCalls++
-		if region != "ap-shanghai" || expectedDigest != fake.digest || providerMode != "environment-session" {
-			t.Fatalf("factory input = %q/%q/%q", region, expectedDigest, providerMode)
+		if string(privateKeyPEM) != "protected-private-key-pem" || expectedDigest != fake.digest || requestID != "github-run:1234:attempt:2" {
+			t.Fatalf("factory input = %q/%q/%q", privateKeyPEM, expectedDigest, requestID)
 		}
 		return fake, nil
 	}, &output, func() time.Time {
@@ -80,7 +82,7 @@ func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 	if err := json.Unmarshal(auditBytes, &audit); err != nil {
 		t.Fatal(err)
 	}
-	if len(audit) != 6 || audit["keyId"] != "kms-key-id" || audit["ciActor"] != "release-approver" {
+	if len(audit) != 6 || audit["keyId"] != "publisher-root-v1" || audit["requestId"] != "sign-request-id" || audit["ciActor"] != "release-approver" {
 		t.Fatalf("audit = %v, want exact six-field non-secret audit", audit)
 	}
 	if output.String() != "publisher policy signed\n" {
@@ -159,7 +161,7 @@ func TestCandidateCommandsRejectEpochAbovePublicationNamespaceBeforeProvider(t *
 			}
 		}
 		factoryCalls := 0
-		err := run(context.Background(), args, commandEnvironment(fake.digest), func(string, string, string) (trustpolicy.Signer, error) {
+		err := run(context.Background(), args, commandEnvironment(fake.digest), func([]byte, string, string) (trustpolicy.Signer, error) {
 			factoryCalls++
 			return fake, nil
 		}, io.Discard, func() time.Time { return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC) })
@@ -195,7 +197,7 @@ func writeCandidateEpoch(t testing.TB, epoch uint64) string {
 	return path
 }
 
-func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
+func TestPrivateKeySignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
 	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
 	if err := os.Mkdir(bundlePath, 0o700); err != nil {
@@ -209,10 +211,10 @@ func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	called := false
 	err := run(context.Background(), validCommandArgs(candidatePath, policyPath, auditPath), func(name string) (string, bool) {
-		values := map[string]string{"REVIEWED_KMS_KEY_ID": "kms-key-id", "REVIEWED_KMS_SPKI_SHA256": strings.Repeat("a", 64), "GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session", "GITHUB_ACTOR": "release-approver"}
+		values := commandEnvironmentValues(strings.Repeat("a", 64))
 		value, ok := values[name]
 		return value, ok
-	}, func(string, string, string) (trustpolicy.Signer, error) {
+	}, func([]byte, string, string) (trustpolicy.Signer, error) {
 		called = true
 		return nil, errors.New("must not construct signer")
 	}, os.Stdout, time.Now)
@@ -231,7 +233,7 @@ func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
 	}
 }
 
-func TestKMSSignerCLIRedactsEnvironmentAndProviderErrors(t *testing.T) {
+func TestPrivateKeySignerCLIRedactsEnvironmentAndSignerErrors(t *testing.T) {
 	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
 	policyPath := filepath.Join(bundlePath, "policy.json")
@@ -240,30 +242,31 @@ func TestKMSSignerCLIRedactsEnvironmentAndProviderErrors(t *testing.T) {
 	const secret = "credential-secret-from-provider"
 	var output bytes.Buffer
 	err := run(context.Background(), validCommandArgs(candidatePath, policyPath, auditPath), func(name string) (string, bool) {
-		values := map[string]string{"REVIEWED_KMS_KEY_ID": "kms-key-id", "REVIEWED_KMS_SPKI_SHA256": strings.Repeat("a", 64), "GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session", "GITHUB_ACTOR": "release-approver"}
+		values := commandEnvironmentValues(strings.Repeat("a", 64))
+		values["PUBLISHER_ROTATION_PRIVATE_KEY_PEM"] = secret
 		value, ok := values[name]
 		return value, ok
-	}, func(string, string, string) (trustpolicy.Signer, error) {
+	}, func([]byte, string, string) (trustpolicy.Signer, error) {
 		return nil, errors.New(secret)
 	}, &output, time.Now)
 	if err == nil {
 		t.Fatal("run() error = nil, want provider failure")
 	}
-	if strings.Contains(err.Error(), secret) || strings.Contains(output.String(), secret) || strings.Contains(err.Error(), "kms-key-id") || strings.Contains(err.Error(), strings.Repeat("a", 64)) {
+	if strings.Contains(err.Error(), secret) || strings.Contains(output.String(), secret) || strings.Contains(err.Error(), "publisher-root-v1") || strings.Contains(err.Error(), strings.Repeat("a", 64)) {
 		t.Fatalf("command leaked provider or environment value: err=%q output=%q", err, output.String())
 	}
 }
 
-func TestKMSSignerCLIRejectsUnsafeEnvironmentBeforeSignerConstruction(t *testing.T) {
+func TestPrivateKeySignerCLIRejectsUnsafeEnvironmentBeforeSignerConstruction(t *testing.T) {
 	directory := newPrivateTestBase(t)
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	for _, test := range []struct {
 		name   string
 		values map[string]string
 	}{
-		{name: "unsafe key ID", values: map[string]string{"REVIEWED_KMS_KEY_ID": " key-id", "REVIEWED_KMS_SPKI_SHA256": strings.Repeat("a", 64), "GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session", "GITHUB_ACTOR": "release-approver"}},
-		{name: "unsafe digest", values: map[string]string{"REVIEWED_KMS_KEY_ID": "key-id", "REVIEWED_KMS_SPKI_SHA256": "not-a-digest", "GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session", "GITHUB_ACTOR": "release-approver"}},
-		{name: "unsafe actor", values: map[string]string{"REVIEWED_KMS_KEY_ID": "key-id", "REVIEWED_KMS_SPKI_SHA256": strings.Repeat("a", 64), "GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session", "GITHUB_ACTOR": "actor\nsecret"}},
+		{name: "unsafe key ID", values: mergeCommandEnvironment(strings.Repeat("a", 64), "PUBLISHER_ROTATION_KEY_ID", " key-id")},
+		{name: "unsafe digest", values: mergeCommandEnvironment(strings.Repeat("a", 64), "PUBLISHER_ROTATION_SPKI_SHA256", "not-a-digest")},
+		{name: "unsafe actor", values: mergeCommandEnvironment(strings.Repeat("a", 64), "GITHUB_ACTOR", "actor\nsecret")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			called := false
@@ -273,7 +276,7 @@ func TestKMSSignerCLIRejectsUnsafeEnvironmentBeforeSignerConstruction(t *testing
 			err := run(context.Background(), validCommandArgs(candidatePath, policyPath, auditPath), func(name string) (string, bool) {
 				value, ok := test.values[name]
 				return value, ok
-			}, func(string, string, string) (trustpolicy.Signer, error) {
+			}, func([]byte, string, string) (trustpolicy.Signer, error) {
 				called = true
 				return nil, errors.New("must not construct signer")
 			}, ioDiscard{}, time.Now)
@@ -287,7 +290,7 @@ func TestKMSSignerCLIRejectsUnsafeEnvironmentBeforeSignerConstruction(t *testing
 	}
 }
 
-func TestKMSSignerCLIRejectsCrossParentExistingParentAndSymlinkBeforeSignerConstruction(t *testing.T) {
+func TestPrivateKeySignerCLIRejectsCrossParentExistingParentAndSymlinkBeforeSignerConstruction(t *testing.T) {
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	base := newPrivateTestBase(t)
 	existingBundle := filepath.Join(base, "existing-bundle")
@@ -317,7 +320,7 @@ func TestKMSSignerCLIRejectsCrossParentExistingParentAndSymlinkBeforeSignerConst
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			called := false
-			err := run(context.Background(), validCommandArgs(candidatePath, test.output, test.audit), commandEnvironment(strings.Repeat("a", 64)), func(string, string, string) (trustpolicy.Signer, error) {
+			err := run(context.Background(), validCommandArgs(candidatePath, test.output, test.audit), commandEnvironment(strings.Repeat("a", 64)), func([]byte, string, string) (trustpolicy.Signer, error) {
 				called = true
 				return nil, errors.New("must not construct signer")
 			}, ioDiscard{}, time.Now)
@@ -331,46 +334,38 @@ func TestKMSSignerCLIRejectsCrossParentExistingParentAndSymlinkBeforeSignerConst
 	}
 }
 
-func TestKMSSignerCLIRequiresExplicitProviderModeBeforeFactory(t *testing.T) {
+func TestPrivateKeySignerCLIRequiresEveryProtectedEnvironmentValueBeforeFactory(t *testing.T) {
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
-	for _, mode := range []string{"", "ambient", "tke-oidc-with-fallback"} {
-		name := mode
-		if name == "" {
-			name = "missing"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, missing := range []string{"PUBLISHER_ROTATION_PRIVATE_KEY_PEM", "PUBLISHER_ROTATION_KEY_ID", "PUBLISHER_ROTATION_SPKI_SHA256", "PUBLISHER_ROTATION_REQUEST_ID", "GITHUB_ACTOR"} {
+		t.Run(missing, func(t *testing.T) {
 			bundlePath := filepath.Join(newPrivateTestBase(t), "bundle")
-			values := map[string]string{
-				"REVIEWED_KMS_KEY_ID":          "kms-key-id",
-				"REVIEWED_KMS_SPKI_SHA256":     strings.Repeat("a", 64),
-				"GIFT_PANEL_KMS_PROVIDER_MODE": mode,
-				"GITHUB_ACTOR":                 "release-approver",
-			}
+			values := commandEnvironmentValues(strings.Repeat("a", 64))
+			delete(values, missing)
 			called := false
 			err := run(context.Background(), validCommandArgs(candidatePath, filepath.Join(bundlePath, "policy.json"), filepath.Join(bundlePath, "audit.json")), func(name string) (string, bool) {
 				value, ok := values[name]
 				return value, ok
-			}, func(string, string, string) (trustpolicy.Signer, error) {
+			}, func([]byte, string, string) (trustpolicy.Signer, error) {
 				called = true
 				return nil, errors.New("must not construct signer")
 			}, ioDiscard{}, time.Now)
 			if err == nil {
-				t.Fatal("run() accepted missing or unknown provider mode")
+				t.Fatal("run() accepted a missing protected environment value")
 			}
 			if called {
-				t.Fatal("run() constructed signer before provider mode validation")
+				t.Fatal("run() constructed signer before environment validation")
 			}
 		})
 	}
 }
 
-func TestKMSSignerCLIRejectsUntrustedWritableParentBeforeFactory(t *testing.T) {
+func TestPrivateKeySignerCLIRejectsUntrustedWritableParentBeforeFactory(t *testing.T) {
 	parent := newPrivateTestBase(t)
 	makeCLIParentUntrustedWritable(t, parent)
 	bundlePath := filepath.Join(parent, "bundle")
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	called := false
-	err := run(context.Background(), validCommandArgs(candidatePath, filepath.Join(bundlePath, "policy.json"), filepath.Join(bundlePath, "audit.json")), commandEnvironment(strings.Repeat("a", 64)), func(string, string, string) (trustpolicy.Signer, error) {
+	err := run(context.Background(), validCommandArgs(candidatePath, filepath.Join(bundlePath, "policy.json"), filepath.Join(bundlePath, "audit.json")), commandEnvironment(strings.Repeat("a", 64)), func([]byte, string, string) (trustpolicy.Signer, error) {
 		called = true
 		return nil, errors.New("must not construct signer")
 	}, ioDiscard{}, time.Now)
@@ -835,7 +830,7 @@ func testBundlePayloadWithSigner(t testing.TB, label string, signer *commandSign
 	}
 	labelDigest := sha256.Sum256([]byte(label))
 	signed, audit, err := trustpolicy.Sign(context.Background(), signer, candidate, trustpolicy.SignOptions{
-		KeyID:                 "kms-key-id",
+		KeyID:                 "publisher-root-v1",
 		ExpectedPreviousEpoch: 0,
 		ExpectedSPKISHA256:    signer.digest,
 		Now:                   time.Date(2029, 1, 2, 3, 4, 5, 0, time.UTC),
@@ -919,15 +914,26 @@ func waitResult(t testing.TB, channel <-chan error, message string) error {
 
 func commandEnvironment(digest string) environmentLookup {
 	return func(name string) (string, bool) {
-		values := map[string]string{
-			"REVIEWED_KMS_KEY_ID":          "kms-key-id",
-			"REVIEWED_KMS_SPKI_SHA256":     digest,
-			"GIFT_PANEL_KMS_PROVIDER_MODE": "environment-session",
-			"GITHUB_ACTOR":                 "release-approver",
-		}
+		values := commandEnvironmentValues(digest)
 		value, ok := values[name]
 		return value, ok
 	}
+}
+
+func commandEnvironmentValues(digest string) map[string]string {
+	return map[string]string{
+		"PUBLISHER_ROTATION_PRIVATE_KEY_PEM": "protected-private-key-pem",
+		"PUBLISHER_ROTATION_KEY_ID":          "publisher-root-v1",
+		"PUBLISHER_ROTATION_SPKI_SHA256":     digest,
+		"PUBLISHER_ROTATION_REQUEST_ID":      "github-run:1234:attempt:2",
+		"GITHUB_ACTOR":                       "release-approver",
+	}
+}
+
+func mergeCommandEnvironment(digest, name, value string) map[string]string {
+	values := commandEnvironmentValues(digest)
+	values[name] = value
+	return values
 }
 
 func assertPathAbsent(t testing.TB, path string) {
@@ -946,7 +952,7 @@ func newPrivateTestBase(t testing.TB) string {
 	return base
 }
 
-func TestKMSSignerCLIRejectsSecretValueFlagsInSubprocess(t *testing.T) {
+func TestPrivateKeySignerCLIRejectsSecretValueFlagsInSubprocess(t *testing.T) {
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "trustpolicy.exe")
 	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
@@ -955,8 +961,8 @@ func TestKMSSignerCLIRejectsSecretValueFlagsInSubprocess(t *testing.T) {
 		t.Fatalf("build CLI: %v\n%s", err, output)
 	}
 	const secret = "must-not-appear-in-output"
-	command := exec.Command(binary, "sign", "--kms-key-id", secret, "--expected-spki-sha256", secret)
-	command.Env = append(os.Environ(), "TENCENTCLOUD_SECRET_ID="+secret, "TENCENTCLOUD_SECRET_KEY="+secret)
+	command := exec.Command(binary, "sign", "--private-key", secret, "--expected-spki-sha256", secret)
+	command.Env = append(os.Environ(), "PUBLISHER_ROTATION_PRIVATE_KEY_PEM="+secret)
 	output, err := command.CombinedOutput()
 	if err == nil {
 		t.Fatal("CLI accepted direct secret-bearing flags")
@@ -966,14 +972,15 @@ func TestKMSSignerCLIRejectsSecretValueFlagsInSubprocess(t *testing.T) {
 	}
 }
 
-func TestKMSSignerCLIRejectsEveryRepeatedRegisteredFlagBeforeFactory(t *testing.T) {
+func TestPrivateKeySignerCLIRejectsEveryRepeatedRegisteredFlagBeforeFactory(t *testing.T) {
 	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
 	for _, flagName := range []string{
 		"candidate",
 		"expected-previous-epoch",
-		"kms-region",
-		"kms-key-id-env",
+		"private-key-env",
+		"key-id-env",
 		"expected-spki-sha256-env",
+		"request-id-env",
 		"output",
 		"audit-output",
 	} {
@@ -992,7 +999,7 @@ func TestKMSSignerCLIRejectsEveryRepeatedRegisteredFlagBeforeFactory(t *testing.
 				args = repeatRegisteredFlag(args, flagName, value, firstEquals)
 				called := false
 				var output bytes.Buffer
-				err := run(context.Background(), args, commandEnvironment(fake.digest), func(string, string, string) (trustpolicy.Signer, error) {
+				err := run(context.Background(), args, commandEnvironment(fake.digest), func([]byte, string, string) (trustpolicy.Signer, error) {
 					called = true
 					return fake, nil
 				}, &output, func() time.Time { return time.Date(2029, 1, 2, 3, 4, 5, 0, time.UTC) })
@@ -1011,7 +1018,7 @@ func TestKMSSignerCLIRejectsEveryRepeatedRegisteredFlagBeforeFactory(t *testing.
 	}
 }
 
-func TestKMSSignerCLIRepeatedFlagSubprocessDoesNotEchoValue(t *testing.T) {
+func TestPrivateKeySignerCLIRepeatedFlagSubprocessDoesNotEchoValue(t *testing.T) {
 	directory := t.TempDir()
 	binary := filepath.Join(directory, "trustpolicy.exe")
 	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
@@ -1032,8 +1039,9 @@ func TestKMSSignerCLIRepeatedFlagSubprocessDoesNotEchoValue(t *testing.T) {
 
 func validCommandArgs(candidate, output, audit string) []string {
 	return []string{
-		"sign", "--candidate", candidate, "--expected-previous-epoch", "0", "--kms-region", "ap-shanghai",
-		"--kms-key-id-env", "REVIEWED_KMS_KEY_ID", "--expected-spki-sha256-env", "REVIEWED_KMS_SPKI_SHA256",
+		"sign", "--candidate", candidate, "--expected-previous-epoch", "0",
+		"--private-key-env", "PUBLISHER_ROTATION_PRIVATE_KEY_PEM", "--key-id-env", "PUBLISHER_ROTATION_KEY_ID",
+		"--expected-spki-sha256-env", "PUBLISHER_ROTATION_SPKI_SHA256", "--request-id-env", "PUBLISHER_ROTATION_REQUEST_ID",
 		"--output", output, "--audit-output", audit,
 	}
 }

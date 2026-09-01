@@ -68,7 +68,7 @@ function readinessFixture(manifestScoped = true) {
     epoch: 2, expiresAt: '2030-01-01T00:00:00Z', publishers: [authorizationPublisher],
   });
   const authorizationAuditBytes = Buffer.from(JSON.stringify({
-    keyId: 'kms-production-key', epoch: 2, policySha256: sha256(authorizationPolicyBytes), requestId: 'kms-request-2', utc: '2026-08-09T00:00:00Z', ciActor: 'release-reviewer',
+    keyId: 'publisher-root-v1', epoch: 2, policySha256: sha256(authorizationPolicyBytes), requestId: 'github-run:42:attempt:1', utc: '2026-08-09T00:00:00Z', ciActor: 'release-reviewer',
   }));
   const commitBytes = Buffer.from(JSON.stringify({
     schemaVersion: 1,
@@ -99,7 +99,7 @@ function readinessFixture(manifestScoped = true) {
   const attestation = {
     schemaVersion: 1, rootSpkiSha256: sha256(rootSPKI),
     authorizationPolicy: { epoch: 2, sha256: sha256(authorizationPolicyBytes) },
-    kms: { keyId: 'kms-production-key', auditSha256: sha256(authorizationAuditBytes), requestId: 'kms-request-2' },
+    signer: { keyId: 'publisher-root-v1', auditSha256: sha256(authorizationAuditBytes), requestId: 'github-run:42:attempt:1' },
     policyRelease: { id: 502, tag: 'publisher-policy-epoch-00000002', publishedAt: '2026-08-09T00:00:00Z', policyAsset: 'gift-panel-publisher-policy.json', auditAsset: 'gift-panel-publisher-policy.audit.json', commitAsset: 'gift-panel-publisher-policy.commit.json' },
     reviewedAt: '2026-08-09T01:00:00Z',
   };
@@ -169,6 +169,7 @@ describe('bridge readiness reviewed evidence', () => {
     expect(verifyBridgeReadiness(fixture)).toMatchObject({
       stableReleaseId: 412, bootstrapPolicyEpoch: 1, authorizationPolicyReleaseId: 502, authorizationPolicyEpoch: 2,
       authorizationPolicySha256: sha256(fixture.authorizationPolicyBytes), stableArtifactSha256: sha256(fixture.stableArtifactBytes),
+      signerKeyId: 'publisher-root-v1', signerRequestId: 'github-run:42:attempt:1',
     });
   });
 

@@ -32,8 +32,8 @@ export interface BridgeReadinessSummary {
   authorizationPolicySha256: string;
   authorizationAuditSha256: string;
   authorizationCommitSha256: string;
-  kmsKeyId: string;
-  kmsRequestId: string;
+  signerKeyId: string;
+  signerRequestId: string;
   trustAttestationSha256: string;
 }
 export function verifyBridgeReadiness(options: BridgeReadinessOptions): BridgeReadinessSummary;

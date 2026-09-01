@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest';
 import {
   createCOSPublisherAdapter,
   createGitHubPublisherAdapter,
-  exchangeTencentSession,
   formatPublisherSummary,
   publishTrustPolicy,
   publisherTargets,
@@ -1163,120 +1162,5 @@ describe('publisher discovery partial completion', () => {
     await expect(publishTrustPolicy({ ...fixture.options, mode: 'advance-discovery', advanceDiscovery: true }, fixture.adapters))
       .rejects.toThrow('publisher policy publication failed');
     expect(fixture.pointerWrites).toEqual([]);
-  });
-});
-
-describe('publisher Tencent session exchange', () => {
-  it('exports and masks all three temporary STS values without a static or tokenless fallback', async () => {
-    const requests: string[] = [];
-    const requestedEncodings: string[] = [];
-    const writes: string[] = [];
-    const masks: string[] = [];
-    const environment = {
-      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://github-actions.example.test/oidc',
-      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'github-request-token',
-      PUBLISHER_TENCENT_OIDC_AUDIENCE: 'publisher-rotation',
-      PUBLISHER_TENCENT_ROLE_ARN: 'qcs::cam::uin/123456789:roleName/publisher-kms',
-      PUBLISHER_TENCENT_OIDC_PROVIDER_ID: 'github-actions-provider',
-      GITHUB_OUTPUT: 'captured-output',
-      GITHUB_RUN_ID: '1234',
-      GITHUB_RUN_ATTEMPT: '2',
-    };
-    const result = await exchangeTencentSession(environment, {
-      fetch: async (input, init) => {
-        const url = String(input);
-        requests.push(url);
-        requestedEncodings.push(new Headers(init?.headers).get('accept-encoding') ?? '');
-        if (requests.length === 1) return new Response(JSON.stringify({ value: 'github-oidc-token' }), { status: 200 });
-        return new Response(JSON.stringify({ Response: {
-          Credentials: { TmpSecretId: 'temporary-id', TmpSecretKey: 'temporary-key', Token: 'temporary-token' },
-          RequestId: 'sts-request-id',
-        } }), { status: 200 });
-      },
-      appendFile: async (_path, data) => { writes.push(String(data)); },
-      mask: (value) => { masks.push(value); },
-    });
-
-    expect(requests).toEqual([
-      'https://github-actions.example.test/oidc?audience=publisher-rotation',
-      'https://sts.tencentcloudapi.com',
-    ]);
-    expect(requestedEncodings).toEqual(['identity', 'identity']);
-    expect(writes.join('')).toContain('secret-id<<PUBLISHER_EOF\ntemporary-id');
-    expect(writes.join('')).toContain('secret-key<<PUBLISHER_EOF\ntemporary-key');
-    expect(writes.join('')).toContain('session-token<<PUBLISHER_EOF\ntemporary-token');
-    expect(masks).toEqual(['temporary-id', 'temporary-key', 'temporary-token']);
-    expect(result).toEqual({ requestId: 'sts-request-id' });
-  });
-
-  it.each(['OIDC', 'STS'])('bounds an oversized %s JSON response before accepting credentials', async (oversizedStage) => {
-    const environment = {
-      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://github-actions.example.test/oidc',
-      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'github-request-token',
-      PUBLISHER_TENCENT_OIDC_AUDIENCE: 'publisher-rotation',
-      PUBLISHER_TENCENT_ROLE_ARN: 'qcs::cam::uin/123456789:roleName/publisher-kms',
-      PUBLISHER_TENCENT_OIDC_PROVIDER_ID: 'github-actions-provider',
-      GITHUB_OUTPUT: 'captured-output',
-      GITHUB_RUN_ID: '1234',
-      GITHUB_RUN_ATTEMPT: '2',
-    };
-    let calls = 0;
-    const oversized = Buffer.from(JSON.stringify({
-      value: 'github-oidc-token',
-      padding: 'x'.repeat(64 << 10),
-      Response: {
-        Credentials: { TmpSecretId: 'temporary-id', TmpSecretKey: 'temporary-key', Token: 'temporary-token' },
-      },
-    }));
-    await expect(exchangeTencentSession(environment, {
-      fetch: async () => {
-        calls += 1;
-        if ((oversizedStage === 'OIDC' && calls === 1) || (oversizedStage === 'STS' && calls === 2)) {
-          return streamingResponse([oversized]);
-        }
-        if (calls === 1) return new Response(JSON.stringify({ value: 'github-oidc-token' }), { status: 200 });
-        return new Response(JSON.stringify({ Response: { Credentials: {
-          TmpSecretId: 'temporary-id', TmpSecretKey: 'temporary-key', Token: 'temporary-token',
-        } } }), { status: 200 });
-      },
-      appendFile: async () => undefined,
-      mask: () => undefined,
-    })).rejects.toThrow('publisher session exchange failed');
-  });
-
-  it.each([
-    { compressedStage: 'OIDC', encoding: 'gzip' },
-    { compressedStage: 'STS', encoding: 'deflate' },
-  ])('accepts bounded Fetch-decoded $encoding JSON from $compressedStage despite encoded Content-Length', async ({ compressedStage, encoding }) => {
-    const environment = {
-      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://github-actions.example.test/oidc',
-      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'github-request-token',
-      PUBLISHER_TENCENT_OIDC_AUDIENCE: 'publisher-rotation',
-      PUBLISHER_TENCENT_ROLE_ARN: 'qcs::cam::uin/123456789:roleName/publisher-kms',
-      PUBLISHER_TENCENT_OIDC_PROVIDER_ID: 'github-actions-provider',
-      GITHUB_OUTPUT: 'captured-output',
-      GITHUB_RUN_ID: '1234',
-      GITHUB_RUN_ATTEMPT: '2',
-    };
-    let calls = 0;
-    const result = await exchangeTencentSession(environment, {
-      fetch: async () => {
-        calls += 1;
-        const bytes = calls === 1
-          ? Buffer.from(JSON.stringify({ value: 'github-oidc-token' }))
-          : Buffer.from(JSON.stringify({ Response: {
-            Credentials: { TmpSecretId: 'temporary-id', TmpSecretKey: 'temporary-key', Token: 'temporary-token' },
-            RequestId: 'compressed-sts-request',
-          } }));
-        const compressed = (compressedStage === 'OIDC' && calls === 1) || (compressedStage === 'STS' && calls === 2);
-        return streamingResponse([bytes], { headers: compressed ? {
-          'content-encoding': encoding,
-          'content-length': '1',
-        } : { 'content-length': String(bytes.length) } });
-      },
-      appendFile: async () => undefined,
-      mask: () => undefined,
-    });
-    expect(result).toEqual({ requestId: 'compressed-sts-request' });
   });
 });

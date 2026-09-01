@@ -4,5 +4,6 @@ goserver/dist/
 artifacts/
 .superpowers/
 .worktrees/
+.local-secrets/
 .tmp/
 *.local

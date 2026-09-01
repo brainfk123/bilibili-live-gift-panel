@@ -1,5 +1,5 @@
 // Package trustpolicy validates and signs publisher-policy candidates without
-// ever accepting policy or KMS secrets through its output surfaces.
+// ever accepting policy or signing-key secrets through its output surfaces.
 package trustpolicy
 
 import (
@@ -10,12 +10,14 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"math"
+	"math/big"
 	"regexp"
 	"sort"
 	"strings"
@@ -68,8 +70,8 @@ type CandidateOptions struct {
 	Now                   time.Time
 }
 
-// Signer is the narrow KMS boundary. Implementations return DER SPKI and DER
-// ECDSA signature bytes plus non-secret provider request identifiers.
+// Signer is the narrow signing-key boundary. Implementations return DER SPKI
+// and DER ECDSA signature bytes plus non-secret audit request identifiers.
 type Signer interface {
 	PublicKey(context.Context, string) ([]byte, string, error)
 	SignDigest(context.Context, string, []byte) ([]byte, string, error)
@@ -113,9 +115,9 @@ func (err safeError) Error() string { return string(err) }
 const (
 	errCandidateInvalid  safeError = "publisher policy candidate is invalid"
 	errReviewedInput     safeError = "reviewed signing input is invalid"
-	errPublicKey         safeError = "KMS public key validation failed"
-	errSigning           safeError = "KMS signing failed"
-	errSignatureInvalid  safeError = "KMS signature verification failed"
+	errPublicKey         safeError = "signing public key validation failed"
+	errSigning           safeError = "publisher policy signing failed"
+	errSignatureInvalid  safeError = "publisher policy signature verification failed"
 	errCanonicalEncoding safeError = "publisher policy encoding failed"
 	errPolicySize        safeError = "publisher policy size is invalid"
 )
@@ -153,9 +155,9 @@ func CanonicalSigned(candidate Candidate) ([]byte, error) {
 	return bytes.TrimSuffix(output.Bytes(), []byte{'\n'}), nil
 }
 
-// Sign validates all local bindings before KMS access, submits only the SHA-256
-// digest, verifies the returned signature locally, and then creates the client
-// envelope in memory.
+// Sign validates all reviewed bindings before private-key use, submits only the
+// SHA-256 digest, verifies the returned signature locally, and then creates the
+// client envelope in memory.
 func Sign(ctx context.Context, signer Signer, candidate Candidate, options SignOptions) (Output, Audit, error) {
 	if ctx == nil || signer == nil {
 		return Output{}, Audit{}, errReviewedInput
@@ -212,8 +214,8 @@ func Sign(ctx context.Context, signer Signer, candidate Candidate, options SignO
 	return Output{Policy: append([]byte(nil), policy...), CanonicalSigned: append([]byte(nil), canonical...)}, audit, nil
 }
 
-// ValidateSignOptions performs every local reviewed-input check without KMS
-// access so command frontends can reject unsafe input before signer creation.
+// ValidateSignOptions performs every local reviewed-input check without private
+// key access so command frontends can reject unsafe input before signer creation.
 func ValidateSignOptions(candidate Candidate, options SignOptions) error {
 	if !keyIDValue.MatchString(options.KeyID) || !sha256Hex.MatchString(options.ExpectedSPKISHA256) || !ciActor.MatchString(options.CIActor) {
 		return errReviewedInput
@@ -242,6 +244,19 @@ func parseReviewedPublicKey(der []byte, expectedHex string) (*ecdsa.PublicKey, e
 		return nil, errPublicKey
 	}
 	return publicKey, nil
+}
+
+func validP256DERSignature(signature []byte) bool {
+	var parsed struct {
+		R *big.Int
+		S *big.Int
+	}
+	rest, err := asn1.Unmarshal(signature, &parsed)
+	if err != nil || len(rest) != 0 || parsed.R == nil || parsed.S == nil || parsed.R.Sign() <= 0 || parsed.S.Sign() <= 0 {
+		return false
+	}
+	order := elliptic.P256().Params().N
+	return parsed.R.Cmp(order) < 0 && parsed.S.Cmp(order) < 0
 }
 
 // VerifySignedPolicy independently validates the exact client envelope against

@@ -13,7 +13,7 @@ Do not run either action until the NaisNet-signed `v0.4.12` stable Release has
 completed at least seven full days of stable observation and that observation
 has an independently reviewed record. Publishing the GitHub bridge does not
 authorize mirroring, pointer advancement, legacy routing activation, or any
-KMS change.
+publisher-root change.
 
 ## Fixed roles and scope
 
@@ -41,7 +41,7 @@ KMS change.
   checks out/builds reviewed tools, executes no target code, signs and seals,
   and uploads the exact signed candidate. Separate `bridge-publish` has no
   EVSign credential; it reads back every Release byte and publishes with
-  `latest=false`. No job writes stable or legacy pointers or has COS/KMS
+  `latest=false`. No job writes stable or legacy pointers or has COS/root-key
   credentials.
 
 ## Required protected configuration
@@ -120,7 +120,7 @@ Before requesting approval, record read-only evidence for:
   local `policy.json`/`audit.json`/`commit.json` only after API
   size/digest/content-type validation and bounded streaming download;
 - a reviewed production-trust attestation binding root SPKI SHA-256, exact
-  higher authorization-policy bytes/hash/epoch, KMS key ID/request ID/audit digest, immutable
+  higher authorization-policy bytes/hash/epoch, signer key ID/request ID/audit digest, immutable
   policy Release ID/tag/time/assets, and review time;
 - two-reviewer agreement on all of those digests and the fixed FFmpeg
   component-manifest SHA-256;
@@ -158,7 +158,7 @@ Acceptance evidence must include:
   the signed output, plus final extraction/reverification of embedded trust and
   FFmpeg from the bound signed artifact;
 - Task9 `trustpolicy verify-bundle` machine output binding the committed policy
-  and audit, including nonempty KMS request ID and CI actor;
+  and audit, including nonempty signer request ID and CI actor;
 - the shared production client policy verifier authorizing the exact input
   `{tag:v0.4.12, channel:stable, sha256:<actual Release EXE>, NaisNet identity}`;
   the higher stable rule must carry that exact `manifestSha256`, and its epoch

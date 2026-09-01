@@ -1,6 +1,6 @@
 import { createHash, createHmac, createPublicKey, verify as verifySignature } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { appendFile, readFile as readLocalFile } from 'node:fs/promises';
+import { readFile as readLocalFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -779,73 +779,6 @@ function defaultProcessAdapter() {
   };
 }
 
-function validSessionValue(value, maximum) {
-  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !/[\s\0]/.test(value);
-}
-
-export async function exchangeTencentSession(environment, adapters = { fetch, appendFile }) {
-  const requestURL = environment.ACTIONS_ID_TOKEN_REQUEST_URL ?? '';
-  const requestToken = environment.ACTIONS_ID_TOKEN_REQUEST_TOKEN ?? '';
-  const audience = environment.PUBLISHER_TENCENT_OIDC_AUDIENCE ?? '';
-  const roleARN = environment.PUBLISHER_TENCENT_ROLE_ARN ?? '';
-  const providerID = environment.PUBLISHER_TENCENT_OIDC_PROVIDER_ID ?? '';
-  const outputPath = environment.GITHUB_OUTPUT ?? '';
-  const sessionName = `publisher-${environment.GITHUB_RUN_ID ?? ''}-${environment.GITHUB_RUN_ATTEMPT ?? ''}`;
-  if (!requestURL.startsWith('https://') || !validSessionValue(requestToken, 4096) || !validSessionValue(audience, 256) ||
-    !/^qcs::cam::uin\/[1-9][0-9]*:roleName\/[A-Za-z0-9+=,.@_-]{1,64}$/.test(roleARN) ||
-    !/^[A-Za-z0-9_.:@/-]{1,256}$/.test(providerID) || !/^publisher-[0-9]+-[0-9]+$/.test(sessionName) || !outputPath) {
-    throw new Error('publisher session exchange failed');
-  }
-  try {
-    const oidcURL = new URL(requestURL);
-    oidcURL.searchParams.set('audience', audience);
-    const oidcResponse = await adapters.fetch(oidcURL, {
-      headers: { authorization: `Bearer ${requestToken}`, 'accept-encoding': 'identity' },
-      redirect: 'error',
-    });
-    if (!oidcResponse.ok) throw new Error();
-    const oidc = await readRemoteJSON(oidcResponse, MAX_AUDIT_BYTES);
-    if (!validSessionValue(oidc?.value, 16 << 10)) throw new Error();
-    const stsResponse = await adapters.fetch('https://sts.tencentcloudapi.com', {
-      method: 'POST',
-      redirect: 'error',
-      headers: {
-        'content-type': 'application/json',
-        'accept-encoding': 'identity',
-        'x-tc-action': 'AssumeRoleWithWebIdentity',
-        'x-tc-version': '2018-08-13',
-        'x-tc-region': 'ap-shanghai',
-      },
-      body: JSON.stringify({
-        ProviderId: providerID,
-        WebIdentityToken: oidc.value,
-        RoleArn: roleARN,
-        RoleSessionName: sessionName,
-        DurationSeconds: 900,
-      }),
-    });
-    if (!stsResponse.ok) throw new Error();
-    const document = await readRemoteJSON(stsResponse, MAX_AUDIT_BYTES);
-    const credentials = document?.Response?.Credentials;
-    const secretID = credentials?.TmpSecretId;
-    const secretKey = credentials?.TmpSecretKey;
-    const sessionToken = credentials?.Token;
-    if (!validSessionValue(secretID, 256) || !validSessionValue(secretKey, 256) || !validSessionValue(sessionToken, 8192)) throw new Error();
-    await adapters.appendFile(outputPath,
-      `secret-id<<PUBLISHER_EOF\n${secretID}\nPUBLISHER_EOF\n` +
-      `secret-key<<PUBLISHER_EOF\n${secretKey}\nPUBLISHER_EOF\n` +
-      `session-token<<PUBLISHER_EOF\n${sessionToken}\nPUBLISHER_EOF\n`,
-      { encoding: 'utf8', mode: 0o600 });
-    const mask = adapters.mask ?? ((value) => process.stdout.write(`::add-mask::${value}\n`));
-    mask(secretID);
-    mask(secretKey);
-    mask(sessionToken);
-    return { requestId: document?.Response?.RequestId ?? '' };
-  } catch {
-    throw new Error('publisher session exchange failed');
-  }
-}
-
 function commandOptions(environment) {
   const previous = environment.PUBLISHER_EXPECTED_PREVIOUS_EPOCH ?? '';
   if (!/^(?:0|[1-9][0-9]*)$/.test(previous)) throw new ValidationFailure();
@@ -876,15 +809,11 @@ async function runCommand(environment) {
 
 async function main() {
   try {
-    if (process.argv[2] === 'exchange-session' && process.argv.length === 3) {
-      await exchangeTencentSession(process.env);
-      return;
-    }
     if (process.argv[2] !== 'run' || process.argv.length !== 3) throw new Error('publisher policy command failed');
     const summary = await runCommand(process.env);
     process.stdout.write(formatPublisherSummary(summary));
   } catch (error) {
-    const message = error instanceof Error && /^(?:publisher policy (?:validation|publication)|publisher session exchange|publisher policy command) failed$/.test(error.message)
+    const message = error instanceof Error && /^(?:publisher policy (?:validation|publication)|publisher policy command) failed$/.test(error.message)
       ? error.message
       : 'publisher policy command failed';
     process.stderr.write(`${message}\n`);

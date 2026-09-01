@@ -32,7 +32,7 @@ var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var sha256Input = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type environmentLookup func(string) (string, bool)
-type signerFactory func(region, expectedSPKISHA256, providerMode string) (trustpolicy.Signer, error)
+type signerFactory func(privateKeyPEM []byte, expectedSPKISHA256, requestID string) (trustpolicy.Signer, error)
 
 type commandError string
 
@@ -41,7 +41,7 @@ func (err commandError) Error() string { return string(err) }
 const errCommand commandError = "trust policy command failed"
 
 func main() {
-	if err := run(context.Background(), os.Args[1:], os.LookupEnv, trustpolicy.NewTencentKMSSigner, os.Stdout, time.Now); err != nil {
+	if err := run(context.Background(), os.Args[1:], os.LookupEnv, trustpolicy.NewPrivateKeySigner, os.Stdout, time.Now); err != nil {
 		fmt.Fprintln(os.Stderr, errCommand)
 		os.Exit(1)
 	}
@@ -72,26 +72,27 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 
 	var candidatePath string
 	var expectedPreviousEpoch uint64
-	var region string
+	var privateKeyEnvironment string
 	var keyIDEnvironment string
 	var expectedSPKIEnvironment string
+	var requestIDEnvironment string
 	var policyPath string
 	var auditPath string
 	flags := flag.NewFlagSet("trustpolicy sign", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&candidatePath, "candidate", "", "path to the complete signed-object candidate")
 	flags.Uint64Var(&expectedPreviousEpoch, "expected-previous-epoch", 0, "exact previously accepted policy epoch")
-	flags.StringVar(&region, "kms-region", "", "Tencent KMS region")
-	flags.StringVar(&keyIDEnvironment, "kms-key-id-env", "", "environment variable containing reviewed KMS key ID")
+	flags.StringVar(&privateKeyEnvironment, "private-key-env", "", "environment variable containing protected PKCS#8 P-256 private key PEM")
+	flags.StringVar(&keyIDEnvironment, "key-id-env", "", "environment variable containing reviewed signing key ID")
 	flags.StringVar(&expectedSPKIEnvironment, "expected-spki-sha256-env", "", "environment variable containing reviewed SPKI SHA-256")
+	flags.StringVar(&requestIDEnvironment, "request-id-env", "", "environment variable containing non-secret signing audit request ID")
 	flags.StringVar(&policyPath, "output", "", "create-only signed policy output")
 	flags.StringVar(&auditPath, "audit-output", "", "create-only audit output")
 	if hasRepeatedRegisteredFlag(args[1:], flags) {
 		return errCommand
 	}
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || !allRequiredFlagsPresent(flags) ||
-		region != "ap-shanghai" || !environmentName.MatchString(keyIDEnvironment) || !environmentName.MatchString(expectedSPKIEnvironment) ||
-		keyIDEnvironment == expectedSPKIEnvironment {
+		!distinctEnvironmentNames(privateKeyEnvironment, keyIDEnvironment, expectedSPKIEnvironment, requestIDEnvironment) {
 		return errCommand
 	}
 	candidateAbsolute, policyAbsolute, auditAbsolute, err := validatePaths(candidatePath, policyPath, auditPath)
@@ -111,11 +112,12 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err != nil || candidate.Epoch > maxPublisherEpoch {
 		return errCommand
 	}
+	privateKeyPEM, privateKeyOK := lookup(privateKeyEnvironment)
 	keyID, keyIDOK := lookup(keyIDEnvironment)
 	expectedSPKI, expectedSPKIOK := lookup(expectedSPKIEnvironment)
-	providerMode, providerModeOK := lookup("GIFT_PANEL_KMS_PROVIDER_MODE")
+	requestIDValue, requestIDOK := lookup(requestIDEnvironment)
 	actor, actorOK := lookup("GITHUB_ACTOR")
-	if !keyIDOK || !expectedSPKIOK || !providerModeOK || !trustpolicy.ValidKMSProviderMode(providerMode) || !actorOK {
+	if !privateKeyOK || strings.TrimSpace(privateKeyPEM) == "" || !keyIDOK || !expectedSPKIOK || !requestIDOK || !actorOK {
 		return errCommand
 	}
 	options := trustpolicy.SignOptions{
@@ -128,7 +130,10 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if err := trustpolicy.ValidateSignOptions(candidate, options); err != nil {
 		return errCommand
 	}
-	signer, err := factory(region, expectedSPKI, providerMode)
+	privateKeyBytes := []byte(privateKeyPEM)
+	privateKeyPEM = ""
+	signer, err := factory(privateKeyBytes, expectedSPKI, requestIDValue)
+	clear(privateKeyBytes)
 	if err != nil || signer == nil {
 		return errCommand
 	}
@@ -350,7 +355,21 @@ func hasRepeatedRegisteredFlag(args []string, flags *flag.FlagSet) bool {
 }
 
 func allRequiredFlagsPresent(flags *flag.FlagSet) bool {
-	return requiredFlagsPresent(flags, "candidate", "expected-previous-epoch", "kms-region", "kms-key-id-env", "expected-spki-sha256-env", "output", "audit-output")
+	return requiredFlagsPresent(flags, "candidate", "expected-previous-epoch", "private-key-env", "key-id-env", "expected-spki-sha256-env", "request-id-env", "output", "audit-output")
+}
+
+func distinctEnvironmentNames(names ...string) bool {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if !environmentName.MatchString(name) {
+			return false
+		}
+		if _, exists := seen[name]; exists {
+			return false
+		}
+		seen[name] = struct{}{}
+	}
+	return true
 }
 
 func requiredFlagsPresent(flags *flag.FlagSet, names ...string) bool {

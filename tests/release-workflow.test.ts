@@ -670,7 +670,7 @@ describe('publisher rotation workflow contract', () => {
     });
   });
 
-  it('separates validation, KMS signing, immutable publication, and optional discovery advancement', () => {
+  it('separates validation, protected private-key signing, immutable publication, and optional discovery advancement', () => {
     const workflow = publisherRotationWorkflow();
     const jobs = workflow.jobs ?? {};
     expect(Object.keys(jobs)).toEqual([
@@ -689,34 +689,38 @@ describe('publisher rotation workflow contract', () => {
     expect(jobs['advance-discovery']?.if).toBe('${{ inputs.advance_discovery == true }}');
   });
 
-  it('grants OIDC only to exchange jobs and GitHub write only to dedicated trust publication jobs', () => {
+  it('keeps the signing root isolated from COS publication and grants no OIDC capability', () => {
     const workflow = publisherRotationWorkflow();
     const jobs = workflow.jobs ?? {};
     expect(workflow.permissions).toEqual({ contents: 'read' });
     expect(jobs['validate-candidate']?.permissions).toEqual({ contents: 'read' });
-    expect(jobs['sign-policy']?.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
-    expect(jobs['publish-immutable']?.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
-    expect(jobs['advance-discovery']?.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
+    expect(jobs['sign-policy']?.permissions).toEqual({ contents: 'read' });
+    expect(jobs['publish-immutable']?.permissions).toEqual({ contents: 'write' });
+    expect(jobs['advance-discovery']?.permissions).toEqual({ contents: 'write' });
 
     const signingSteps = jobSteps(jobs['sign-policy']);
     const sign = signingSteps.find((step) => step.name === 'Sign publisher policy');
     expect(sign?.env).toMatchObject({
-      GIFT_PANEL_KMS_PROVIDER_MODE: 'environment-session',
-      TENCENTCLOUD_SECRET_ID: '${{ steps.kms-session.outputs.secret-id }}',
-      TENCENTCLOUD_SECRET_KEY: '${{ steps.kms-session.outputs.secret-key }}',
-      TENCENTCLOUD_SESSION_TOKEN: '${{ steps.kms-session.outputs.session-token }}',
+      PUBLISHER_ROTATION_PRIVATE_KEY_PEM: '${{ secrets.PUBLISHER_ROTATION_PRIVATE_KEY_PEM }}',
+      PUBLISHER_ROTATION_KEY_ID: '${{ vars.PUBLISHER_ROTATION_KEY_ID }}',
+      PUBLISHER_ROTATION_REQUEST_ID: 'github-run:${{ github.run_id }}:attempt:${{ github.run_attempt }}',
     });
     expect(sign?.env).not.toHaveProperty('GH_TOKEN');
+    expect(sign?.env).not.toHaveProperty('TENCENTCLOUD_SECRET_ID');
+    expect(sign?.env).not.toHaveProperty('TENCENTCLOUD_SECRET_KEY');
+    expect(sign?.env).not.toHaveProperty('TENCENTCLOUD_SESSION_TOKEN');
     expect(Object.keys(sign?.env ?? {}).some((name) => name.startsWith('COS_'))).toBe(false);
+    expect(semanticCommands(jobs['sign-policy']).join('\n')).not.toContain('exchange-session');
 
     for (const jobName of ['publish-immutable', 'advance-discovery']) {
       const publish = jobSteps(jobs[jobName]).find((step) => step.env?.COS_BUCKET !== undefined);
       expect(publish?.env).toMatchObject({
-        TENCENTCLOUD_SECRET_ID: '${{ steps.cos-session.outputs.secret-id }}',
-        TENCENTCLOUD_SECRET_KEY: '${{ steps.cos-session.outputs.secret-key }}',
-        TENCENTCLOUD_SESSION_TOKEN: '${{ steps.cos-session.outputs.session-token }}',
+        TENCENTCLOUD_SECRET_ID: '${{ secrets.TENCENT_CLOUD_SECRET_ID }}',
+        TENCENTCLOUD_SECRET_KEY: '${{ secrets.TENCENT_CLOUD_SECRET_KEY }}',
       });
-      expect(Object.values(publish?.env ?? {}).some((value) => value.includes('secrets.'))).toBe(false);
+      expect(publish?.env).not.toHaveProperty('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
+      expect(publish?.env).not.toHaveProperty('TENCENTCLOUD_SESSION_TOKEN');
+      expect(semanticCommands(jobs[jobName]).join('\n')).not.toContain('exchange-session');
     }
   });
 
@@ -730,18 +734,20 @@ describe('publisher rotation workflow contract', () => {
     }
   });
 
-  it('keeps the ordinary release workflow unable to call KMS or the legacy pointer', () => {
+  it('keeps the ordinary release workflow unable to sign publisher policy or modify the legacy pointer', () => {
     const { release } = releaseWorkflow();
     const commands = semanticCommands(release as WorkflowJob);
     expect(commands.some((command) => /trustpolicy.*\bsign\b/i.test(command))).toBe(false);
-    expect(commands.some((command) => /kms|legacy-rushrush/i.test(command))).toBe(false);
-    expect(release?.env ?? {}).not.toHaveProperty('GIFT_PANEL_KMS_PROVIDER_MODE');
+    expect(commands.some((command) => /trustpolicy.*\bsign\b|legacy-rushrush/i.test(command))).toBe(false);
+    expect(release?.env ?? {}).not.toHaveProperty('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
   });
 
   it('requires reviewed public-root configuration instead of embedding a production digest', () => {
     const workflow = publisherRotationWorkflow();
     const allSteps = Object.values(workflow.jobs ?? {}).flatMap(jobSteps);
-    const verificationSteps = allSteps.filter((step) => step.env?.PUBLISHER_ROTATION_SPKI_SHA256 !== undefined);
+    const signingStep = jobSteps(workflow.jobs?.['sign-policy']).find((step) => step.name === 'Sign publisher policy');
+    expect(signingStep?.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');
+    const verificationSteps = allSteps.filter((step) => step.env?.PUBLISHER_ROTATION_SPKI_PATH !== undefined);
     expect(verificationSteps.length).toBeGreaterThan(0);
     for (const step of verificationSteps) {
       expect(step.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');

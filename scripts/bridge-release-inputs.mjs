@@ -24,7 +24,7 @@ export function verifyBridgeReadiness(options) {
 
   const stableRelease = parseExactJSON(options.stableReleaseBytes, ['id', 'tag_name', 'draft', 'prerelease', 'published_at', 'assets']);
   const observation = parseExactJSON(options.observationEvidenceBytes, ['schemaVersion', 'stableRelease', 'observation', 'reviewedAt']);
-  const attestation = parseExactJSON(options.trustAttestationBytes, ['schemaVersion', 'rootSpkiSha256', 'authorizationPolicy', 'kms', 'policyRelease', 'reviewedAt']);
+  const attestation = parseExactJSON(options.trustAttestationBytes, ['schemaVersion', 'rootSpkiSha256', 'authorizationPolicy', 'signer', 'policyRelease', 'reviewedAt']);
   const policyRelease = parseExactJSON(options.authorizationPolicyReleaseBytes, ['id', 'tag_name', 'draft', 'prerelease', 'published_at', 'assets']);
   const audit = parseExactJSON(options.authorizationAuditBytes, ['keyId', 'epoch', 'policySha256', 'requestId', 'utc', 'ciActor']);
   const authorizationEvidence = parseExactJSON(options.authorizationEvidenceBytes, ['policyEpoch', 'policySha256', 'stableTag', 'stableChannel', 'stableArtifactSha256', 'stableIdentity']);
@@ -63,12 +63,12 @@ export function verifyBridgeReadiness(options) {
   const authorizationEpoch = authorizationEvidence.policyEpoch;
 
   exactObject(attestation.authorizationPolicy, ['epoch', 'sha256']);
-  exactObject(attestation.kms, ['keyId', 'auditSha256', 'requestId']);
+  exactObject(attestation.signer, ['keyId', 'auditSha256', 'requestId']);
   exactObject(attestation.policyRelease, ['id', 'tag', 'publishedAt', 'policyAsset', 'auditAsset', 'commitAsset']);
   if (attestation.schemaVersion !== 1 || attestation.rootSpkiSha256 !== rootHash || attestation.authorizationPolicy.epoch !== authorizationEpoch ||
-    attestation.authorizationPolicy.sha256 !== authorizationHash || !/^[A-Za-z0-9_-]{1,128}$/.test(attestation.kms.keyId) ||
-    !/^[A-Za-z0-9_.:@/-]{1,256}$/.test(attestation.kms.requestId) || attestation.kms.auditSha256 !== hash(options.authorizationAuditBytes) ||
-    attestation.kms.requestId !== audit.requestId || audit.keyId !== attestation.kms.keyId || audit.epoch !== authorizationEpoch || audit.policySha256 !== authorizationHash) fail();
+    attestation.authorizationPolicy.sha256 !== authorizationHash || !/^[A-Za-z0-9_-]{1,128}$/.test(attestation.signer.keyId) ||
+    !/^[A-Za-z0-9_.:@/-]{1,256}$/.test(attestation.signer.requestId) || attestation.signer.auditSha256 !== hash(options.authorizationAuditBytes) ||
+    attestation.signer.requestId !== audit.requestId || audit.keyId !== attestation.signer.keyId || audit.epoch !== authorizationEpoch || audit.policySha256 !== authorizationHash) fail();
   if (!/^[A-Za-z0-9_.:@/-]{1,256}$/.test(audit.requestId) || !/^[A-Za-z0-9_.\[\]-]{1,100}$/.test(audit.ciActor)) fail();
 
   const fixedEpoch = String(authorizationEpoch).padStart(8, '0');
@@ -110,8 +110,8 @@ export function verifyBridgeReadiness(options) {
     authorizationPolicySha256: authorizationHash,
     authorizationAuditSha256: hash(options.authorizationAuditBytes),
     authorizationCommitSha256: hash(actualByRole.commit),
-    kmsKeyId: audit.keyId,
-    kmsRequestId: audit.requestId,
+    signerKeyId: audit.keyId,
+    signerRequestId: audit.requestId,
     trustAttestationSha256: options.expectedTrustAttestationSHA256,
   };
 }

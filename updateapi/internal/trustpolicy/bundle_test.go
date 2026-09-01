@@ -74,7 +74,7 @@ func TestCommittedBundleValidationRejectsAmbiguousMarkerAndMalformedFiles(t *tes
 func validCommittedBundlePair(t *testing.T) ([]byte, []byte) {
 	t.Helper()
 	candidate := mustParseCandidate(t)
-	fake := newFakeKMSSigner(t)
+	fake := newFakeSigner(t)
 	policy, audit, err := Sign(context.Background(), fake, candidate, validSignOptions(fake, fake.SPKISHA256))
 	if err != nil {
 		t.Fatal(err)

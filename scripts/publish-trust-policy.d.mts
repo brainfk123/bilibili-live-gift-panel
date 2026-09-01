@@ -83,9 +83,4 @@ export function createGitHubPublisherAdapter(
   environment: Record<string, string | undefined>,
   fetchImpl?: typeof fetch,
 ): PublisherAdapters['github'];
-export function exchangeTencentSession(environment: Record<string, string | undefined>, adapters?: {
-  fetch: typeof fetch;
-  appendFile: typeof import('node:fs/promises').appendFile;
-  mask?: (value: string) => void;
-}): Promise<{ requestId: string }>;
 export const defaultFiles: PublisherAdapters['files'];

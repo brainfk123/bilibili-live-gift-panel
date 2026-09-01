@@ -2,11 +2,11 @@
 
 ## Status
 
-Approved immediate-rollout design. Repository implementation and local verification do not authorize KMS provisioning, credential creation, server changes, COS writes, Git pushes, tags, or releases. Root-key rotation is not implemented by this design; the future sketch below requires a separate approved protocol design before any product or rollout claim.
+Approved immediate-rollout design, amended 2026-09-02 to replace Tencent KMS/CAM/OIDC signing with a protected GitHub Environment Secret. Repository implementation and local verification do not themselves mutate GitHub or Tencent Cloud. Root-key rotation is not implemented by this design; the future sketch below requires a separate approved protocol design before any product or rollout claim.
 
 ## Goal
 
-Allow supported Gift Panel clients to keep updating safely when the signing service renews a certificate for the same legal publisher, and to migrate automatically across publisher legal entities only after an independent Tencent Cloud KMS trust root authorizes that transition.
+Allow supported Gift Panel clients to keep updating safely when the signing service renews a certificate for the same legal publisher, and to migrate automatically across publisher legal entities only after the independently embedded publisher-policy root authorizes that transition.
 
 The immediate migration must recover v0.4.7 clients that trust RushRush, preserve v0.4.9 and v0.4.10 clients that trust NaisNet, and converge both populations back to one NaisNet stable channel without mutating any existing release.
 
@@ -42,7 +42,7 @@ As of 2026-08-30:
 : The stable certificate fields `Country`, `Organization`, and `Subject.SerialNumber` or equivalent organization identifier. Leaf thumbprints and certificate serial numbers are not publisher identity.
 
 **Rotation root**
-: A non-exportable asymmetric Tencent Cloud KMS key that signs publisher-authorization policy. It is independent from EVSign and never signs application binaries.
+: An ECDSA P-256 key whose public SPKI is embedded by enrollment clients and whose PKCS#8 private key is available only to the protected `publisher-rotation` GitHub Environment signing job. It is independent from EVSign and never signs application binaries.
 
 **Publisher policy**
 : Strict, canonical JSON signed by the rotation root. It authorizes legal publisher identities for exact roles, channels, tags, and time windows.
@@ -65,8 +65,8 @@ As of 2026-08-30:
 2. Windows Authenticode status must be `Valid`, with a Code Signing EKU and a system-valid chain.
 3. A Windows-valid certificate is accepted only when its structured legal identity is authorized by a valid publisher policy for the exact tag, channel, and role.
 4. A same-legal-identity certificate renewal may change thumbprint, leaf serial number, validity dates, and issuer chain details without requiring a new policy.
-5. A different legal identity requires a higher publisher-policy epoch signed by the KMS rotation root.
-6. The application server, update API, COS publisher, and ordinary Release workflow have no KMS signing permission.
+5. A different legal identity requires a higher publisher-policy epoch signed by the rotation root.
+6. The application server, update API, COS publication steps, and ordinary Release workflow never receive the rotation-root private key.
 7. Publisher-policy epochs are monotonic. Published epoch objects are immutable and never replaced.
 8. A client never accepts a publisher-policy epoch lower than the highest it has persisted.
 9. RushRush is authorized only for exact bridge tag `v0.4.11` on `legacy-rushrush`; it can never sign stable artifacts.
@@ -74,26 +74,19 @@ As of 2026-08-30:
 
 ## Rotation root
 
-Provision one Tencent Cloud KMS asymmetric signing key in `ap-shanghai`:
+Generate one ECDSA P-256 key pair under the release operator's Windows account:
 
-- key usage: asymmetric sign and verify only;
-- algorithm: `ECC_P256_R1` with SHA-256;
-- private key: generated and protected by KMS/HSM, non-exportable;
-- public key: exported in SPKI DER form and committed after independent review;
-- key ID exposed only as non-secret deployment configuration;
-- key deletion protection and the maximum supported deletion waiting period enabled;
-- CloudAudit enabled for create, enable, disable, sign, and deletion operations;
-- CAM grants `SignByAsymmetricKey` only to the protected publisher-rotation identity;
-- the Hosted server, update API service account, COS mirror identity, and normal Release workflow are explicitly denied signing access.
+- private encoding: one unencrypted PKCS#8 PEM stored only as GitHub Environment Secret `PUBLISHER_ROTATION_PRIVATE_KEY_PEM` and a local Windows-DPAPI backup;
+- public encoding: DER SubjectPublicKeyInfo committed at `publisher/rotation-root-spki.der` after its SHA-256 is reviewed;
+- non-secret key label: GitHub variable `PUBLISHER_ROTATION_KEY_ID`, initially `publisher-root-v1`;
+- public bindings: `PUBLISHER_ROTATION_SPKI_PATH=publisher/rotation-root-spki.der` and lowercase `PUBLISHER_ROTATION_SPKI_SHA256`;
+- access boundary: only the `sign-policy` step references the private-key Secret; publication, Hosted, updater, mirror, bridge, and ordinary Release steps do not;
+- audit correlation: `github-run:<run_id>:attempt:<run_attempt>` plus environment deployment history;
+- account protection: the sole repository owner uses Passkey or hardware-backed MFA and does not grant repository write access to other users.
 
-Tencent KMS supports `ECC_P256_R1`, signing and verification, downloading the public key for local verification, HSM-backed key protection, CAM controls, and CloudAudit. See:
+This deployment explicitly accepts an exportable GitHub Secret under the owner-approved threat model: GitHub account, GitHub-hosted runner, and pinned Actions are trusted, and repository write access remains owner-only. If that threat model changes, migrate the same `Signer` boundary to a non-exportable KMS before adding collaborators or untrusted runners.
 
-- [Tencent KMS VerifyByAsymmetricKey](https://cloud.tencent.com/document/product/573/52064)
-- [Tencent KMS asymmetric signing overview](https://cloud.tencent.com/document/product/573/53385)
-- [Tencent KMS product overview](https://cloud.tencent.com/document/product/573/8780)
-- [Tencent KMS audit logs](https://cloud.tencent.com/document/product/573/53523)
-
-The repository stores only the SPKI public key and its SHA-256 key ID. No KMS credential or EVSign credential enters source, logs, artifacts, issues, or this design.
+The repository stores only the reviewed SPKI public key and non-secret metadata. The private key, EVSign credentials, and Tencent COS credentials never enter source, logs, artifacts, issues, or public audit documents.
 
 ## Publisher policy format
 
@@ -140,13 +133,13 @@ Rules:
 - Reject unknown fields, duplicate JSON keys, trailing values, non-integer epochs, invalid timestamps, noncanonical tags, duplicate publisher IDs, and overlapping contradictory entries.
 - Canonicalize only the `signed` object with a repository-owned deterministic JSON canonicalizer.
 - Hash canonical bytes with SHA-256.
-- Call KMS `SignByAsymmetricKey` with `MessageType=DIGEST` and `ECC_P256_R1`.
-- Encode the returned ASN.1 DER ECDSA signature as Base64.
+- Parse exactly one PKCS#8 P-256 private key from the protected environment and verify that its public SPKI matches the reviewed SHA-256.
+- Sign only the 32-byte SHA-256 digest and encode the ASN.1 DER ECDSA signature as Base64.
 - Verify locally with the embedded SPKI public key and Go `ecdsa.VerifyASN1`.
 - Bind authorization to publisher identity, artifact role, channel, tag, policy time window, and the update manifest's asset SHA-256.
 - Keep RushRush authorization exact and temporary. A syntactically valid RushRush policy entry for any other tag or channel is invalid.
 
-This schema is the authoritative client-compatible v1 wire contract for the immediate rollout. Fields such as `schemaVersion`, `issuedAt`, `minimumClientVersion`, signature `keyId`, or per-rule `validUntil` are not accepted by deployed v1 parsers; adding them requires a coordinated schema-v2 client, signer, publisher, cache, and bridge migration. The non-secret KMS key ID belongs in the separate audit document and readiness evidence, not in this signature object.
+This schema is the authoritative client-compatible v1 wire contract for the immediate rollout. Fields such as `schemaVersion`, `issuedAt`, `minimumClientVersion`, signature `keyId`, or per-rule `validUntil` are not accepted by deployed v1 parsers; adding them requires a coordinated schema-v2 client, signer, publisher, cache, and bridge migration. The non-secret signing-key ID belongs in the separate audit document and readiness evidence, not in this signature object.
 
 ## Certificate identity verification
 
@@ -165,7 +158,7 @@ The accepted stable NaisNet identity is:
 - Code Signing EKU present;
 - Authenticode status `Valid`.
 
-Certificate thumbprint, certificate serial number, validity dates, and issuer chain may change during same-identity renewal. Any organization-identifier change requires a new KMS-signed policy epoch.
+Certificate thumbprint, certificate serial number, validity dates, and issuer chain may change during same-identity renewal. Any organization-identifier change requires a new root-signed policy epoch.
 
 ## Policy distribution and anti-rollback
 
@@ -231,7 +224,7 @@ The stable publisher cannot write the legacy pointer. The bridge publisher canno
 
 Before publishing either migration artifact:
 
-- provision the KMS rotation root and independently review its SPKI SHA-256;
+- generate the rotation root, protect its PKCS#8 PEM in the GitHub Environment, and review its public SPKI SHA-256;
 - sign and publish epoch 1 policy;
 - deploy strict User-Agent channel selection while leaving the legacy pointer absent;
 - verify v0.4.7, v0.4.9, and v0.4.10 route decisions against captured real requests;
@@ -244,7 +237,7 @@ v0.4.12 is an ordinary NaisNet Release, GitHub latest, and stable release.
 
 It adds:
 
-- embedded KMS SPKI public key;
+- embedded rotation-root SPKI public key;
 - embedded epoch 1 policy;
 - strict policy verification and cache;
 - structured certificate identity matching;
@@ -258,7 +251,7 @@ Gates:
 - same NaisNet organization identity with a different leaf thumbprint passes;
 - different organization ID fails despite Authenticode `Valid`;
 - API parses the existing User-Agent versions and routes them to stable;
-- policy rollback, expiry, malformed JSON, bad KMS signature, and interrupted cache write tests pass;
+- policy rollback, expiry, malformed JSON, bad root signature, and interrupted cache write tests pass;
 - observe production for at least seven days;
 - legacy routing stays inactive throughout Stage 2.
 
@@ -297,7 +290,7 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 - requires actual outer signer legal identity authorized for `stable` by the current policy;
 - verifies embedded FFmpeg independently;
 - publishes GitHub latest and stable-compatible assets;
-- cannot call KMS or write the legacy pointer.
+- cannot read the rotation-root Secret or write the legacy pointer.
 
 ### Bridge Release workflow
 
@@ -316,9 +309,9 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 
 - uses protected environment `publisher-rotation`;
 - requires a reviewed complete candidate policy and expected previous epoch;
-- canonicalizes and validates before KMS signing;
-- uses only short-lived, separately scoped KMS authorization;
-- records non-secret audit `keyId`, epoch, policy SHA-256, approver, KMS request ID, and CloudAudit event;
+- canonicalizes and validates before private-key use;
+- injects the PKCS#8 Secret only into the protected signing step and clears its temporary byte copy after signer construction;
+- records non-secret audit `keyId`, epoch, policy SHA-256, CI actor, GitHub run/attempt request ID, and UTC timestamp;
 - publishes immutable epoch objects before advancing discovery pointers;
 - never signs an EXE or modifies a Release.
 
@@ -342,11 +335,11 @@ The v0.4.11 bridge Release and immutable COS objects remain available during the
 **Policy source unavailable**
 : Use the other independently verified source or an unexpired cached policy. Never convert source failure into trust of server configuration.
 
-**KMS unavailable**
-: Ordinary same-identity NaisNet releases remain possible under the current unexpired policy. Cross-identity rotation pauses; root-key recovery is outside this rollout and follows a separately approved design or manual recovery.
+**Protected signing Secret unavailable**
+: Ordinary same-identity NaisNet releases remain possible under the current unexpired policy. Cross-identity rotation pauses; restore the same reviewed Secret from its DPAPI backup only after comparing the derived SPKI digest.
 
-**KMS key compromise suspected**
-: Disable signing permission, preserve CloudAudit, stop publisher rotation, and issue no new identity authorization. Root recovery follows a separately approved root-rotation or manual-client recovery procedure.
+**Rotation-root compromise suspected**
+: Delete or replace the GitHub Environment Secret, disable the publisher-rotation workflow, pause update publication, preserve GitHub deployment/audit evidence, and issue no new identity authorization. Root recovery follows a separately approved root-rotation or manual-client recovery procedure.
 
 ## Observability and privacy
 
@@ -363,7 +356,7 @@ Forbidden data:
 - IP address in application diagnostics;
 - Bilibili UID, nickname, avatar, room viewer identity, or gift content;
 - machine ID, Windows username, file path containing a username;
-- KMS credential, EVSign credential, signed COS URL, cookie, token, raw certificate private material;
+- publisher root private key, EVSign credential, Tencent COS credential, signed COS URL, cookie, token, raw certificate private material;
 - arbitrary exception text containing request or query data.
 
 ## Test and evidence matrix
@@ -371,7 +364,7 @@ Forbidden data:
 ### Unit and property tests
 
 - strict policy JSON and deterministic canonical bytes;
-- KMS ECDSA signature golden vectors;
+- PKCS#8 P-256 parsing, reviewed-SPKI binding, digest-only ECDSA signature vectors, and malformed-key rejection;
 - publisher-policy epoch monotonicity;
 - timestamp and expiry boundaries with a pinned clock;
 - structured X.509 legal identity extraction;
@@ -388,7 +381,7 @@ Forbidden data:
 - domestic policy stale while GitHub policy is newer, and the reverse;
 - domestic RushRush verification failure followed by GitHub NaisNet success;
 - bridge workflow cannot mark latest or modify stable;
-- ordinary workflow cannot call KMS or modify legacy;
+- ordinary workflow cannot read the rotation-root Secret or modify legacy;
 - publisher-rotation workflow cannot sign executables.
 
 ### Packaged Windows acceptance
@@ -404,7 +397,7 @@ Forbidden data:
 
 The following remain separate external mutations, each requiring action-time confirmation:
 
-1. provision KMS key or CAM policy;
+1. create the protected GitHub Environment Secret and reviewed public-root variables;
 2. sign epoch 1 policy;
 3. publish or advance a trust-policy pointer;
 4. deploy version-aware API routing;
@@ -418,7 +411,5 @@ No implementation or rollout step inherits authorization from approval of this d
 ## References
 
 - [`docs/research/evsign-api-sign.md`](../../research/evsign-api-sign.md)
-- [Tencent KMS VerifyByAsymmetricKey](https://cloud.tencent.com/document/product/573/52064)
-- [Tencent KMS asymmetric signing overview](https://cloud.tencent.com/document/product/573/53385)
-- [Tencent KMS product overview](https://cloud.tencent.com/document/product/573/8780)
-- [Tencent KMS audit logs](https://cloud.tencent.com/document/product/573/53523)
+- [GitHub Actions secrets](https://docs.github.com/en/actions/concepts/security/secrets)
+- [GitHub Actions secure use reference](https://docs.github.com/en/actions/reference/security/secure-use)

@@ -96,7 +96,7 @@ describe('verify enrollment build', () => {
     expect(serialized).not.toContain(value.root);
     expect(serialized).not.toMatch(/[A-Z]:\\|\/tmp\//i);
     expect(serialized).not.toMatch(/"(?:size|sidecars|channel)"/);
-	expect(serialized).not.toContain('kms-production-root-key-01');
+	expect(serialized).not.toContain('publisher-root-private-key');
     expect(basename(value.options.artifactPath)).toBe(`${value.artifactHash}.exe`);
   });
 
@@ -131,7 +131,7 @@ describe('verify enrollment build', () => {
 
   it('rejects a user-controlled root key ID instead of copying it into evidence', async () => {
 	const value=fixture();
-	(value.options as EnrollmentVerificationOptions & { rootKeyID:string }).rootKeyID='kms-user-controlled';
+	(value.options as EnrollmentVerificationOptions & { rootKeyID:string }).rootKeyID='publisher-root-user-controlled';
 	await expect(verifyEnrollmentBuild(value.options)).rejects.toThrow(/enrollment build verification failed/i);
   });
 });

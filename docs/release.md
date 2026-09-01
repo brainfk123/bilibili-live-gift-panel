@@ -2,7 +2,7 @@
 
 `v0.4.12` is the first enrollment-enabled stable Release. This document
 describes the Release contract only; it does not authorize changing the
-application version, changelog, tag, GitHub Release, COS objects, KMS state, or
+application version, changelog, tag, GitHub Release, COS objects, publisher-root Secret, or
 update pointers.
 
 ## New stable Releases
@@ -59,10 +59,10 @@ names/digests/sizes, downloads and byte-verifies every asset again, and only
 then accepts the matching `/releases/latest` result.
 
 The public root key ID is never operator supplied. Evidence derives it
-canonically as `sha256:<reviewed-spki-sha256>`. A separately audited provider
-KMS identifier, if needed, must use a different cross-bound field.
+canonically as `sha256:<reviewed-spki-sha256>`. The publisher-policy audit uses
+its separate reviewed key label and GitHub run/attempt request ID.
 
-The stable workflow has no RushRush bridge credential, KMS signing operation,
+The stable workflow has no RushRush bridge credential, publisher-root private key,
 legacy-pointer mutation, or COS credential. Policy signing and publication are
 separate protected actions.
 

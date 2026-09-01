@@ -67,7 +67,6 @@ jobs:
     environment: publisher-rotation
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Check out reviewed source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -87,23 +86,13 @@ jobs:
         with:
           name: publisher-policy-candidate
           path: ${{ runner.temp }}/publisher-candidate
-      - name: Exchange reviewed GitHub OIDC for KMS-only Tencent session
-        id: kms-session
-        shell: bash
-        env:
-          PUBLISHER_TENCENT_ROLE_ARN: ${{ vars.PUBLISHER_KMS_ROLE_ARN }}
-          PUBLISHER_TENCENT_OIDC_PROVIDER_ID: ${{ vars.PUBLISHER_TENCENT_OIDC_PROVIDER_ID }}
-          PUBLISHER_TENCENT_OIDC_AUDIENCE: ${{ vars.PUBLISHER_TENCENT_OIDC_AUDIENCE }}
-        run: node scripts/publish-trust-policy.mjs exchange-session
       - name: Sign publisher policy
         shell: bash
         env:
-          GIFT_PANEL_KMS_PROVIDER_MODE: environment-session
-          TENCENTCLOUD_SECRET_ID: ${{ steps.kms-session.outputs.secret-id }}
-          TENCENTCLOUD_SECRET_KEY: ${{ steps.kms-session.outputs.secret-key }}
-          TENCENTCLOUD_SESSION_TOKEN: ${{ steps.kms-session.outputs.session-token }}
-          REVIEWED_KMS_KEY_ID: ${{ vars.PUBLISHER_ROTATION_KMS_KEY_ID }}
-          REVIEWED_KMS_SPKI_SHA256: ${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}
+          PUBLISHER_ROTATION_PRIVATE_KEY_PEM: ${{ secrets.PUBLISHER_ROTATION_PRIVATE_KEY_PEM }}
+          PUBLISHER_ROTATION_KEY_ID: ${{ vars.PUBLISHER_ROTATION_KEY_ID }}
+          PUBLISHER_ROTATION_SPKI_SHA256: ${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}
+          PUBLISHER_ROTATION_REQUEST_ID: github-run:${{ github.run_id }}:attempt:${{ github.run_attempt }}
           EXPECTED_PREVIOUS_EPOCH: ${{ inputs.expected_previous_epoch }}
         run: |
           set -euo pipefail
@@ -111,9 +100,10 @@ jobs:
           go -C updateapi run ./cmd/trustpolicy sign \
             --candidate "$RUNNER_TEMP/publisher-candidate/candidate.json" \
             --expected-previous-epoch "$EXPECTED_PREVIOUS_EPOCH" \
-            --kms-region ap-shanghai \
-            --kms-key-id-env REVIEWED_KMS_KEY_ID \
-            --expected-spki-sha256-env REVIEWED_KMS_SPKI_SHA256 \
+            --private-key-env PUBLISHER_ROTATION_PRIVATE_KEY_PEM \
+            --key-id-env PUBLISHER_ROTATION_KEY_ID \
+            --expected-spki-sha256-env PUBLISHER_ROTATION_SPKI_SHA256 \
+            --request-id-env PUBLISHER_ROTATION_REQUEST_ID \
             --output "$RUNNER_TEMP/publisher-output/bundle/policy.json" \
             --audit-output "$RUNNER_TEMP/publisher-output/bundle/audit.json"
       - name: Verify signed bundle before handoff
@@ -141,7 +131,6 @@ jobs:
     environment: publisher-rotation
     permissions:
       contents: write
-      id-token: write
     steps:
       - name: Check out reviewed source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -167,14 +156,6 @@ jobs:
           set -euo pipefail
           chmod 700 "$RUNNER_TEMP/publisher-output" "$RUNNER_TEMP/publisher-output/bundle"
           chmod 600 "$RUNNER_TEMP/publisher-output/bundle/policy.json" "$RUNNER_TEMP/publisher-output/bundle/audit.json" "$RUNNER_TEMP/publisher-output/bundle/commit.json"
-      - name: Exchange reviewed GitHub OIDC for COS-only Tencent session
-        id: cos-session
-        shell: bash
-        env:
-          PUBLISHER_TENCENT_ROLE_ARN: ${{ vars.PUBLISHER_COS_ROLE_ARN }}
-          PUBLISHER_TENCENT_OIDC_PROVIDER_ID: ${{ vars.PUBLISHER_TENCENT_OIDC_PROVIDER_ID }}
-          PUBLISHER_TENCENT_OIDC_AUDIENCE: ${{ vars.PUBLISHER_TENCENT_OIDC_AUDIENCE }}
-        run: node scripts/publish-trust-policy.mjs exchange-session
       - name: Publish and re-read immutable trust artifacts
         shell: bash
         env:
@@ -183,9 +164,8 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
           COS_BUCKET: ${{ vars.PUBLISHER_COS_BUCKET }}
           COS_REGION: ${{ vars.PUBLISHER_COS_REGION }}
-          TENCENTCLOUD_SECRET_ID: ${{ steps.cos-session.outputs.secret-id }}
-          TENCENTCLOUD_SECRET_KEY: ${{ steps.cos-session.outputs.secret-key }}
-          TENCENTCLOUD_SESSION_TOKEN: ${{ steps.cos-session.outputs.session-token }}
+          TENCENTCLOUD_SECRET_ID: ${{ secrets.TENCENT_CLOUD_SECRET_ID }}
+          TENCENTCLOUD_SECRET_KEY: ${{ secrets.TENCENT_CLOUD_SECRET_KEY }}
           PUBLISHER_MODE: publish-immutable
           PUBLISHER_POLICY_PATH: ${{ runner.temp }}/publisher-output/bundle/policy.json
           PUBLISHER_AUDIT_PATH: ${{ runner.temp }}/publisher-output/bundle/audit.json
@@ -202,7 +182,6 @@ jobs:
     environment: publisher-rotation
     permissions:
       contents: write
-      id-token: write
     steps:
       - name: Check out reviewed source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -228,14 +207,6 @@ jobs:
           set -euo pipefail
           chmod 700 "$RUNNER_TEMP/publisher-output" "$RUNNER_TEMP/publisher-output/bundle"
           chmod 600 "$RUNNER_TEMP/publisher-output/bundle/policy.json" "$RUNNER_TEMP/publisher-output/bundle/audit.json" "$RUNNER_TEMP/publisher-output/bundle/commit.json"
-      - name: Exchange reviewed GitHub OIDC for COS-only Tencent session
-        id: cos-session
-        shell: bash
-        env:
-          PUBLISHER_TENCENT_ROLE_ARN: ${{ vars.PUBLISHER_COS_ROLE_ARN }}
-          PUBLISHER_TENCENT_OIDC_PROVIDER_ID: ${{ vars.PUBLISHER_TENCENT_OIDC_PROVIDER_ID }}
-          PUBLISHER_TENCENT_OIDC_AUDIENCE: ${{ vars.PUBLISHER_TENCENT_OIDC_AUDIENCE }}
-        run: node scripts/publish-trust-policy.mjs exchange-session
       - name: Re-verify immutable artifacts and advance fixed discovery pointers
         shell: bash
         env:
@@ -244,9 +215,8 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
           COS_BUCKET: ${{ vars.PUBLISHER_COS_BUCKET }}
           COS_REGION: ${{ vars.PUBLISHER_COS_REGION }}
-          TENCENTCLOUD_SECRET_ID: ${{ steps.cos-session.outputs.secret-id }}
-          TENCENTCLOUD_SECRET_KEY: ${{ steps.cos-session.outputs.secret-key }}
-          TENCENTCLOUD_SESSION_TOKEN: ${{ steps.cos-session.outputs.session-token }}
+          TENCENTCLOUD_SECRET_ID: ${{ secrets.TENCENT_CLOUD_SECRET_ID }}
+          TENCENTCLOUD_SECRET_KEY: ${{ secrets.TENCENT_CLOUD_SECRET_KEY }}
           PUBLISHER_MODE: advance-discovery
           PUBLISHER_POLICY_PATH: ${{ runner.temp }}/publisher-output/bundle/policy.json
           PUBLISHER_AUDIT_PATH: ${{ runner.temp }}/publisher-output/bundle/audit.json

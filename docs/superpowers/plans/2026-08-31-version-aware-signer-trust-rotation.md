@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Each task must use `superpowers:test-driven-development`; before any completion claim use `superpowers:verification-before-completion`.
 
-**Goal:** Safely migrate existing v0.4.7 RushRush clients through an exact v0.4.11 bridge to the NaisNet v0.4.12 stable release, while making later same-legal-publisher certificate renewals automatic and requiring an independent Tencent Cloud KMS policy for any legal-publisher change.
+**Goal:** Safely migrate existing v0.4.7 RushRush clients through an exact v0.4.11 bridge to the NaisNet v0.4.12 stable release, while making later same-legal-publisher certificate renewals automatic and requiring an independently root-signed policy for any legal-publisher change.
 
-**Architecture:** The Windows client verifies an embedded KMS SPKI root, a strict signed publisher policy, the downloaded asset hash, Windows Authenticode validity, and structured X.509 legal identity. The domestic update API routes the already-existing versioned `User-Agent` through an explicit allowlist to independent stable and legacy pointers. Stable publishing, bridge publishing, and publisher-policy rotation remain separate workflows and identities.
+**Architecture:** The Windows client verifies an embedded P-256 SPKI root, a strict signed publisher policy, the downloaded asset hash, Windows Authenticode validity, and structured X.509 legal identity. The protected GitHub Environment injects the matching PKCS#8 private key only into the policy-signing job. The domestic update API routes the already-existing versioned `User-Agent` through an explicit allowlist to independent stable and legacy pointers. Stable publishing, bridge publishing, and publisher-policy rotation remain separate workflows and identities.
 
-**Tech Stack:** Go 1.26, PowerShell Authenticode APIs, `crypto/x509`, ECDSA P-256/SHA-256, Tencent Cloud KMS Go SDK `github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/kms v1.3.168`, GitHub Actions, Tencent COS, Node.js/Vitest.
+**Tech Stack:** Go 1.26, PowerShell Authenticode APIs, `crypto/x509`, PKCS#8, ECDSA P-256/SHA-256, GitHub Actions Environment Secrets, Tencent COS, Node.js/Vitest.
+
+**2026-09-02 amendment:** owner-approved threat model replaces Tencent KMS/CAM/OIDC with `PUBLISHER_ROTATION_PRIVATE_KEY_PEM`; Tasks 8 and 9 plus Gate 1 below are superseded accordingly. Client wire bytes, SPKI trust, epoch rules, and publication targets do not change.
 
 **Spec:** [`docs/superpowers/specs/2026-08-30-version-aware-signer-trust-rotation-design.md`](../specs/2026-08-30-version-aware-signer-trust-rotation-design.md)
 
@@ -22,7 +24,7 @@ Tasks 1–13 describe repository implementation and local verification; Task 14 
 - Do not mutate existing v0.4.7, v0.4.9, or v0.4.10 tags, Releases, assets, hashes, or COS immutable objects.
 - Do not trust an Authenticode root/intermediate CA or a human-formatted Subject string as publisher identity.
 - Do not log IP addresses, Bilibili identity/gift data, machine IDs, usernames, raw paths containing usernames, credentials, tokens, cookies, or signed URL query strings.
-- KMS provisioning, KMS signing, policy publication, server deployment, tag push, Release publication, COS pointer advancement, and retirement are separate approval gates. Stop before each external mutation and obtain fresh confirmation.
+- Root Secret configuration, policy signing, policy publication, server deployment, tag push, Release publication, COS pointer advancement, and retirement remain distinct operations. The current thread carries explicit advance authorization for the planned push/tag/Release/COS actions; platform-enforced confirmations still apply.
 - Stage order is fixed: prepare trust/routing → publish and observe NaisNet v0.4.12 for at least seven days → publish and activate RushRush v0.4.11 bridge → observe for at least seven days. Do not compress the observation windows.
 - Root-key rotation, root-epoch anti-rollback, and automatic recovery from rotation-root compromise are non-goals for this plan.
 
@@ -585,150 +587,45 @@ Working directory: `updateapi`
 
 Commit: `git add updateapi/internal/release updateapi/internal/publish updateapi/internal/mirror updateapi/cmd/publish updateapi/cmd/mirror && git commit -m "feat: isolate stable and bridge update channels"`
 
-## Task 8: Build and locally verify the KMS publisher-policy signer
+## Task 8: Build and locally verify the protected private-key publisher-policy signer
 
 **Files:**
+- Create: `updateapi/internal/trustpolicy/privatekey.go`
+- Create: `updateapi/internal/trustpolicy/privatekey_test.go`
+- Rename/refactor: `updateapi/internal/trustpolicy/kms_test.go` → `signer_test.go`
+- Delete: `updateapi/internal/trustpolicy/kms.go`
+- Modify: `updateapi/internal/trustpolicy/policy.go`
+- Modify: `updateapi/cmd/trustpolicy/main.go`
+- Modify: `updateapi/cmd/trustpolicy/main_test.go`
+- Modify: `updateapi/go.mod`, `updateapi/go.sum`
 
-- Modify: `updateapi/go.mod`
-- Modify: `updateapi/go.sum`
-- Create: `updateapi/internal/trustpolicy/policy.go`
-- Create: `updateapi/internal/trustpolicy/policy_test.go`
-- Create: `updateapi/internal/trustpolicy/kms.go`
-- Create: `updateapi/internal/trustpolicy/kms_test.go`
-- Create: `updateapi/cmd/trustpolicy/main.go`
-- Create: `updateapi/testdata/trustpolicy/epoch-1-candidate.json`
+Use RED→GREEN tests for exactly one unencrypted PKCS#8 P-256 PEM block, independently reviewed SPKI SHA-256 binding, digest-only ECDSA signing, malformed/wrong-curve/multiple-key rejection, safe errors, and create-only CLI output. The CLI accepts only environment-variable names for private key, key ID, SPKI digest, and GitHub run/attempt request ID. Remove the Tencent KMS SDK and all provider-mode/region inputs.
 
-### Step 1: Write failing candidate validation and fake-KMS tests
+Run:
 
-The candidate is only the `signed` object. Test exact epoch progression, deterministic canonical bytes, RushRush bridge restrictions, NaisNet stable identity, KMS digest input, returned DER signature verification, expected SPKI digest, and output redaction.
-
-```go
-type Signer interface {
-	PublicKey(context.Context, string) ([]byte, string, error)
-	SignDigest(context.Context, string, []byte) ([]byte, string, error)
-}
-
-func TestSignPolicyUsesSHA256DigestAndVerifiesLocally(t *testing.T) {
-	fake := newFakeKMSSigner(t)
-	out, audit, err := Sign(ctx, fake, candidateEpoch1, SignOptions{KeyID: "kms-key-id", ExpectedPreviousEpoch: 0})
-	if err != nil { t.Fatal(err) }
-	if !bytes.Equal(fake.Digest, sha256Bytes(out.CanonicalSigned)) { t.Fatal("wrong KMS digest") }
-	if audit.RequestID == "" { t.Fatal("missing non-secret KMS request id") }
-}
+```powershell
+$env:GOCACHE='<private writable cache>'
+$env:GOMODCACHE='<private writable module cache>'
+go test ./internal/trustpolicy ./cmd/trustpolicy
 ```
-
-### Step 2: Run focused tests and confirm RED
-
-Run: `go test ./... -run 'Test(SignPolicy|PolicyCandidate|KMSSigner)'`
-
-Working directory: `updateapi`
-
-### Step 3: Add the pinned Tencent KMS SDK and adapter
-
-Run: `go get github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/kms@v1.3.168`
-
-Use `kms/v20190118`. `GetPublicKey` must compare the returned SPKI SHA-256 with the reviewed command input. `SignByAsymmetricKey` must use `Algorithm=ECC_P256_R1`, `MessageType=DIGEST`, and Base64-encoded SHA-256 digest.
-
-```go
-request := kms.NewSignByAsymmetricKeyRequest()
-request.KeyId = common.StringPtr(keyID)
-request.Algorithm = common.StringPtr("ECC_P256_R1")
-request.MessageType = common.StringPtr("DIGEST")
-request.Message = common.StringPtr(base64.StdEncoding.EncodeToString(digest))
-response, err := client.SignByAsymmetricKeyWithContext(ctx, request)
-```
-
-Verify the returned ASN.1 DER signature locally with the fetched reviewed public key before writing output.
-
-### Step 4: Implement a no-secret CLI contract
-
-```text
-trustpolicy sign \
-  --candidate testdata/trustpolicy/epoch-1-candidate.json \
-  --expected-previous-epoch 0 \
-  --kms-region ap-shanghai \
-  --kms-key-id-env GIFT_PANEL_KMS_KEY_ID \
-  --expected-spki-sha256-env GIFT_PANEL_KMS_SPKI_SHA256 \
-  --output gift-panel-publisher-policy.json \
-  --audit-output gift-panel-publisher-policy.audit.json
-```
-
-Credentials use the Tencent SDK's normal short-lived credential chain; no secret values are accepted as flags. Audit output contains only key ID, epoch, policy SHA-256, KMS request ID, UTC time, and CI actor.
-
-### Step 5: Run tests and commit
-
-Run: `go test ./... -run 'Test(SignPolicy|PolicyCandidate|KMSSigner)'`
-
-Run: `go test ./...`
-
-Working directory: `updateapi`
-
-Commit: `git add updateapi/go.mod updateapi/go.sum updateapi/internal/trustpolicy updateapi/cmd/trustpolicy updateapi/testdata/trustpolicy && git commit -m "feat: sign publisher policy with Tencent KMS"`
 
 ## Task 9: Add protected policy-rotation and policy-publication workflows
 
 **Files:**
+- Modify: `.github/workflows/publisher-rotation.yml`
+- Modify: `scripts/publish-trust-policy.mjs`
+- Modify: `scripts/publish-trust-policy.d.mts`
+- Modify: `tests/publish-trust-policy.test.ts`
+- Modify: `tests/release-workflow.test.ts`
+- Modify: `docs/runbooks/publisher-rotation.md`
 
-- Create: `.github/workflows/publisher-rotation.yml`
-- Create: `scripts/publish-trust-policy.mjs`
-- Create: `scripts/publish-trust-policy.test.ts`
-- Modify: `scripts/release-workflow.test.ts`
-- Create: `docs/runbooks/publisher-rotation.md`
+The protected `sign-policy` job receives only `PUBLISHER_ROTATION_PRIVATE_KEY_PEM` and public reviewed variables, with `contents: read` and no OIDC permission. Immutable publication and discovery receive the existing Tencent COS secrets and GitHub write token but never the root private key. Delete the Tencent OIDC/STS exchange implementation and tests. Preserve create-only immutable publication, complete readback, non-latest policy Releases, paired compare-and-swap discovery advancement, and captured Go verification handoff.
 
-### Step 1: Write failing workflow contract tests
+Run:
 
-Parse the workflow and assert:
-
-- only `workflow_dispatch` can start it;
-- environment is exactly `publisher-rotation`;
-- permissions are read-only except the minimum needed to create the dedicated policy Release;
-- candidate epoch and expected previous epoch are explicit inputs;
-- it invokes only `updateapi/cmd/trustpolicy`, never EVSign or EXE signing;
-- immutable epoch publication happens before mutable pointer advancement;
-- a failed immutable upload cannot advance either pointer.
-
-```ts
-it("keeps publisher rotation separate from executable signing", () => {
-  const text = readWorkflow("publisher-rotation.yml");
-  expect(text).toContain("environment: publisher-rotation");
-  expect(text).not.toContain("sign-evsign.mjs");
-  expect(text).not.toContain("build-go.mjs");
-});
+```powershell
+node 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js' test -- --run tests/publish-trust-policy.test.ts tests/release-workflow.test.ts tests/bridge-release-inputs.test.ts
 ```
-
-### Step 2: Run focused tests and confirm RED
-
-Run: `npm test -- --run scripts/publish-trust-policy.test.ts scripts/release-workflow.test.ts`
-
-### Step 3: Implement the protected workflow and dry-run publisher
-
-The publisher validates an already KMS-signed envelope, uploads `trust/publisher/epochs/%08d.json` with create-only semantics, and creates `publisher-policy-epoch-%08d` with exactly three immutable `application/json` assets: `gift-panel-publisher-policy.json`, `gift-panel-publisher-policy.audit.json`, and the exact bundle marker `gift-panel-publisher-policy.commit.json`. It reads all three assets back and verifies names, sizes, digests, media types, and bytes before conditionally advancing discovery pointers. Add `--dry-run` that performs all validation and prints only target keys/hashes.
-
-The workflow must expose separate jobs:
-
-1. `validate-candidate` without cloud credentials;
-2. `sign-policy` in protected environment with short-lived KMS authorization;
-3. `publish-immutable`;
-4. `advance-discovery` requiring an explicit workflow input `advance_discovery=true`.
-
-### Step 4: Document the external approval stop
-
-`docs/runbooks/publisher-rotation.md` must state that repository code completion does not authorize:
-
-1. creating/enabling the KMS key or CAM identity;
-2. signing epoch 1;
-3. uploading immutable policy objects;
-4. advancing discovery pointers.
-
-Each item is a separate confirmation. Include preflight commands that print only region, key state, key usage, algorithm, deletion protection, public SPKI SHA-256, CAM action names, and CloudAudit availability.
-
-### Step 5: Run tests and commit
-
-Run: `npm test -- --run scripts/publish-trust-policy.test.ts scripts/release-workflow.test.ts`
-
-Run: `npm test`
-
-Commit: `git add .github/workflows/publisher-rotation.yml scripts/publish-trust-policy* scripts/release-workflow.test.ts docs/runbooks/publisher-rotation.md && git commit -m "ci: protect publisher policy rotation"`
 
 ## Task 10: Add a dedicated exact-version RushRush bridge workflow
 
@@ -742,7 +639,7 @@ Commit: `git add .github/workflows/publisher-rotation.yml scripts/publish-trust-
 
 ### Step 1: Write failing bridge workflow isolation tests
 
-Assert exact tag `v0.4.11`, `latest=false`, RushRush outer signer profile, NaisNet embedded FFmpeg verification, embedded trust root/bootstrap policy requirements, complete checksums/changelog, and the absence of stable-pointer/KMS permissions.
+Assert exact tag `v0.4.11`, `latest=false`, RushRush outer signer profile, NaisNet embedded FFmpeg verification, embedded trust root/bootstrap policy requirements, complete checksums/changelog, and the absence of stable-pointer/root-Secret access.
 
 ```ts
 it("publishes only the exact non-latest bridge", () => {
@@ -795,7 +692,7 @@ Commit: `git add .github/workflows/bridge-release.yml scripts/release-workflow.t
 
 ### Step 1: Write failing stable workflow contract tests
 
-Require `APP_UPDATE_TRUST_REQUIRED=1`, reviewed root SPKI digest, bootstrap policy epoch/hash, a higher exact-hash authorization policy, structured final NaisNet identity verification, embedded FFmpeg verification, and no KMS/legacy permissions. Assert GitHub latest remains true for stable releases. The workflow must split unprivileged target build/test, fresh protected signing, and signer-free publication; the signing runner downloads and validates the unsigned handoff before obtaining reviewed tools and never executes target code.
+Require `APP_UPDATE_TRUST_REQUIRED=1`, reviewed root SPKI digest, bootstrap policy epoch/hash, a higher exact-hash authorization policy, structured final NaisNet identity verification, embedded FFmpeg verification, and no root-Secret/legacy access. Assert GitHub latest remains true for stable releases. The workflow must split unprivileged target build/test, fresh protected signing, and signer-free publication; the signing runner downloads and validates the unsigned handoff before obtaining reviewed tools and never executes target code.
 
 ```ts
 it("requires enrollment trust for stable release builds", () => {
@@ -877,7 +774,7 @@ UPDATE_LEGACY_ROUTING_ACTIVE=false
 UPDATE_PUBLISHER_POLICY_KEY=trust/publisher/latest.json
 ```
 
-Legacy mirror service runs `mirror --channel legacy-rushrush --tag v0.4.11` with its own state directory and credential file. Stable mirror continues `mirror --channel stable`. Neither service receives KMS permissions.
+Legacy mirror service runs `mirror --channel legacy-rushrush --tag v0.4.11` with its own state directory and credential file. Stable mirror continues `mirror --channel stable`. Neither service receives the rotation-root Secret.
 
 ### Step 4: Document dry-run, deployment, and rollback checks
 
@@ -938,7 +835,7 @@ Using test certificates/policies, verify:
 - same NaisNet legal identity with a different leaf passes;
 - different organization ID fails despite Authenticode `Valid`;
 - RushRush passes only for `v0.4.11` on legacy;
-- wrong tag/channel/hash, expired policy, malformed JSON, invalid KMS signature, rollback epoch, and interrupted cache write fail with bounded result codes;
+- wrong tag/channel/hash, expired policy, malformed JSON, invalid root signature, rollback epoch, and interrupted cache write fail with bounded result codes;
 - no diagnostic contains a credential, signed query, username path, Bilibili identity, or gift content.
 
 ### Step 4: Execute API and mirror integration acceptance locally
@@ -975,9 +872,9 @@ Commit only public, privacy-safe evidence:
 
 This task is intentionally a sequence of stops. Never infer authorization for a later stop from an earlier confirmation.
 
-### Gate 1: Provision and independently review the KMS root
+### Gate 1: Generate and review the protected rotation root
 
-Preflight reports exact region, key usage, algorithm, deletion protection, CAM actions, and CloudAudit status. Ask for confirmation, then provision. Export only SPKI, calculate SHA-256 on two independent machines/processes, and require matching review before proceeding.
+Generate one ECDSA P-256 key under the release owner's Windows account. Store the PKCS#8 PEM only in GitHub Environment Secret `PUBLISHER_ROTATION_PRIVATE_KEY_PEM` and a Windows-DPAPI CurrentUser backup. Commit only `publisher/rotation-root-spki.der`; set `PUBLISHER_ROTATION_KEY_ID`, `PUBLISHER_ROTATION_SPKI_PATH`, and `PUBLISHER_ROTATION_SPKI_SHA256`. Preflight prints only key label, public path/length/digest, and configured Secret/variable names. The derived SPKI from the Secret must match the committed digest before any policy is signed.
 
 ### Gate 2: Sign and publish epoch 1 policy
 
