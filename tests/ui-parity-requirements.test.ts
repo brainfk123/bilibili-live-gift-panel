@@ -4,6 +4,7 @@ import { validateUIParityRequirements } from '../scripts/validate-ui-parity-requ
 
 const requirementsPath = new URL('../acceptance/exe-hosted-ui/requirements.json', import.meta.url);
 const expectedCompare = ['structure', 'hierarchy', 'spacing', 'controls', 'states', 'responsive', 'interactions'];
+const minimumStates = ['empty', 'populated', 'loading', 'error', 'readonly', 'disabled', 'focus-visible', 'overlay-open'];
 
 function readContract(): unknown {
   return JSON.parse(readFileSync(requirementsPath, 'utf8'));
@@ -20,7 +21,7 @@ it('requires all workspaces, states, comparisons, and viewports', () => {
   expect(contract.viewports.map((item) => item.id)).toEqual(['desktop-1440x900', 'narrow-1024x768', 'mobile-390x844']);
   expect(contract.features.map((item) => item.id)).toEqual(['overview', 'attributes', 'activities', 'gift-targets', 'obs', 'analytics']);
   for (const feature of contract.features) {
-    expect(feature.states).toEqual(expect.arrayContaining(['empty', 'populated', 'loading', 'error']));
+    expect(feature.states).toEqual(expect.arrayContaining(minimumStates));
     expect(feature.compare).toEqual(expectedCompare);
   }
 });
@@ -32,10 +33,22 @@ it('reconstructs an allowlisted result rather than retaining caller properties',
 
   expect(contract.features[0]).toEqual({
     id: 'overview',
-    states: ['empty', 'populated', 'loading', 'error'],
+    states: minimumStates,
     interactions: ['navigate', 'refresh', 'open-settings'],
     compare: expectedCompare,
   });
+});
+
+it('rejects removal of every minimum hard state from every migrated workspace', () => {
+  const source = readContract() as any;
+  for (let featureIndex = 0; featureIndex < source.features.length; featureIndex += 1) {
+    for (const state of minimumStates) {
+      expect(() => validateUIParityRequirements(mutate((value) => {
+        value.features[featureIndex].states = value.features[featureIndex].states
+          .filter((candidate: string) => candidate !== state);
+      })), `${source.features[featureIndex].id} must require ${state}`).toThrow();
+    }
+  }
 });
 
 it.each([
