@@ -19,6 +19,7 @@ import (
 
 const (
 	maxCandidateBytes            = 256 << 10
+	maxPublisherEpoch            = 99_999_999
 	maxReviewedSPKIBytes         = 4 << 10
 	verifyBundleSchemaVersion    = 2
 	maxVerifyBundleEnvelopeBytes = 512 << 10
@@ -101,7 +102,7 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	}
 	signingTime := now().UTC()
 	candidate, err := trustpolicy.ParseCandidate(candidateBytes, trustpolicy.CandidateOptions{ExpectedPreviousEpoch: expectedPreviousEpoch, Now: signingTime})
-	if err != nil {
+	if err != nil || candidate.Epoch > maxPublisherEpoch {
 		return errCommand
 	}
 	keyID, keyIDOK := lookup(keyIDEnvironment)
@@ -156,7 +157,7 @@ func runValidateCandidate(args []string, output io.Writer, now func() time.Time)
 		return errCommand
 	}
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 ||
-		!requiredFlagsPresent(flags, "candidate", "candidate-epoch", "expected-previous-epoch") || candidateEpoch == 0 {
+		!requiredFlagsPresent(flags, "candidate", "candidate-epoch", "expected-previous-epoch") || candidateEpoch == 0 || candidateEpoch > maxPublisherEpoch {
 		return errCommand
 	}
 	candidateBytes, err := readReviewedPublicFile(candidatePath, maxCandidateBytes)

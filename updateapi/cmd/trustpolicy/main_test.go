@@ -13,6 +13,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,6 +119,80 @@ func TestValidateCandidateRequiresExactDeclaredEpochWithoutProviderDependencies(
 			}
 		})
 	}
+}
+
+func TestCandidateCommandsRejectEpochAbovePublicationNamespaceBeforeProvider(t *testing.T) {
+	t.Run("validate boundary", func(t *testing.T) {
+		for _, test := range []struct {
+			epoch, previous uint64
+			wantValid       bool
+		}{
+			{epoch: 99_999_999, previous: 99_999_998, wantValid: true},
+			{epoch: 100_000_000, previous: 99_999_999},
+		} {
+			candidatePath := writeCandidateEpoch(t, test.epoch)
+			var output bytes.Buffer
+			err := run(context.Background(), []string{
+				"validate-candidate",
+				"--candidate", candidatePath,
+				"--candidate-epoch", fmt.Sprint(test.epoch),
+				"--expected-previous-epoch", fmt.Sprint(test.previous),
+			}, nil, nil, &output, func() time.Time { return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC) })
+			if test.wantValid {
+				if err != nil || output.String() != "publisher policy candidate valid\n" {
+					t.Fatalf("boundary epoch rejected: output=%q error=%v", output.String(), err)
+				}
+			} else if err == nil || output.Len() != 0 {
+				t.Fatalf("oversized epoch accepted: output=%q error=%v", output.String(), err)
+			}
+		}
+	})
+
+	t.Run("sign before provider", func(t *testing.T) {
+		fake := newCommandSigner(t)
+		candidatePath := writeCandidateEpoch(t, 100_000_000)
+		bundlePath := filepath.Join(newPrivateTestBase(t), "oversized-epoch-bundle")
+		args := validCommandArgs(candidatePath, filepath.Join(bundlePath, "policy.json"), filepath.Join(bundlePath, "audit.json"))
+		for index := range args {
+			if args[index] == "--expected-previous-epoch" {
+				args[index+1] = "99999999"
+			}
+		}
+		factoryCalls := 0
+		err := run(context.Background(), args, commandEnvironment(fake.digest), func(string, string, string) (trustpolicy.Signer, error) {
+			factoryCalls++
+			return fake, nil
+		}, io.Discard, func() time.Time { return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC) })
+		if err == nil {
+			t.Fatal("sign accepted an epoch that has no fixed eight-digit publication target")
+		}
+		if factoryCalls != 0 {
+			t.Fatalf("sign constructed provider %d times before rejecting oversized epoch", factoryCalls)
+		}
+		assertPathAbsent(t, bundlePath)
+	})
+}
+
+func writeCandidateEpoch(t testing.TB, epoch uint64) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate trustpolicy.Candidate
+	if err := json.Unmarshal(data, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	candidate.Epoch = epoch
+	data, err = json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "candidate.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {

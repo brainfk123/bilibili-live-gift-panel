@@ -44,6 +44,24 @@ Example filters (verify current `tccli` response field names before use):
 set -euo pipefail
 umask 077
 
+PRIVATE_TMP_ROOT=$(cd -- "${TMPDIR:-/tmp}" && pwd -P)
+PRIVATE_TMP=$(mktemp -d -- "$PRIVATE_TMP_ROOT/publisher-preflight.XXXXXXXX")
+case "$PRIVATE_TMP" in
+  "$PRIVATE_TMP_ROOT"/publisher-preflight.*) ;;
+  *) exit 1 ;;
+esac
+[ -d "$PRIVATE_TMP" ]
+[ -O "$PRIVATE_TMP" ]
+[ "$(stat -c '%a' -- "$PRIVATE_TMP")" = '700' ]
+cleanup_private_tmp() {
+  case "${PRIVATE_TMP:-}" in
+    "$PRIVATE_TMP_ROOT"/publisher-preflight.*) rm -rf -- "$PRIVATE_TMP" ;;
+    *) return 1 ;;
+  esac
+}
+trap cleanup_private_tmp EXIT
+trap 'exit 130' HUP INT TERM
+
 tccli kms DescribeKey --region ap-shanghai --KeyId "$REVIEWED_KEY_ID" >"$PRIVATE_TMP/key.json"
 jq '{region:"ap-shanghai",keyState:.KeyMetadata.KeyState,keyUsage:.KeyMetadata.KeyUsage,algorithm:.KeyMetadata.Type,deletionProtection:.KeyMetadata.DeletionProtection}' "$PRIVATE_TMP/key.json"
 
@@ -92,11 +110,15 @@ For epoch `N`, the only immutable targets are:
 
 Uploads are create-only. Existing bytes are acceptable only when their exact SHA-256 matches. The publisher downloads the COS policy and both GitHub assets and compares exact bytes and hashes. Any upload error, conflicting existing object/Release, missing audit asset, or readback mismatch ends the job before either discovery pointer is read or written.
 
+Every new or existing matching policy Release is patched to non-draft, non-prerelease with GitHub API `make_latest` set to the string value `"false"`. The publisher then reads the repository latest-Release endpoint and fails if the policy tag/Release is latest.
+
 ## Discovery advancement gate
 
 Discovery advancement runs only when the typed workflow input is explicitly `true`. It first downloads and verifies both immutable copies again. It then requires both discovery sources to be absent when the expected previous epoch is zero, or to contain a correctly root-signed policy at exactly the expected previous epoch.
 
 Both updates use compare-and-swap state captured from that read. No arbitrary COS key, GitHub tag, branch, ref, or path is accepted. Re-read both pointers and compare exact bytes after the conditional writes. A stale version/ETag, source mismatch, or concurrent change stops the operation.
+
+Each source is classified independently as absent (allowed only when the expected previous epoch is zero), exact authenticated previous, exact candidate already applied, or invalid. An authenticated previous policy is a historical compare-and-swap anchor, so its canonical bytes, root signature, and exact epoch remain mandatory but its expiry does not block completion; the new candidate must still be unexpired. If one source already contains the exact candidate, update only the other. On a compare-and-swap conflict, re-read and reclassify once; accept only an exact candidate completed by the concurrent writer and never retry a blind overwrite.
 
 ## Audit and privacy
 

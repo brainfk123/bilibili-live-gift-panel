@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 const MAX_MACHINE_ENVELOPE_BYTES = 512 << 10;
 const MAX_POLICY_BYTES = 256 << 10;
 const MAX_AUDIT_BYTES = 64 << 10;
+const MAX_REMOTE_JSON_BYTES = 512 << 10;
 const POLICY_ASSET = 'gift-panel-publisher-policy.json';
 const AUDIT_ASSET = 'gift-panel-publisher-policy.audit.json';
 const COS_POINTER = 'trust/publisher/latest.json';
@@ -19,14 +20,80 @@ const KEY_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const REQUEST_ID = /^[A-Za-z0-9_.:@/-]{1,256}$/;
 const CI_ACTOR = /^[A-Za-z0-9_.\[\]-]{1,100}$/;
 const RFC3339_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const GITHUB_RELEASE_ASSET_HOST = 'release-assets.githubusercontent.com';
 const execFileAsync = promisify(execFile);
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-class ValidationFailure extends Error {}
-class PublicationFailure extends Error {}
+class ValidationFailure extends Error {
+  constructor() { super('publisher policy validation failed'); }
+}
+class PublicationFailure extends Error {
+  constructor() { super('publisher policy publication failed'); }
+}
+class PointerCASConflict extends PublicationFailure {
+  constructor() {
+    super();
+    this.code = 'publisher-pointer-cas-conflict';
+  }
+}
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function readBoundedResponse(response, maximum) {
+  if (!Number.isSafeInteger(maximum) || maximum < 0) throw new PublicationFailure();
+  const declaredText = response.headers.get('content-length');
+  let declared = null;
+  if (declaredText !== null) {
+    if (!/^(?:0|[1-9][0-9]*)$/.test(declaredText)) throw new PublicationFailure();
+    declared = Number(declaredText);
+    if (!Number.isSafeInteger(declared) || declared > maximum) throw new PublicationFailure();
+  }
+  if (response.body === null) {
+    if (declared !== null && declared !== 0) throw new PublicationFailure();
+    return Buffer.alloc(0);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new PublicationFailure();
+      total += value.length;
+      if (total > maximum) throw new PublicationFailure();
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    try { await reader.cancel(); } catch { /* bounded failure */ }
+    throw new PublicationFailure();
+  }
+  if (declared !== null && declared !== total) throw new PublicationFailure();
+  return Buffer.concat(chunks, total);
+}
+
+async function readRemoteJSON(response, maximum = MAX_REMOTE_JSON_BYTES) {
+  const bytes = await readBoundedResponse(response, maximum);
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return JSON.parse(text);
+  } catch {
+    throw new PublicationFailure();
+  }
+}
+
+function safeAdapterMethod(method) {
+  return async (...args) => {
+    try {
+      return await method(...args);
+    } catch (error) {
+      if (error instanceof PointerCASConflict) throw error;
+      throw new PublicationFailure();
+    }
+  };
 }
 
 function asPath(value) {
@@ -99,12 +166,12 @@ function validatePublisher(publisher, index) {
   }
 }
 
-function validatePolicyBytes(policy, reviewedSPKI, expectedSPKISHA256, expectedPreviousEpoch, now) {
+function validatePolicyBytes(policy, reviewedSPKI, expectedSPKISHA256, expectedPreviousEpoch, now, requireFresh = true) {
   const document = parseCanonicalJSON(policy, MAX_POLICY_BYTES);
   if (!exactKeys(document, ['signed', 'signatures']) || !exactKeys(document.signed, ['epoch', 'expiresAt', 'publishers']) ||
     !Number.isSafeInteger(document.signed.epoch) || document.signed.epoch <= 0 ||
     !Number.isSafeInteger(expectedPreviousEpoch) || expectedPreviousEpoch < 0 || document.signed.epoch !== expectedPreviousEpoch + 1 ||
-    !validTime(document.signed.expiresAt, now, true) || !Array.isArray(document.signed.publishers) ||
+    !validTime(document.signed.expiresAt, now, requireFresh) || !Array.isArray(document.signed.publishers) ||
     document.signed.publishers.length < 1 || document.signed.publishers.length > 2 ||
     !Array.isArray(document.signatures) || document.signatures.length !== 1 ||
     !exactKeys(document.signatures[0], ['algorithm', 'signature']) ||
@@ -237,10 +304,20 @@ function equalBytes(left, right) {
   return Buffer.isBuffer(left) && left.length === right.length && left.equals(right);
 }
 
+function verifyCOSPolicyObject(object, bundle) {
+  if (!object) throw new PublicationFailure();
+  const bytes = Buffer.from(object.bytes);
+  if (!equalBytes(bytes, bundle.policy) || sha256(bytes) !== bundle.policySHA256 ||
+    object.sha256 !== bundle.policySHA256 || object.contentType !== 'application/json' ||
+    typeof object.version !== 'string' || object.version.length === 0) {
+    throw new PublicationFailure();
+  }
+}
+
 async function verifyImmutableReadback(bundle, adapters) {
   const targets = publisherTargets(bundle.epoch);
   const cos = await adapters.cos.read(targets.cosImmutableKey);
-  if (!cos || !equalBytes(Buffer.from(cos.bytes), bundle.policy)) throw new PublicationFailure();
+  verifyCOSPolicyObject(cos, bundle);
   const githubPolicy = Buffer.from(await adapters.github.downloadReleaseAsset(targets.githubReleaseTag, targets.githubPolicyAsset));
   const githubAudit = Buffer.from(await adapters.github.downloadReleaseAsset(targets.githubReleaseTag, targets.githubAuditAsset));
   if (!equalBytes(githubPolicy, bundle.policy) || !equalBytes(githubAudit, bundle.audit) ||
@@ -253,7 +330,7 @@ async function publishImmutable(bundle, adapters) {
   const targets = publisherTargets(bundle.epoch);
   await adapters.cos.putImmutable(targets.cosImmutableKey, bundle.policy, bundle.policySHA256);
   const cos = await adapters.cos.read(targets.cosImmutableKey);
-  if (!cos || !equalBytes(Buffer.from(cos.bytes), bundle.policy) || sha256(Buffer.from(cos.bytes)) !== bundle.policySHA256) throw new PublicationFailure();
+  verifyCOSPolicyObject(cos, bundle);
   await adapters.github.publishImmutableRelease({
     tag: targets.githubReleaseTag,
     title: targets.githubReleaseTag,
@@ -265,13 +342,51 @@ async function publishImmutable(bundle, adapters) {
   await verifyImmutableReadback(bundle, adapters);
 }
 
-function validatePriorPointer(prior, bundle) {
-  if (bundle.expectedPreviousEpoch === 0) {
-    if (prior !== null) throw new PublicationFailure();
+function classifyPointer(pointer, bundle) {
+  if (pointer === null) {
+    if (bundle.expectedPreviousEpoch !== 0) throw new PublicationFailure();
+    return { kind: 'absent', version: null };
+  }
+  if (typeof pointer.version !== 'string' || pointer.version.length === 0) throw new PublicationFailure();
+  const bytes = Buffer.from(pointer.bytes);
+  if (equalBytes(bytes, bundle.policy)) return { kind: 'candidate', version: pointer.version };
+  if (bundle.expectedPreviousEpoch === 0) throw new PublicationFailure();
+  try {
+    const verified = validatePolicyBytes(
+      bytes,
+      bundle.reviewedSPKI,
+      bundle.expectedSPKISHA256,
+      bundle.expectedPreviousEpoch - 1,
+      bundle.now,
+      false,
+    );
+    if (verified.epoch !== bundle.expectedPreviousEpoch) throw new PublicationFailure();
+  } catch {
+    throw new PublicationFailure();
+  }
+  return { kind: 'previous', version: pointer.version };
+}
+
+function isPointerCASConflict(error) {
+  return error instanceof PointerCASConflict || error?.code === 'publisher-pointer-cas-conflict';
+}
+
+async function completePointer(readPointer, compareAndSwap, initial, bundle) {
+  if (initial.kind === 'candidate') {
+    const confirmed = classifyPointer(await readPointer(), bundle);
+    if (confirmed.kind !== 'candidate') throw new PublicationFailure();
     return;
   }
-  if (!prior || typeof prior.version !== 'string' || prior.version.length === 0) throw new PublicationFailure();
-  validatePolicyBytes(Buffer.from(prior.bytes), bundle.reviewedSPKI, bundle.expectedSPKISHA256, bundle.expectedPreviousEpoch - 1, bundle.now);
+  try {
+    await compareAndSwap(initial.version);
+  } catch (error) {
+    if (!isPointerCASConflict(error)) throw error;
+    const afterConflict = classifyPointer(await readPointer(), bundle);
+    if (afterConflict.kind === 'candidate') return;
+    throw new PublicationFailure();
+  }
+  const readback = classifyPointer(await readPointer(), bundle);
+  if (readback.kind !== 'candidate') throw new PublicationFailure();
 }
 
 async function advanceDiscovery(bundle, adapters) {
@@ -281,19 +396,25 @@ async function advanceDiscovery(bundle, adapters) {
     adapters.cos.read(targets.cosPointerKey),
     adapters.github.readPointer(targets.githubPointerRef, targets.githubPointerPath),
   ]);
-  validatePriorPointer(priorCOS, bundle);
-  validatePriorPointer(priorGitHub, bundle);
-  await adapters.cos.compareAndSwapPointer(targets.cosPointerKey, bundle.policy, priorCOS?.version ?? null, bundle.policySHA256);
-  const cosReadback = await adapters.cos.read(targets.cosPointerKey);
-  if (!cosReadback || !equalBytes(Buffer.from(cosReadback.bytes), bundle.policy)) throw new PublicationFailure();
-  await adapters.github.compareAndSwapPointer({
-    ref: targets.githubPointerRef,
-    path: targets.githubPointerPath,
-    bytes: bundle.policy,
-    expectedVersion: priorGitHub?.version ?? null,
-  });
-  const githubReadback = await adapters.github.readPointer(targets.githubPointerRef, targets.githubPointerPath);
-  if (!githubReadback || !equalBytes(Buffer.from(githubReadback.bytes), bundle.policy)) throw new PublicationFailure();
+  const cosState = classifyPointer(priorCOS, bundle);
+  const githubState = classifyPointer(priorGitHub, bundle);
+  await completePointer(
+    () => adapters.cos.read(targets.cosPointerKey),
+    (expectedVersion) => adapters.cos.compareAndSwapPointer(targets.cosPointerKey, bundle.policy, expectedVersion, bundle.policySHA256),
+    cosState,
+    bundle,
+  );
+  await completePointer(
+    () => adapters.github.readPointer(targets.githubPointerRef, targets.githubPointerPath),
+    (expectedVersion) => adapters.github.compareAndSwapPointer({
+      ref: targets.githubPointerRef,
+      path: targets.githubPointerPath,
+      bytes: bundle.policy,
+      expectedVersion,
+    }),
+    githubState,
+    bundle,
+  );
 }
 
 export async function publishTrustPolicy(options, adapters) {
@@ -364,7 +485,7 @@ function cosAuthorization(method, url, headers, secretID, secretKey, now) {
   ].join('&');
 }
 
-function createCOSAdapter(environment, fetchImpl = fetch, now = () => new Date()) {
+export function createCOSPublisherAdapter(environment, fetchImpl = fetch, now = () => new Date()) {
   const bucket = environment.COS_BUCKET ?? '';
   const region = environment.COS_REGION ?? '';
   const secretID = environment.TENCENTCLOUD_SECRET_ID ?? '';
@@ -384,29 +505,42 @@ function createCOSAdapter(environment, fetchImpl = fetch, now = () => new Date()
       headers.set('content-type', 'application/json');
     }
     headers.set('authorization', cosAuthorization(method, url, headers, secretID, secretKey, now()));
-    return fetchImpl(url, { method, headers, body, redirect: 'error' });
+    return fetchImpl(url, { method, headers, body, redirect: 'manual' });
+  }
+  async function readObject(key) {
+    const response = await request('GET', key);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new PublicationFailure();
+    const bytes = await readBoundedResponse(response, MAX_POLICY_BYTES);
+    return {
+      bytes,
+      version: response.headers.get('etag') ?? '',
+      sha256: response.headers.get('x-cos-meta-sha256') ?? '',
+      contentType: response.headers.get('content-type') ?? '',
+    };
   }
   return {
-    putImmutable: async (key, bytes, digest) => {
+    putImmutable: safeAdapterMethod(async (key, bytes, digest) => {
       const response = await request('PUT', key, bytes, { 'x-cos-forbid-overwrite': 'true', 'x-cos-meta-sha256': digest });
-      if (!response.ok) throw new PublicationFailure();
-    },
-    read: async (key) => {
-      const response = await request('GET', key);
-      if (response.status === 404) return null;
-      if (!response.ok) throw new PublicationFailure();
-      const bytes = Buffer.from(await response.arrayBuffer());
-      return { bytes, version: response.headers.get('etag') ?? '' };
-    },
-    compareAndSwapPointer: async (key, bytes, expectedVersion, digest) => {
+      if (response.ok) return;
+      if (response.status !== 409 && response.status !== 412) throw new PublicationFailure();
+      const existing = await readObject(key);
+      if (!existing || !equalBytes(existing.bytes, bytes) || sha256(existing.bytes) !== digest ||
+        existing.sha256 !== digest || existing.contentType !== 'application/json' || existing.version.length === 0) {
+        throw new PublicationFailure();
+      }
+    }),
+    read: safeAdapterMethod(readObject),
+    compareAndSwapPointer: safeAdapterMethod(async (key, bytes, expectedVersion, digest) => {
       const condition = expectedVersion === null ? { 'if-none-match': '*' } : { 'if-match': expectedVersion };
       const response = await request('PUT', key, bytes, { ...condition, 'x-cos-meta-sha256': digest });
+      if (response.status === 409 || response.status === 412) throw new PointerCASConflict();
       if (!response.ok) throw new PublicationFailure();
-    },
+    }),
   };
 }
 
-function createGitHubAdapter(environment, fetchImpl = fetch) {
+export function createGitHubPublisherAdapter(environment, fetchImpl = fetch) {
   const repository = environment.GITHUB_REPOSITORY ?? '';
   const token = environment.GH_TOKEN ?? '';
   const commit = environment.GITHUB_SHA ?? '';
@@ -418,22 +552,53 @@ function createGitHubAdapter(environment, fetchImpl = fetch) {
     'x-github-api-version': '2022-11-28',
   };
   async function request(url, options = {}) {
-    return fetchImpl(url, { redirect: 'error', ...options, headers: { ...headers, ...(options.headers ?? {}) } });
+    return fetchImpl(url, { redirect: 'manual', ...options, headers: { ...headers, 'accept-encoding': 'identity', ...(options.headers ?? {}) } });
   }
   async function releaseForTag(tag) {
     const response = await request(`${api}/releases/tags/${safeEncode(tag)}`);
     if (response.status === 404) return null;
     if (!response.ok) throw new PublicationFailure();
-    return response.json();
+    return readRemoteJSON(response);
   }
   async function assetBytes(tag, name) {
+    const maximum = name === POLICY_ASSET ? MAX_POLICY_BYTES : name === AUDIT_ASSET ? MAX_AUDIT_BYTES : 0;
+    if (maximum === 0) throw new PublicationFailure();
     const release = await releaseForTag(tag);
     const assets = Array.isArray(release?.assets) ? release.assets : [];
     const asset = assets.find((candidate) => candidate?.name === name);
-    if (!asset || typeof asset.url !== 'string') throw new PublicationFailure();
-    const response = await request(asset.url, { headers: { accept: 'application/octet-stream' } });
-    if (!response.ok) throw new PublicationFailure();
-    return Buffer.from(await response.arrayBuffer());
+    if (!asset || typeof asset.url !== 'string' || !Number.isSafeInteger(asset.id) || asset.id <= 0 ||
+      !Number.isSafeInteger(asset.size) || asset.size < 0 || asset.size > maximum ||
+      asset.content_type !== 'application/json' || asset.state !== 'uploaded' ||
+      !/^sha256:[0-9a-f]{64}$/.test(asset.digest)) {
+      throw new PublicationFailure();
+    }
+    let assetAPI;
+    try { assetAPI = new URL(asset.url); } catch { throw new PublicationFailure(); }
+    const expectedAssetPath = `/repos/${repository}/releases/assets/${asset.id}`;
+    if (assetAPI.protocol !== 'https:' || assetAPI.host !== 'api.github.com' || assetAPI.pathname !== expectedAssetPath ||
+      assetAPI.search !== '' || assetAPI.hash !== '' || assetAPI.username !== '' || assetAPI.password !== '') {
+      throw new PublicationFailure();
+    }
+    let response = await request(assetAPI, { headers: { accept: 'application/octet-stream' }, redirect: 'manual' });
+    if (response.status === 302) {
+      const location = response.headers.get('location');
+      let redirect;
+      try { redirect = new URL(location ?? ''); } catch { throw new PublicationFailure(); }
+      if (redirect.protocol !== 'https:' || redirect.hostname !== GITHUB_RELEASE_ASSET_HOST || redirect.port !== '' ||
+        redirect.username !== '' || redirect.password !== '' || redirect.hash !== '' || redirect.pathname === '/') {
+        throw new PublicationFailure();
+      }
+      response = await fetchImpl(redirect, {
+        method: 'GET',
+        redirect: 'manual',
+        credentials: 'omit',
+        headers: { accept: 'application/octet-stream', 'accept-encoding': 'identity' },
+      });
+    }
+    if (response.status !== 200) throw new PublicationFailure();
+    const bytes = await readBoundedResponse(response, maximum);
+    if (bytes.length !== asset.size || sha256(bytes) !== asset.digest.slice('sha256:'.length)) throw new PublicationFailure();
+    return bytes;
   }
   async function ensureImmutableTag(tag) {
     const inspect = await request(`${api}/git/ref/tags/${safeEncode(tag)}`);
@@ -447,11 +612,11 @@ function createGitHubAdapter(environment, fetchImpl = fetch) {
       return;
     }
     if (!inspect.ok) throw new PublicationFailure();
-    const reference = await inspect.json();
+    const reference = await readRemoteJSON(inspect);
     if (reference?.ref !== `refs/tags/${tag}` || reference?.object?.type !== 'commit' || reference?.object?.sha !== commit) throw new PublicationFailure();
   }
   return {
-    publishImmutableRelease: async ({ tag, title, assets }) => {
+    publishImmutableRelease: safeAdapterMethod(async ({ tag, title, assets }) => {
       if (!/^publisher-policy-epoch-[0-9]{8}$/.test(tag) || title !== tag || assets.length !== 2) throw new PublicationFailure();
       await ensureImmutableTag(tag);
       let release = await releaseForTag(tag);
@@ -459,13 +624,20 @@ function createGitHubAdapter(environment, fetchImpl = fetch) {
         const create = await request(`${api}/releases`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ tag_name: tag, target_commitish: commit, name: title, draft: true, prerelease: false }),
+          body: JSON.stringify({ tag_name: tag, target_commitish: commit, name: title, draft: true, prerelease: false, make_latest: 'false' }),
         });
         if (!create.ok) throw new PublicationFailure();
-        release = await create.json();
+        release = await readRemoteJSON(create);
       }
-      if (release?.tag_name !== tag || typeof release?.draft !== 'boolean' || release?.prerelease !== false ||
+      if (release?.tag_name !== tag || typeof release?.draft !== 'boolean' || typeof release?.prerelease !== 'boolean' ||
         typeof release?.upload_url !== 'string' || !Number.isSafeInteger(release?.id)) throw new PublicationFailure();
+      let uploadEndpoint;
+      try { uploadEndpoint = new URL(release.upload_url.replace(/\{.*$/, '')); } catch { throw new PublicationFailure(); }
+      if (uploadEndpoint.protocol !== 'https:' || uploadEndpoint.host !== 'uploads.github.com' ||
+        uploadEndpoint.pathname !== `/repos/${repository}/releases/${release.id}/assets` || uploadEndpoint.search !== '' ||
+        uploadEndpoint.hash !== '' || uploadEndpoint.username !== '' || uploadEndpoint.password !== '') {
+        throw new PublicationFailure();
+      }
       const existing = Array.isArray(release.assets) ? release.assets : [];
       if (existing.some((asset) => !assets.some((expected) => expected.name === asset?.name))) throw new PublicationFailure();
       if (release.draft === false && existing.length !== assets.length) throw new PublicationFailure();
@@ -476,42 +648,54 @@ function createGitHubAdapter(environment, fetchImpl = fetch) {
           if (!equalBytes(bytes, asset.bytes) || sha256(bytes) !== asset.sha256) throw new PublicationFailure();
           continue;
         }
-        const uploadURL = release.upload_url.replace(/\{.*$/, '');
-        const response = await request(`${uploadURL}?name=${safeEncode(asset.name)}`, {
+        const uploadURL = new URL(uploadEndpoint);
+        uploadURL.searchParams.set('name', asset.name);
+        const response = await request(uploadURL, {
           method: 'POST',
           headers: { accept: 'application/vnd.github+json', 'content-type': 'application/json', 'content-length': String(asset.bytes.length) },
           body: asset.bytes,
         });
         if (!response.ok) throw new PublicationFailure();
       }
-      if (release.draft === true) {
-        const publish = await request(`${api}/releases/${release.id}`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ draft: false, prerelease: false, make_latest: 'false' }),
-        });
-        if (!publish.ok) throw new PublicationFailure();
-      }
+      const publish = await request(`${api}/releases/${release.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ draft: false, prerelease: false, make_latest: 'false' }),
+      });
+      if (!publish.ok) throw new PublicationFailure();
       const finalRelease = await releaseForTag(tag);
       const finalAssets = Array.isArray(finalRelease?.assets) ? finalRelease.assets : [];
       if (finalRelease?.draft !== false || finalRelease?.prerelease !== false || finalRelease?.tag_name !== tag ||
         finalAssets.length !== assets.length || assets.some((expected) => finalAssets.filter((asset) => asset?.name === expected.name).length !== 1)) {
         throw new PublicationFailure();
       }
-    },
-    downloadReleaseAsset: assetBytes,
-    readPointer: async (ref, path) => {
+      for (const asset of assets) {
+        const bytes = await assetBytes(tag, asset.name);
+        if (!equalBytes(bytes, asset.bytes) || sha256(bytes) !== asset.sha256) throw new PublicationFailure();
+      }
+      const latest = await request(`${api}/releases/latest`);
+      if (latest.status !== 404) {
+        if (!latest.ok) throw new PublicationFailure();
+        const latestRelease = await readRemoteJSON(latest);
+        if (latestRelease?.tag_name === tag || latestRelease?.id === finalRelease?.id) throw new PublicationFailure();
+      }
+    }),
+    downloadReleaseAsset: safeAdapterMethod(assetBytes),
+    readPointer: safeAdapterMethod(async (ref, path) => {
       if (ref !== GITHUB_POINTER_REF || path !== GITHUB_POINTER_PATH) throw new PublicationFailure();
       const branch = ref.replace(/^refs\/heads\//, '');
       const response = await request(`${api}/contents/${safeEncode(path)}?ref=${safeEncode(branch)}`);
       if (response.status === 404) return null;
       if (!response.ok) throw new PublicationFailure();
-      const document = await response.json();
-      if (document?.encoding !== 'base64' || typeof document?.content !== 'string' || typeof document?.sha !== 'string') throw new PublicationFailure();
-      return { bytes: decodeCanonicalBase64(document.content.replace(/\s/g, '')), version: document.sha };
-    },
-    compareAndSwapPointer: async ({ ref, path, bytes, expectedVersion }) => {
+      const document = await readRemoteJSON(response);
+      if (document?.encoding !== 'base64' || typeof document?.content !== 'string' || !/^[0-9a-f]{40}$/.test(document?.sha)) throw new PublicationFailure();
+      const bytes = decodeCanonicalBase64(document.content.replace(/\s/g, ''));
+      if (bytes.length === 0 || bytes.length > MAX_POLICY_BYTES) throw new PublicationFailure();
+      return { bytes, version: document.sha };
+    }),
+    compareAndSwapPointer: safeAdapterMethod(async ({ ref, path, bytes, expectedVersion }) => {
       if (ref !== GITHUB_POINTER_REF || path !== GITHUB_POINTER_PATH) throw new PublicationFailure();
+      if (expectedVersion !== null && !/^[0-9a-f]{40}$/.test(expectedVersion)) throw new PublicationFailure();
       const branch = ref.replace(/^refs\/heads\//, '');
       if (expectedVersion === null) {
         const inspect = await request(`${api}/git/ref/heads/${safeEncode(branch)}`);
@@ -529,8 +713,9 @@ function createGitHubAdapter(environment, fetchImpl = fetch) {
       const response = await request(`${api}/contents/${safeEncode(path)}`, {
         method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       });
+      if (response.status === 409 || response.status === 422) throw new PointerCASConflict();
       if (!response.ok) throw new PublicationFailure();
-    },
+    }),
   };
 }
 
@@ -575,7 +760,7 @@ export async function exchangeTencentSession(environment, adapters = { fetch, ap
     oidcURL.searchParams.set('audience', audience);
     const oidcResponse = await adapters.fetch(oidcURL, { headers: { authorization: `Bearer ${requestToken}` }, redirect: 'error' });
     if (!oidcResponse.ok) throw new Error();
-    const oidc = await oidcResponse.json();
+    const oidc = await readRemoteJSON(oidcResponse, MAX_AUDIT_BYTES);
     if (!validSessionValue(oidc?.value, 16 << 10)) throw new Error();
     const stsResponse = await adapters.fetch('https://sts.tencentcloudapi.com', {
       method: 'POST',
@@ -595,7 +780,7 @@ export async function exchangeTencentSession(environment, adapters = { fetch, ap
       }),
     });
     if (!stsResponse.ok) throw new Error();
-    const document = await stsResponse.json();
+    const document = await readRemoteJSON(stsResponse, MAX_AUDIT_BYTES);
     const credentials = document?.Response?.Credentials;
     const secretID = credentials?.TmpSecretId;
     const secretKey = credentials?.TmpSecretKey;
@@ -638,8 +823,8 @@ async function runCommand(environment) {
   const options = commandOptions(environment);
   const adapters = { process: defaultProcessAdapter(), files: defaultFiles };
   if (options.mode !== 'dry-run') {
-    adapters.cos = createCOSAdapter(environment);
-    adapters.github = createGitHubAdapter(environment);
+    adapters.cos = createCOSPublisherAdapter(environment);
+    adapters.github = createGitHubPublisherAdapter(environment);
   }
   return publishTrustPolicy(options, adapters);
 }

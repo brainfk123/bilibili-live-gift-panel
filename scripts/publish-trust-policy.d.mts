@@ -7,6 +7,8 @@ export interface ProcessResult {
 export interface PublisherObject {
   bytes: Uint8Array;
   version: string;
+  sha256?: string;
+  contentType?: string;
 }
 
 export interface PublisherAdapters {
@@ -70,6 +72,15 @@ export function publisherTargets(epoch: number): Pick<PublisherSummary,
   'cosPointerKey' | 'githubPointerRef' | 'githubPointerPath'>;
 export function formatPublisherSummary(summary: PublisherSummary): string;
 export function publishTrustPolicy(options: PublisherOptions, adapters: PublisherAdapters): Promise<PublisherSummary>;
+export function createCOSPublisherAdapter(
+  environment: Record<string, string | undefined>,
+  fetchImpl?: typeof fetch,
+  now?: () => Date,
+): PublisherAdapters['cos'];
+export function createGitHubPublisherAdapter(
+  environment: Record<string, string | undefined>,
+  fetchImpl?: typeof fetch,
+): PublisherAdapters['github'];
 export function exchangeTencentSession(environment: Record<string, string | undefined>, adapters?: {
   fetch: typeof fetch;
   appendFile: typeof import('node:fs/promises').appendFile;
