@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -103,7 +104,7 @@ func TestNewRejectsUnsafeBucketAndRegion(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client, err := cosstore.New(test.bucket, test.region, "secret-id", "secret-key", nil)
+			client, err := cosstore.New(test.bucket, test.region, "secret-id", "secret-key", cosstore.MutablePointerNone, nil)
 			if err == nil || client != nil {
 				t.Fatalf("New(%q, %q) = (%v, %v), want rejection", test.bucket, test.region, client, err)
 			}
@@ -139,6 +140,69 @@ func TestPutWritesDigestMetadata(t *testing.T) {
 	err := newStore(t, server, time.Second).Put(context.Background(), "channels/stable/latest.json", strings.NewReader(`{"schemaVersion":1}`), int64(len(`{"schemaVersion":1}`)), "application/json", strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPutRequiresOneExactMutablePointerCapabilityBeforeHTTP(t *testing.T) {
+	requested := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requested <- strings.TrimPrefix(request.URL.Path, "/")
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer.Header().Set("X-Cos-Hash-Crc64ecma", strconv.FormatUint(crc64.Checksum(body, crc64.MakeTable(crc64.ECMA)), 10))
+	}))
+	defer server.Close()
+	newClient := func(capability cosstore.MutablePointerCapability) *cosstore.Client {
+		target, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client, err := cosstore.New("private-release-1250000000", "ap-guangzhou", "secret-id", "secret-key", capability, &http.Client{Timeout: time.Second, Transport: rewriteTransport{target: target, base: http.DefaultTransport}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client
+	}
+	body := `{"schemaVersion":2}`
+	write := func(client *cosstore.Client, key string) error {
+		return client.Put(context.Background(), key, strings.NewReader(body), int64(len(body)), "application/json", strings.Repeat("b", 64))
+	}
+
+	if err := write(newClient(cosstore.MutablePointerStable), "channels/stable/latest.json"); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-requested; got != "channels/stable/latest.json" {
+		t.Fatalf("stable request = %q", got)
+	}
+	if err := write(newClient(cosstore.MutablePointerLegacyRushRush), "channels/legacy-rushrush/latest.json"); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-requested; got != "channels/legacy-rushrush/latest.json" {
+		t.Fatalf("legacy request = %q", got)
+	}
+
+	for _, test := range []struct {
+		name       string
+		capability cosstore.MutablePointerCapability
+		key        string
+	}{
+		{name: "read-only stable", capability: cosstore.MutablePointerNone, key: "channels/stable/latest.json"},
+		{name: "stable cross legacy", capability: cosstore.MutablePointerStable, key: "channels/legacy-rushrush/latest.json"},
+		{name: "legacy cross stable", capability: cosstore.MutablePointerLegacyRushRush, key: "channels/stable/latest.json"},
+		{name: "arbitrary pointer", capability: cosstore.MutablePointerStable, key: "channels/beta/latest.json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := write(newClient(test.capability), test.key); err == nil {
+				t.Fatal("cross-capability pointer write reached no rejection")
+			}
+			select {
+			case key := <-requested:
+				t.Fatalf("rejected key reached HTTP adapter: %q", key)
+			default:
+			}
+		})
 	}
 }
 
@@ -352,7 +416,7 @@ func newStore(t *testing.T, server *httptest.Server, timeout time.Duration) *cos
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := cosstore.New("private-release-1250000000", "ap-guangzhou", "secret-id", "secret-key", &http.Client{
+	client, err := cosstore.New("private-release-1250000000", "ap-guangzhou", "secret-id", "secret-key", cosstore.MutablePointerStable, &http.Client{
 		Timeout: timeout,
 		Transport: rewriteTransport{
 			target: target,

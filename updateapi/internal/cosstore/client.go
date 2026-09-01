@@ -62,12 +62,37 @@ type ObjectInfo struct {
 }
 
 type Client struct {
-	client    *cos.Client
-	secretID  string
-	secretKey string
+	client            *cos.Client
+	secretID          string
+	secretKey         string
+	mutablePointerKey string
 }
 
-func New(bucket, region, secretID, secretKey string, httpClient *http.Client) (*Client, error) {
+// MutablePointerCapability is a closed constructor capability for exactly one
+// replaceable discovery pointer. It is independent from immutable release
+// object permissions, which remain constrained by PutImmutable and CAM.
+type MutablePointerCapability uint8
+
+const (
+	MutablePointerNone MutablePointerCapability = iota
+	MutablePointerStable
+	MutablePointerLegacyRushRush
+)
+
+func (capability MutablePointerCapability) key() (string, error) {
+	switch capability {
+	case MutablePointerNone:
+		return "", nil
+	case MutablePointerStable:
+		return stableChannelKey, nil
+	case MutablePointerLegacyRushRush:
+		return legacyRushRushChannelKey, nil
+	default:
+		return "", errors.New("mutable pointer capability is invalid")
+	}
+}
+
+func New(bucket, region, secretID, secretKey string, mutablePointer MutablePointerCapability, httpClient *http.Client) (*Client, error) {
 	if bucket == "" || region == "" || secretID == "" || secretKey == "" {
 		return nil, errors.New("bucket, region, secret ID, and secret key are required")
 	}
@@ -76,6 +101,10 @@ func New(bucket, region, secretID, secretKey string, httpClient *http.Client) (*
 	}
 	if !cosRegionPattern.MatchString(region) {
 		return nil, errors.New("COS region is invalid")
+	}
+	mutablePointerKey, err := mutablePointer.key()
+	if err != nil {
+		return nil, err
 	}
 
 	expectedHost := fmt.Sprintf("%s.cos.%s.myqcloud.com", bucket, region)
@@ -95,9 +124,10 @@ func New(bucket, region, secretID, secretKey string, httpClient *http.Client) (*
 	}
 
 	return &Client{
-		client:    cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &configuredClient),
-		secretID:  secretID,
-		secretKey: secretKey,
+		client:            cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &configuredClient),
+		secretID:          secretID,
+		secretKey:         secretKey,
+		mutablePointerKey: mutablePointerKey,
 	}, nil
 }
 
@@ -141,10 +171,10 @@ func (client *Client) Head(ctx context.Context, key string) (ObjectInfo, error) 
 	}, nil
 }
 
-// Put replaces the stable channel pointer.
+// Put replaces only the one pointer granted when this client was constructed.
 func (client *Client) Put(ctx context.Context, key string, body io.Reader, size int64, contentType, sha256 string) error {
-	if key != stableChannelKey {
-		return fmt.Errorf("replaceable write key must be %q", stableChannelKey)
+	if client.mutablePointerKey == "" || key != client.mutablePointerKey {
+		return errors.New("replaceable write key is outside the client capability")
 	}
 	return client.put(ctx, key, body, size, contentType, sha256, false)
 }

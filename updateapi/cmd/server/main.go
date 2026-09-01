@@ -49,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := cosstore.New(configuration.bucket, configuration.region, configuration.secretID, configuration.secretKey, nil)
+	store, err := cosstore.New(configuration.bucket, configuration.region, configuration.secretID, configuration.secretKey, cosstore.MutablePointerNone, nil)
 	if err != nil {
 		logger.Printf("startup cause=%v", err)
 		os.Exit(1)

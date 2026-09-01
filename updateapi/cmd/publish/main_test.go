@@ -48,7 +48,7 @@ func TestPublishFailureMessageKeepsLocalFailuresGeneric(t *testing.T) {
 func TestRunRequiresAllPublishingFlagsBeforeCreatingStore(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	called := false
-	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func(_ cosstore.MutablePointerCapability) (publish.Store, error) {
 		called = true
 		return nil, errors.New("must not create store")
 	}, io.Discard)
@@ -69,7 +69,7 @@ func TestRunRequiresClosedChannelBeforeCreatingStore(t *testing.T) {
 		{"--channel", "legacy-rushrush", "--tag", "v0.4.10", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog},
 	} {
 		called := false
-		err := run(args, func() (publish.Store, error) {
+		err := run(args, func(_ cosstore.MutablePointerCapability) (publish.Store, error) {
 			called = true
 			return nil, errors.New("must not create store")
 		}, io.Discard)
@@ -85,8 +85,10 @@ func TestRunRequiresClosedChannelBeforeCreatingStore(t *testing.T) {
 func TestRunLegacyPublishesOnlyLegacyPointer(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
+	capability := cosstore.MutablePointerNone
 	var output bytes.Buffer
-	err := run([]string{"--channel", "legacy-rushrush", "--tag", "v0.4.11", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "legacy-rushrush", "--tag", "v0.4.11", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func(got cosstore.MutablePointerCapability) (publish.Store, error) {
+		capability = got
 		return store, nil
 	}, &output)
 	if err != nil {
@@ -98,6 +100,9 @@ func TestRunLegacyPublishesOnlyLegacyPointer(t *testing.T) {
 	if _, ok := store.objects["channels/legacy-rushrush/latest.json"]; !ok {
 		t.Fatal("legacy CLI did not write legacy pointer")
 	}
+	if capability != cosstore.MutablePointerLegacyRushRush {
+		t.Fatalf("legacy capability = %v", capability)
+	}
 	if !strings.Contains(output.String(), "channels/legacy-rushrush/latest.json") {
 		t.Fatalf("output = %q, want legacy pointer", output.String())
 	}
@@ -106,7 +111,7 @@ func TestRunLegacyPublishesOnlyLegacyPointer(t *testing.T) {
 func TestRunRejectsInvalidPublishedTimestampBeforeCreatingStore(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	called := false
-	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "yesterday", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "yesterday", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func(_ cosstore.MutablePointerCapability) (publish.Store, error) {
 		called = true
 		return nil, errors.New("must not create store")
 	}, io.Discard)
@@ -122,7 +127,7 @@ func TestRunRejectsInvalidTagWithoutPublishing(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
-	err := run([]string{"--channel", "stable", "--tag", "v1.2.3+extra/path", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3+extra/path", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func(_ cosstore.MutablePointerCapability) (publish.Store, error) {
 		return store, nil
 	}, &output)
 	if err == nil {
@@ -140,7 +145,7 @@ func TestRunPrintsOnlyVerifiedIdentifiersAndOutcome(t *testing.T) {
 	asset, checksum, changelog := commandInputs(t)
 	store := newCommandStore()
 	var output bytes.Buffer
-	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func(_ cosstore.MutablePointerCapability) (publish.Store, error) {
 		return store, nil
 	}, &output)
 	if err != nil {
@@ -164,7 +169,7 @@ func TestRunReportsStableUnchangedWhenRepairingAnOlderRelease(t *testing.T) {
 	store.objects["channels/stable/latest.json"] = commandObject{body: prior, digest: hex.EncodeToString(digest[:])}
 	var output bytes.Buffer
 
-	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func() (publish.Store, error) {
+	err := run([]string{"--channel", "stable", "--tag", "v1.2.3", "--published-at", "2026-08-14T10:30:00Z", "--asset", asset, "--checksum", checksum, "--changelog", changelog}, func(_ cosstore.MutablePointerCapability) (publish.Store, error) {
 		return store, nil
 	}, &output)
 	if err != nil {

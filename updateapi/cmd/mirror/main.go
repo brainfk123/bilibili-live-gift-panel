@@ -32,10 +32,11 @@ type commandRunner interface {
 }
 
 type cosConfiguration struct {
-	Bucket    string
-	Region    string
-	SecretID  string
-	SecretKey string
+	Bucket         string
+	Region         string
+	SecretID       string
+	SecretKey      string
+	MutablePointer cosstore.MutablePointerCapability
 }
 
 type environmentLookup func(string) (string, bool)
@@ -155,6 +156,14 @@ func run(parent context.Context, args []string, lookup environmentLookup, factor
 
 	configuration := cosConfiguration{}
 	if !dryRun {
+		switch channel {
+		case release.ChannelStable:
+			configuration.MutablePointer = cosstore.MutablePointerStable
+		case release.ChannelLegacyRushRush:
+			configuration.MutablePointer = cosstore.MutablePointerLegacyRushRush
+		default:
+			return finishFailure(commandFailure(stageArguments, errors.New("channel capability is invalid")))
+		}
 		var ok bool
 		if configuration.Bucket, ok = requiredEnvironment(lookup, "COS_BUCKET"); !ok {
 			return finishFailure(commandFailure(stageConfiguration, errors.New("COS configuration is incomplete")))
@@ -257,7 +266,7 @@ func newProductionRunner(stateDirectory string, configuration cosConfiguration) 
 		Fetcher: fetcher,
 		State:   state,
 		NewPublisher: func() (mirror.Publisher, error) {
-			store, err := cosstore.New(configuration.Bucket, configuration.Region, configuration.SecretID, configuration.SecretKey, nil)
+			store, err := cosstore.New(configuration.Bucket, configuration.Region, configuration.SecretID, configuration.SecretKey, configuration.MutablePointer, nil)
 			if err != nil {
 				return nil, errors.New("COS publisher configuration is invalid")
 			}

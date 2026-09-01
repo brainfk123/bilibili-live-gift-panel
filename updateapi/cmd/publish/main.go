@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	err := run(os.Args[1:], func() (publish.Store, error) {
-		return cosstore.New(os.Getenv("COS_BUCKET"), os.Getenv("COS_REGION"), os.Getenv("COS_SECRET_ID"), os.Getenv("COS_SECRET_KEY"), nil)
+	err := run(os.Args[1:], func(capability cosstore.MutablePointerCapability) (publish.Store, error) {
+		return cosstore.New(os.Getenv("COS_BUCKET"), os.Getenv("COS_REGION"), os.Getenv("COS_SECRET_ID"), os.Getenv("COS_SECRET_KEY"), capability, nil)
 	}, os.Stdout)
 	if err != nil {
 		log.Print(publishFailureMessage(err))
@@ -35,7 +35,7 @@ func publishFailureMessage(err error) string {
 	return "publish failed"
 }
 
-func run(args []string, newStore func() (publish.Store, error), output io.Writer) error {
+func run(args []string, newStore func(cosstore.MutablePointerCapability) (publish.Store, error), output io.Writer) error {
 	input := publish.Input{}
 	var channelValue string
 	var publishedAt string
@@ -62,7 +62,11 @@ func run(args []string, newStore func() (publish.Store, error), output io.Writer
 		return errors.New("--published-at must use RFC3339")
 	}
 	input.Channel = channel
-	store, err := newStore()
+	capability := cosstore.MutablePointerStable
+	if channel == release.ChannelLegacyRushRush {
+		capability = cosstore.MutablePointerLegacyRushRush
+	}
+	store, err := newStore(capability)
 	if err != nil {
 		return errors.New("COS configuration is invalid")
 	}
