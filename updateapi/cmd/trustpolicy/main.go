@@ -19,11 +19,13 @@ import (
 
 const (
 	maxCandidateBytes            = 256 << 10
-	verifyBundleSchemaVersion    = 1
+	maxReviewedSPKIBytes         = 4 << 10
+	verifyBundleSchemaVersion    = 2
 	maxVerifyBundleEnvelopeBytes = 512 << 10
 )
 
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var sha256Input = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type environmentLookup func(string) (string, bool)
 type signerFactory func(region, expectedSPKISHA256, providerMode string) (trustpolicy.Signer, error)
@@ -48,14 +50,17 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	if output == nil {
 		output = io.Discard
 	}
+	if now == nil {
+		now = time.Now
+	}
 	if args[0] == "verify-bundle" {
 		return runVerifyBundle(args[1:], output, bundlefs.ReadCommittedBundle)
 	}
+	if args[0] == "validate-candidate" {
+		return runValidateCandidate(args[1:], output, now)
+	}
 	if lookup == nil || factory == nil || args[0] != "sign" {
 		return errCommand
-	}
-	if now == nil {
-		now = time.Now
 	}
 
 	var candidatePath string
@@ -138,16 +143,58 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	return nil
 }
 
+func runValidateCandidate(args []string, output io.Writer, now func() time.Time) error {
+	var candidatePath string
+	var candidateEpoch uint64
+	var expectedPreviousEpoch uint64
+	flags := flag.NewFlagSet("trustpolicy validate-candidate", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&candidatePath, "candidate", "", "path to the complete signed-object candidate")
+	flags.Uint64Var(&candidateEpoch, "candidate-epoch", 0, "exact declared candidate epoch")
+	flags.Uint64Var(&expectedPreviousEpoch, "expected-previous-epoch", 0, "exact previously accepted policy epoch")
+	if hasRepeatedRegisteredFlag(args, flags) {
+		return errCommand
+	}
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 ||
+		!requiredFlagsPresent(flags, "candidate", "candidate-epoch", "expected-previous-epoch") || candidateEpoch == 0 {
+		return errCommand
+	}
+	candidateBytes, err := readReviewedPublicFile(candidatePath, maxCandidateBytes)
+	if err != nil {
+		return errCommand
+	}
+	candidate, err := trustpolicy.ParseCandidate(candidateBytes, trustpolicy.CandidateOptions{
+		ExpectedPreviousEpoch: expectedPreviousEpoch,
+		Now:                   now().UTC(),
+	})
+	if err != nil || candidate.Epoch != candidateEpoch {
+		return errCommand
+	}
+	if written, err := io.WriteString(output, "publisher policy candidate valid\n"); err != nil || written != len("publisher policy candidate valid\n") {
+		return errCommand
+	}
+	return nil
+}
+
 type verifyBundleArtifact struct {
+	Name        string `json:"name"`
 	Length      uint64 `json:"length"`
 	SHA256      string `json:"sha256"`
 	BytesBase64 string `json:"bytesBase64"`
 }
 
+type verifyBundleVerification struct {
+	Epoch                 uint64 `json:"epoch"`
+	ExpectedPreviousEpoch uint64 `json:"expectedPreviousEpoch"`
+	SPKISHA256            string `json:"spkiSha256"`
+}
+
 type verifyBundleEnvelope struct {
-	SchemaVersion uint64               `json:"schemaVersion"`
-	Policy        verifyBundleArtifact `json:"policy"`
-	Audit         verifyBundleArtifact `json:"audit"`
+	SchemaVersion uint64                   `json:"schemaVersion"`
+	Verification  verifyBundleVerification `json:"verification"`
+	Commit        trustpolicy.BundleCommit `json:"commit"`
+	Policy        verifyBundleArtifact     `json:"policy"`
+	Audit         verifyBundleArtifact     `json:"audit"`
 }
 
 type committedBundleReader func(string, string) (trustpolicy.CommittedBundle, error)
@@ -161,28 +208,52 @@ func runVerifyBundle(args []string, output io.Writer, reader committedBundleRead
 	}
 	var policyPath string
 	var auditPath string
+	var reviewedSPKIPath string
+	var expectedSPKISHA256 string
+	var expectedPreviousEpoch uint64
 	flags := flag.NewFlagSet("trustpolicy verify-bundle", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&policyPath, "policy", "", "committed policy path")
 	flags.StringVar(&auditPath, "audit", "", "committed audit path")
+	flags.StringVar(&reviewedSPKIPath, "reviewed-spki", "", "reviewed P-256 SPKI DER path")
+	flags.StringVar(&expectedSPKISHA256, "expected-spki-sha256", "", "reviewed SPKI SHA-256")
+	flags.Uint64Var(&expectedPreviousEpoch, "expected-previous-epoch", 0, "exact previously accepted policy epoch")
 	if hasRepeatedRegisteredFlag(args, flags) {
 		return errCommand
 	}
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !requiredFlagsPresent(flags, "policy", "audit") {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 ||
+		!requiredFlagsPresent(flags, "policy", "audit", "reviewed-spki", "expected-spki-sha256", "expected-previous-epoch") ||
+		!sha256Input.MatchString(expectedSPKISHA256) {
 		return errCommand
 	}
 	committed, err := reader(policyPath, auditPath)
 	if err != nil {
 		return errCommand
 	}
+	reviewedSPKI, err := readReviewedPublicFile(reviewedSPKIPath, maxReviewedSPKIBytes)
+	if err != nil {
+		return errCommand
+	}
+	epoch, err := trustpolicy.VerifySignedPolicy(committed.Policy, reviewedSPKI, expectedSPKISHA256, expectedPreviousEpoch, time.Now().UTC())
+	if err != nil {
+		return errCommand
+	}
 	envelope, err := json.Marshal(verifyBundleEnvelope{
 		SchemaVersion: verifyBundleSchemaVersion,
+		Verification: verifyBundleVerification{
+			Epoch:                 epoch,
+			ExpectedPreviousEpoch: expectedPreviousEpoch,
+			SPKISHA256:            expectedSPKISHA256,
+		},
+		Commit: committed.Commit,
 		Policy: verifyBundleArtifact{
+			Name:        committed.Commit.Policy.Name,
 			Length:      committed.Commit.Policy.Length,
 			SHA256:      committed.Commit.Policy.SHA256,
 			BytesBase64: base64.StdEncoding.EncodeToString(committed.Policy),
 		},
 		Audit: verifyBundleArtifact{
+			Name:        committed.Commit.Audit.Name,
 			Length:      committed.Commit.Audit.Length,
 			SHA256:      committed.Commit.Audit.SHA256,
 			BytesBase64: base64.StdEncoding.EncodeToString(committed.Audit),
@@ -196,6 +267,44 @@ func runVerifyBundle(args []string, output io.Writer, reader committedBundleRead
 		return errCommand
 	}
 	return nil
+}
+
+func readReviewedPublicFile(path string, maximum int64) ([]byte, error) {
+	if strings.TrimSpace(path) == "" || maximum <= 0 {
+		return nil, errCommand
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, errCommand
+	}
+	absolute = filepath.Clean(absolute)
+	pathInfo, err := os.Lstat(absolute)
+	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 || pathInfo.Size() <= 0 || pathInfo.Size() > maximum {
+		return nil, errCommand
+	}
+	file, err := os.Open(absolute)
+	if err != nil {
+		return nil, errCommand
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != pathInfo.Size() || !os.SameFile(pathInfo, info) {
+		_ = file.Close()
+		return nil, errCommand
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(data)) != info.Size() || int64(len(data)) > maximum {
+		_ = file.Close()
+		return nil, errCommand
+	}
+	finalInfo, err := os.Lstat(absolute)
+	if err != nil || finalInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, finalInfo) {
+		_ = file.Close()
+		return nil, errCommand
+	}
+	if err := file.Close(); err != nil {
+		return nil, errCommand
+	}
+	return data, nil
 }
 
 func hasRepeatedRegisteredFlag(args []string, flags *flag.FlagSet) bool {

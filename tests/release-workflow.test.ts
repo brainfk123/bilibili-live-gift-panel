@@ -17,6 +17,21 @@ interface ReleaseStep {
   'working-directory'?: string;
 }
 
+interface WorkflowJob {
+  environment?: string;
+  env?: Record<string, string>;
+  if?: string;
+  needs?: string | string[];
+  permissions?: Record<string, string>;
+  steps?: ReleaseStep[];
+}
+
+interface PublisherRotationWorkflow {
+  on?: Record<string, { inputs?: Record<string, Record<string, unknown>> }>;
+  permissions?: Record<string, string>;
+  jobs?: Record<string, WorkflowJob>;
+}
+
 const auditedSetupMSYS2Commit = '66cd2cce69caa17b53920067426061ca1de3a884';
 
 function releaseWorkflow() {
@@ -40,6 +55,30 @@ function releaseWorkflow() {
   const steps = release?.steps;
   expect(Array.isArray(steps)).toBe(true);
   return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [] };
+}
+
+function publisherRotationWorkflow(): PublisherRotationWorkflow {
+  const source = readFileSync(new URL('../.github/workflows/publisher-rotation.yml', import.meta.url), 'utf8');
+  const document = parseDocument(source);
+  expect(document.errors).toEqual([]);
+  return document.toJS() as PublisherRotationWorkflow;
+}
+
+function jobSteps(job: WorkflowJob | undefined): ReleaseStep[] {
+  expect(Array.isArray(job?.steps)).toBe(true);
+  return job?.steps ?? [];
+}
+
+function semanticCommands(job: WorkflowJob | undefined): string[] {
+  return jobSteps(job).flatMap((step) => {
+    const commands: string[] = [];
+    if (step.uses) commands.push(`uses:${step.uses.split('@', 1)[0]}`);
+    for (const line of step.run?.split(/\r?\n/) ?? []) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#')) commands.push(`run:${trimmed}`);
+    }
+    return commands;
+  });
 }
 
 function stepIndex(steps: ReleaseStep[], name: string): number {
@@ -650,6 +689,107 @@ describe('release workflow supply-chain contract', () => {
             .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
         }
       }
+    }
+  });
+});
+
+describe('publisher rotation workflow contract', () => {
+  it('pins every external Action to one immutable commit', () => {
+    const workflow = publisherRotationWorkflow();
+    const actions = Object.values(workflow.jobs ?? {}).flatMap(jobSteps)
+      .map((step) => step.uses)
+      .filter((uses): uses is string => typeof uses === 'string');
+    expect(actions.length).toBeGreaterThan(0);
+    for (const uses of actions) expect(uses).toMatch(/^[^@\s]+@[0-9a-f]{40}$/);
+  });
+
+  it('has one manual trigger with explicit epoch transition and pointer choice', () => {
+    const workflow = publisherRotationWorkflow();
+    expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
+    const inputs = workflow.on?.workflow_dispatch?.inputs;
+    expect(inputs).toEqual({
+      candidate_epoch: expect.objectContaining({ required: true, type: 'number' }),
+      expected_previous_epoch: expect.objectContaining({ required: true, type: 'number' }),
+      advance_discovery: expect.objectContaining({ required: true, type: 'boolean', default: false }),
+    });
+  });
+
+  it('separates validation, KMS signing, immutable publication, and optional discovery advancement', () => {
+    const workflow = publisherRotationWorkflow();
+    const jobs = workflow.jobs ?? {};
+    expect(Object.keys(jobs)).toEqual([
+      'validate-candidate',
+      'sign-policy',
+      'publish-immutable',
+      'advance-discovery',
+    ]);
+    expect(jobs['validate-candidate']?.environment).toBeUndefined();
+    for (const name of ['sign-policy', 'publish-immutable', 'advance-discovery']) {
+      expect(jobs[name]?.environment, name).toBe('publisher-rotation');
+    }
+    expect(jobs['sign-policy']?.needs).toBe('validate-candidate');
+    expect(jobs['publish-immutable']?.needs).toBe('sign-policy');
+    expect(jobs['advance-discovery']?.needs).toBe('publish-immutable');
+    expect(jobs['advance-discovery']?.if).toBe('${{ inputs.advance_discovery == true }}');
+  });
+
+  it('grants OIDC only to exchange jobs and GitHub write only to dedicated trust publication jobs', () => {
+    const workflow = publisherRotationWorkflow();
+    const jobs = workflow.jobs ?? {};
+    expect(workflow.permissions).toEqual({ contents: 'read' });
+    expect(jobs['validate-candidate']?.permissions).toEqual({ contents: 'read' });
+    expect(jobs['sign-policy']?.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(jobs['publish-immutable']?.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
+    expect(jobs['advance-discovery']?.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
+
+    const signingSteps = jobSteps(jobs['sign-policy']);
+    const sign = signingSteps.find((step) => step.name === 'Sign publisher policy');
+    expect(sign?.env).toMatchObject({
+      GIFT_PANEL_KMS_PROVIDER_MODE: 'environment-session',
+      TENCENTCLOUD_SECRET_ID: '${{ steps.kms-session.outputs.secret-id }}',
+      TENCENTCLOUD_SECRET_KEY: '${{ steps.kms-session.outputs.secret-key }}',
+      TENCENTCLOUD_SESSION_TOKEN: '${{ steps.kms-session.outputs.session-token }}',
+    });
+    expect(sign?.env).not.toHaveProperty('GH_TOKEN');
+    expect(Object.keys(sign?.env ?? {}).some((name) => name.startsWith('COS_'))).toBe(false);
+
+    for (const jobName of ['publish-immutable', 'advance-discovery']) {
+      const publish = jobSteps(jobs[jobName]).find((step) => step.env?.COS_BUCKET !== undefined);
+      expect(publish?.env).toMatchObject({
+        TENCENTCLOUD_SECRET_ID: '${{ steps.cos-session.outputs.secret-id }}',
+        TENCENTCLOUD_SECRET_KEY: '${{ steps.cos-session.outputs.secret-key }}',
+        TENCENTCLOUD_SESSION_TOKEN: '${{ steps.cos-session.outputs.session-token }}',
+      });
+      expect(Object.values(publish?.env ?? {}).some((value) => value.includes('secrets.'))).toBe(false);
+    }
+  });
+
+  it('runs only the policy CLI and publisher and cannot build or sign an executable', () => {
+    const workflow = publisherRotationWorkflow();
+    const commands = Object.values(workflow.jobs ?? {}).flatMap(semanticCommands);
+    expect(commands.some((command) => command.includes('./cmd/trustpolicy'))).toBe(true);
+    expect(commands.some((command) => command.includes('scripts/publish-trust-policy.mjs'))).toBe(true);
+    for (const command of commands) {
+      expect(command).not.toMatch(/(?:sign-evsign|build-go|gift-panel\.exe|release-stable|legacy-rushrush)/i);
+    }
+  });
+
+  it('keeps the ordinary release workflow unable to call KMS or the legacy pointer', () => {
+    const { release } = releaseWorkflow();
+    const commands = semanticCommands(release as WorkflowJob);
+    expect(commands.some((command) => /trustpolicy.*\bsign\b/i.test(command))).toBe(false);
+    expect(commands.some((command) => /kms|legacy-rushrush/i.test(command))).toBe(false);
+    expect(release?.env ?? {}).not.toHaveProperty('GIFT_PANEL_KMS_PROVIDER_MODE');
+  });
+
+  it('requires reviewed public-root configuration instead of embedding a production digest', () => {
+    const workflow = publisherRotationWorkflow();
+    const allSteps = Object.values(workflow.jobs ?? {}).flatMap(jobSteps);
+    const verificationSteps = allSteps.filter((step) => step.env?.PUBLISHER_ROTATION_SPKI_SHA256 !== undefined);
+    expect(verificationSteps.length).toBeGreaterThan(0);
+    for (const step of verificationSteps) {
+      expect(step.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');
+      expect(step.env?.PUBLISHER_ROTATION_SPKI_PATH).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_PATH }}');
     }
   });
 });

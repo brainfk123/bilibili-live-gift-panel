@@ -244,6 +244,61 @@ func parseReviewedPublicKey(der []byte, expectedHex string) (*ecdsa.PublicKey, e
 	return publicKey, nil
 }
 
+// VerifySignedPolicy independently validates the exact client envelope against
+// one explicitly reviewed P-256 SPKI and one exact epoch transition.
+func VerifySignedPolicy(policy, reviewedSPKI []byte, expectedSPKISHA256 string, expectedPreviousEpoch uint64, now time.Time) (uint64, error) {
+	if len(policy) == 0 || len(policy) > maxPolicyBytes || len(reviewedSPKI) == 0 {
+		return 0, errSignatureInvalid
+	}
+	if err := validateCandidateJSON(policy); err != nil {
+		return 0, errSignatureInvalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(policy))
+	decoder.DisallowUnknownFields()
+	var document committedPolicyDocument
+	if err := decoder.Decode(&document); err != nil || len(document.Signed) == 0 || len(document.Signatures) != 1 ||
+		document.Signatures[0].Algorithm != clientAlgorithm {
+		return 0, errSignatureInvalid
+	}
+	candidate, err := ParseCandidate(document.Signed, CandidateOptions{
+		ExpectedPreviousEpoch: expectedPreviousEpoch,
+		Now:                   resolvedNow(now),
+	})
+	if err != nil {
+		return 0, errSignatureInvalid
+	}
+	canonicalSigned, err := CanonicalSigned(candidate)
+	if err != nil || !bytes.Equal(canonicalSigned, document.Signed) {
+		return 0, errSignatureInvalid
+	}
+	signature, err := base64.StdEncoding.Strict().DecodeString(document.Signatures[0].Signature)
+	if err != nil || !validP256DERSignature(signature) {
+		return 0, errSignatureInvalid
+	}
+	signatures, err := json.Marshal(document.Signatures)
+	if err != nil {
+		return 0, errSignatureInvalid
+	}
+	want := make([]byte, 0, len(canonicalSigned)+len(signatures)+28)
+	want = append(want, `{"signed":`...)
+	want = append(want, canonicalSigned...)
+	want = append(want, `,"signatures":`...)
+	want = append(want, signatures...)
+	want = append(want, '}')
+	if !bytes.Equal(want, policy) {
+		return 0, errSignatureInvalid
+	}
+	publicKey, err := parseReviewedPublicKey(reviewedSPKI, expectedSPKISHA256)
+	if err != nil {
+		return 0, errSignatureInvalid
+	}
+	digest := sha256.Sum256(canonicalSigned)
+	if !ecdsa.VerifyASN1(publicKey, digest[:], signature) {
+		return 0, errSignatureInvalid
+	}
+	return candidate.Epoch, nil
+}
+
 func validateCandidate(candidate Candidate, expectedPrevious uint64, now time.Time) error {
 	if expectedPrevious == math.MaxUint64 || candidate.Epoch == 0 || candidate.Epoch != expectedPrevious+1 {
 		return errCandidateInvalid

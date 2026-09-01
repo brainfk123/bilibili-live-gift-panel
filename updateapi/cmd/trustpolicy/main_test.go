@@ -86,6 +86,39 @@ func TestKMSSignerCLIWritesCreateOnlyPrivateOutputs(t *testing.T) {
 	}
 }
 
+func TestValidateCandidateRequiresExactDeclaredEpochWithoutProviderDependencies(t *testing.T) {
+	candidatePath := filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json")
+	for _, test := range []struct {
+		name      string
+		epoch     string
+		previous  string
+		wantValid bool
+	}{
+		{name: "exact transition", epoch: "1", previous: "0", wantValid: true},
+		{name: "declared epoch mismatch", epoch: "2", previous: "0"},
+		{name: "previous epoch mismatch", epoch: "1", previous: "1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := run(context.Background(), []string{
+				"validate-candidate",
+				"--candidate", candidatePath,
+				"--candidate-epoch", test.epoch,
+				"--expected-previous-epoch", test.previous,
+			}, nil, nil, &output, func() time.Time { return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC) })
+			if test.wantValid {
+				if err != nil || output.String() != "publisher policy candidate valid\n" {
+					t.Fatalf("validate candidate = (%q, %v), want fixed success", output.String(), err)
+				}
+				return
+			}
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("invalid declared transition = (%q, %v), want silent failure", output.String(), err)
+			}
+		})
+	}
+}
+
 func TestKMSSignerCLIRefusesOverwriteBeforeSignerConstruction(t *testing.T) {
 	directory := newPrivateTestBase(t)
 	bundlePath := filepath.Join(directory, "signed-policy-bundle")
@@ -708,6 +741,11 @@ func snapshotBundlePath(t testing.TB, path string) bundlePathSnapshot {
 
 func testBundlePayload(t testing.TB, label string) ([]byte, []byte) {
 	t.Helper()
+	return testBundlePayloadWithSigner(t, label, newCommandSigner(t))
+}
+
+func testBundlePayloadWithSigner(t testing.TB, label string, signer *commandSigner) ([]byte, []byte) {
+	t.Helper()
 	candidateBytes, err := os.ReadFile(filepath.Join("..", "..", "testdata", "trustpolicy", "epoch-1-candidate.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -719,7 +757,6 @@ func testBundlePayload(t testing.TB, label string) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := newCommandSigner(t)
 	labelDigest := sha256.Sum256([]byte(label))
 	signed, audit, err := trustpolicy.Sign(context.Background(), signer, candidate, trustpolicy.SignOptions{
 		KeyID:                 "kms-key-id",
