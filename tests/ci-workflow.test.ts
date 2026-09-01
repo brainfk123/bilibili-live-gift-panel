@@ -117,11 +117,14 @@ describe('mainline CI workflow', () => {
     expect(commands(jobs['hosted-mysql'])).toContain('npm run test:hosted-mysql');
   });
 
-  it('fetches immutable historical release tags before every full Vitest run', () => {
+  it('prepares historical tags and UI assets before every full Vitest run', () => {
     const jobs = ciWorkflow().workflow.jobs ?? {};
     for (const name of ['hosted', 'windows-compat']) {
       const job = jobs[name];
-      expect(commands(job), name).toContain('npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2');
+      const jobCommands = commands(job);
+      const testIndex = jobCommands.indexOf('npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2');
+      expect(testIndex, name).toBeGreaterThanOrEqual(0);
+      expect(jobCommands.indexOf('npm run build:ui'), name).toBeLessThan(testIndex);
       expect(job?.steps?.find((step) => step.uses?.startsWith('actions/checkout@'))?.with, name)
         .toMatchObject({ 'fetch-depth': 0, 'persist-credentials': false });
     }

@@ -58,9 +58,9 @@ jobs:
             updateapi/go.sum
       - run: npm ci
       - run: npm exec -- playwright install --with-deps chromium
+      - run: npm run build:ui
       - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run typecheck
-      - run: npm run build:ui
       - run: npm run prepare:go-assets
       - run: npm run verify:go-linux-compile
       - run: npm run build:hosted
@@ -107,8 +107,8 @@ jobs:
           cache-dependency-path: goserver/go.sum
       - run: npm ci
       - run: npm exec -- playwright install chromium
-      - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run build:ui
+      - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run prepare:go-assets
       - run: go -C goserver test ./... -race -count=1
       - name: Build unsigned CI executable
