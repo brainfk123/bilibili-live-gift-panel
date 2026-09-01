@@ -10,9 +10,10 @@ all Go and npm caches used worktree-local directories.
 
 The tested source passed the local regression, policy, package, API, mirror,
 bundle, and workflow semantic gates described below. This is **not production
-Windows acceptance**: the locally built `v0.4.12`-shaped executable is unsigned,
-the Authenticode success paths are explicitly simulated, and no production
-service or release state was read or changed.
+Windows acceptance**: both the locally built `v0.4.12`-shaped outer executable
+and the extracted FFmpeg are unsigned, the Authenticode success paths are
+explicitly simulated, and no production service or release state was read or
+changed.
 
 No workflow was dispatched. No EVSign request, certificate-store change, KMS
 operation, COS or GitHub request, tag, Release, pointer, server, credential, or
@@ -90,7 +91,8 @@ revalidation. Only the external Authenticode identity/status callback was fake.
 
 | Evidence | Value |
 | --- | --- |
-| Actual Windows signature status | `NotSigned` |
+| Actual outer EXE Windows signature status | `NotSigned` |
+| Actual extracted FFmpeg Windows signature status | `NotSigned` |
 | Executable SHA-256 | `1188781a2e264f053d4cd4f8c94e740f6790979916c93b0f0955ed342b7c08c9` |
 | Executable size | `14,554,112` bytes |
 | Authenticode-covered PE SHA-256 | `27f9eec3f9062dbab24a07519066db8e57412113774021d5ce55fb7b18b27843` |
@@ -100,11 +102,12 @@ revalidation. Only the external Authenticode identity/status callback was fake.
 | Embedded FFmpeg version | `9.0` |
 | Embedded FFmpeg SHA-256 / size | `19247e960c50adcf107bc04e8a20435fd67d098e06b227d8772f0d1b8027e03c` / `6,209,536` bytes |
 | Embedded FFmpeg archive SHA-256 | `6773544556e0f821b51d59eff4e167d0c6a199b91d606a95a5d3a55056c38839` |
-| Test-signed FFmpeg manifest SHA-256 | `2f464bbea0de8131939cc384b84720b9966bf6829aff7dbccba18fca5d93891d` |
+| Test-only FFmpeg manifest SHA-256 (generated with simulated Authenticode evidence) | `2f464bbea0de8131939cc384b84720b9966bf6829aff7dbccba18fca5d93891d` |
 
-The value `Valid` in the local candidate evidence is therefore a simulated
-external result, not a claim about either executable's real Authenticode status.
-No self-signed root was installed into any Windows certificate store.
+The Authenticode metadata in the test-only FFmpeg manifest and the value
+`Valid` in the local candidate evidence were generated from simulated external
+results, not actual signatures. No self-signed root was installed into any
+Windows certificate store.
 
 ## Windows security matrix
 
@@ -253,8 +256,9 @@ script semantics; diagnostic bounds and redaction.
 **Simulated explicitly:** external Authenticode `Valid` status and certificate
 return; EVSign process success/failure; updater installer/restart/apply process
 callbacks; KMS `GetPublicKey`/sign responses and credentials; COS/GitHub HTTP
-adapters and workflow contexts. The package's actual `NotSigned` status was
-checked independently before the simulated candidate acceptance.
+adapters and workflow contexts. The outer EXE and extracted FFmpeg were each
+independently checked as actual `NotSigned` before the simulated candidate
+acceptance.
 
 **Deferred to approval-gated Task 14:** production KMS provisioning and dual
 SPKI review; production bootstrap/authorization policy signatures; real
