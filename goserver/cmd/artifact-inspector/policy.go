@@ -9,12 +9,12 @@ import (
 	"errors"
 	"flag"
 	"io"
-	"os"
 	"strconv"
 	"time"
 
 	"bilibili-live-gift-panel/internal/artifactinspect"
 	"bilibili-live-gift-panel/internal/certidentity"
+	"bilibili-live-gift-panel/internal/securefile"
 	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
@@ -50,7 +50,9 @@ type policyCommandEvidence struct {
 	artifactinspect.StablePolicyEvidence
 }
 
-func runVerifyPolicyWithInspector(args []string, output io.Writer, inspect func(string) (certidentity.Identity, error), now func() time.Time) error {
+type boundedReadHooks = securefile.ReadHooks
+
+func runVerifyPolicyWithInspector(args []string, output io.Writer, inspect func(string) (certidentity.Identity, error), now func() time.Time, readHooks ...map[string]boundedReadHooks) error {
 	if output == nil || inspect == nil || now == nil {
 		return errors.New("policy verifier is unavailable")
 	}
@@ -69,11 +71,21 @@ func runVerifyPolicyWithInspector(args []string, output io.Writer, inspect func(
 	if err != nil || epoch == 0 || *stableArtifact == "" || *stableTag == "" || *stableChannel != string(updatepolicy.ChannelStable) {
 		return errors.New("policy arguments invalid")
 	}
-	root, err := readBoundedRegularFile(*rootPath, 4<<10)
+	hooksFor := func(path string) *boundedReadHooks {
+		if len(readHooks) == 0 || readHooks[0] == nil {
+			return nil
+		}
+		hooks, ok := readHooks[0][path]
+		if !ok {
+			return nil
+		}
+		return &hooks
+	}
+	root, err := readBoundedRegularFile(*rootPath, 4<<10, hooksFor(*rootPath))
 	if err != nil {
 		return err
 	}
-	envelopeBytes, err := readBoundedRegularFile(*envelopePath, 512<<10)
+	envelopeBytes, err := readBoundedRegularFile(*envelopePath, 512<<10, hooksFor(*envelopePath))
 	if err != nil {
 		return err
 	}
@@ -133,23 +145,10 @@ func verifyEnvelopeArtifact(artifact verifiedBundleArtifact, committed verifiedB
 	return contents, nil
 }
 
-func readBoundedRegularFile(path string, maximum int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maximum {
-		return nil, errors.New("reviewed input is unavailable")
-	}
-	file, err := os.Open(path)
+func readBoundedRegularFile(path string, maximum int64, hooks *boundedReadHooks) ([]byte, error) {
+	contents, err := securefile.ReadBoundedRegular(path, maximum, hooks)
 	if err != nil {
-		return nil, errors.New("reviewed input is unavailable")
-	}
-	contents, readErr := io.ReadAll(io.LimitReader(file, maximum+1))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || int64(len(contents)) != info.Size() || int64(len(contents)) > maximum {
 		return nil, errors.New("reviewed input is invalid")
-	}
-	final, err := os.Lstat(path)
-	if err != nil || final.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, final) {
-		return nil, errors.New("reviewed input changed")
 	}
 	return contents, nil
 }

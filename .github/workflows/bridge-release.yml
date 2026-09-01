@@ -324,7 +324,7 @@ jobs:
           if ($checkedManifest.version -cne '9.0' -or $checkedManifest.authenticode -ne $true -or [string]::IsNullOrWhiteSpace([string]$checkedManifest.signer_subject)) {
             throw 'Checked-in FFmpeg component manifest is incomplete.'
           }
-          $identity = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json
+          $identity = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --kind fixed --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $identity.schema -ne 2 -or $identity.fingerprint -cne $checkedManifest.component_fingerprint) {
             throw 'Fixed FFmpeg component identity does not match the checked-in reviewed manifest.'
           }
@@ -357,7 +357,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg component attestation verification failed.' }
           }
           $componentManifest = Get-Content "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
           if ($LASTEXITCODE -ne 0) { throw 'Fixed signed FFmpeg component verification failed.' }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$componentDirectory/manifest.json").Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
               (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/manifest.json).Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or

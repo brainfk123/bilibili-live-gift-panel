@@ -11,12 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"bilibili-live-gift-panel/internal/certidentity"
+	"bilibili-live-gift-panel/internal/securefile"
 	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
@@ -80,14 +79,16 @@ type StablePolicyEvidence struct {
 }
 
 func VerifyStaticArtifact(options VerifyStaticOptions) (ArtifactEvidence, error) {
-	unsigned, err := os.ReadFile(options.UnsignedPath)
+	unsigned, err := securefile.ReadBoundedRegular(options.UnsignedPath, 128<<20, nil)
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("unsigned PE is unavailable")
 	}
-	signed, err := os.ReadFile(options.SignedPath)
+	signedSnapshot, err := securefile.SnapshotRegular(options.SignedPath, 128<<20, "gift-panel-static-inspector-", "signed.exe")
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("signed PE is unavailable")
 	}
+	defer signedSnapshot.Close()
+	signed := signedSnapshot.Bytes
 	unsignedDigest, err := AuthenticodeContentSHA256(unsigned)
 	if err != nil {
 		return ArtifactEvidence{}, err
@@ -101,11 +102,11 @@ func VerifyStaticArtifact(options VerifyStaticOptions) (ArtifactEvidence, error)
 	if !versionOK || !commitOK {
 		return ArtifactEvidence{}, errors.New("static artifact version binding is invalid")
 	}
-	archive, err := os.ReadFile(options.FFmpegArchivePath)
+	archive, err := securefile.ReadBoundedRegular(options.FFmpegArchivePath, 40<<20, nil)
 	if err != nil {
 		return ArtifactEvidence{}, err
 	}
-	manifestBytes, err := os.ReadFile(options.FFmpegManifestPath)
+	manifestBytes, err := securefile.ReadBoundedRegular(options.FFmpegManifestPath, 64<<10, nil)
 	if err != nil {
 		return ArtifactEvidence{}, err
 	}
@@ -130,35 +131,39 @@ func VerifyStaticArtifact(options VerifyStaticOptions) (ArtifactEvidence, error)
 	if inspect == nil {
 		inspect = InspectAuthenticodeFile
 	}
-	outer, err := inspect(options.SignedPath)
+	outer, err := inspect(signedSnapshot.Path)
 	if err != nil || outer != options.ExpectedIdentity {
 		return ArtifactEvidence{}, errors.New("static outer identity is invalid")
 	}
-	root, err := os.MkdirTemp("", "gift-panel-static-inspector-")
-	if err != nil {
-		return ArtifactEvidence{}, err
+	if err := signedSnapshot.Revalidate(); err != nil {
+		return ArtifactEvidence{}, errors.New("static outer snapshot changed during Authenticode inspection")
 	}
-	defer os.RemoveAll(root)
-	ffmpegPath := filepath.Join(root, "ffmpeg.exe")
-	if os.WriteFile(ffmpegPath, ffmpeg, 0o600) != nil {
+	ffmpegSnapshot, err := securefile.SnapshotBytes(ffmpeg, "gift-panel-static-ffmpeg-", "ffmpeg.exe")
+	if err != nil {
 		return ArtifactEvidence{}, errors.New("static FFmpeg inspection failed")
 	}
-	inner, err := inspect(ffmpegPath)
+	defer ffmpegSnapshot.Close()
+	inner, err := inspect(ffmpegSnapshot.Path)
 	if err != nil || inner != naisNetIdentity {
 		return ArtifactEvidence{}, errors.New("static FFmpeg identity is invalid")
+	}
+	if err := ffmpegSnapshot.Revalidate(); err != nil {
+		return ArtifactEvidence{}, errors.New("static FFmpeg snapshot changed during Authenticode inspection")
 	}
 	return ArtifactEvidence{Version: options.Version, Commit: options.Commit, PEContentSHA256: signedDigest, OuterIdentity: outer, FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: inner}, nil
 }
 
 func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error) {
-	unsigned, err := os.ReadFile(options.UnsignedPath)
+	unsigned, err := securefile.ReadBoundedRegular(options.UnsignedPath, 128<<20, nil)
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("unsigned PE is unavailable")
 	}
-	signed, err := os.ReadFile(options.SignedPath)
+	signedSnapshot, err := securefile.SnapshotRegular(options.SignedPath, 128<<20, "gift-panel-artifact-inspector-", "signed.exe")
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("signed PE is unavailable")
 	}
+	defer signedSnapshot.Close()
+	signed := signedSnapshot.Bytes
 	unsignedDigest, err := AuthenticodeContentSHA256(unsigned)
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("unsigned PE content is invalid")
@@ -173,11 +178,11 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 		return ArtifactEvidence{}, errors.New("signed artifact version, tag, or commit binding is invalid")
 	}
 
-	rootDER, err := os.ReadFile(options.RootSPKIPath)
+	rootDER, err := securefile.ReadBoundedRegular(options.RootSPKIPath, 4<<10, nil)
 	if err != nil || sha256HexBytes(rootDER) != options.ExpectedRootSHA256 {
 		return ArtifactEvidence{}, errors.New("reviewed trust root is invalid")
 	}
-	policy, err := os.ReadFile(options.PolicyPath)
+	policy, err := securefile.ReadBoundedRegular(options.PolicyPath, 256<<10, nil)
 	if err != nil || sha256HexBytes(policy) != options.ExpectedPolicySHA256 {
 		return ArtifactEvidence{}, errors.New("reviewed trust policy is invalid")
 	}
@@ -199,11 +204,11 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 		return ArtifactEvidence{}, err
 	}
 
-	archive, err := os.ReadFile(options.FFmpegArchivePath)
+	archive, err := securefile.ReadBoundedRegular(options.FFmpegArchivePath, 40<<20, nil)
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("reviewed FFmpeg archive is unavailable")
 	}
-	manifestBytes, err := os.ReadFile(options.FFmpegManifestPath)
+	manifestBytes, err := securefile.ReadBoundedRegular(options.FFmpegManifestPath, 64<<10, nil)
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("reviewed FFmpeg manifest is unavailable")
 	}
@@ -226,22 +231,24 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 		return ArtifactEvidence{}, errors.New("reviewed FFmpeg archive does not match manifest")
 	}
 
-	outerIdentity, err := inspect(options.SignedPath)
+	outerIdentity, err := inspect(signedSnapshot.Path)
 	if err != nil || outerIdentity != rushRushIdentity {
 		return ArtifactEvidence{}, errors.New("signed outer Authenticode identity is invalid")
 	}
-	temporaryRoot, err := os.MkdirTemp("", "gift-panel-artifact-inspector-")
-	if err != nil {
-		return ArtifactEvidence{}, errors.New("FFmpeg inspection workspace is unavailable")
+	if err := signedSnapshot.Revalidate(); err != nil {
+		return ArtifactEvidence{}, errors.New("signed outer snapshot changed during Authenticode inspection")
 	}
-	defer os.RemoveAll(temporaryRoot)
-	ffmpegPath := filepath.Join(temporaryRoot, "ffmpeg.exe")
-	if err := os.WriteFile(ffmpegPath, ffmpeg, 0o600); err != nil {
+	ffmpegSnapshot, err := securefile.SnapshotBytes(ffmpeg, "gift-panel-artifact-ffmpeg-", "ffmpeg.exe")
+	if err != nil {
 		return ArtifactEvidence{}, errors.New("FFmpeg inspection file is unavailable")
 	}
-	ffmpegIdentity, err := inspect(ffmpegPath)
+	defer ffmpegSnapshot.Close()
+	ffmpegIdentity, err := inspect(ffmpegSnapshot.Path)
 	if err != nil || ffmpegIdentity != naisNetIdentity {
 		return ArtifactEvidence{}, errors.New("embedded FFmpeg Authenticode identity is invalid")
+	}
+	if err := ffmpegSnapshot.Revalidate(); err != nil {
+		return ArtifactEvidence{}, errors.New("embedded FFmpeg snapshot changed during Authenticode inspection")
 	}
 
 	return ArtifactEvidence{
@@ -255,20 +262,21 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 }
 
 func VerifyStableArtifactPolicy(options StablePolicyOptions) (StablePolicyEvidence, error) {
-	stableSHA256, err := hashBoundedRegularFile(options.ArtifactPath, 128<<20)
+	stableSnapshot, err := securefile.SnapshotRegular(options.ArtifactPath, 128<<20, "gift-panel-stable-inspector-", "stable.exe")
 	if err != nil {
 		return StablePolicyEvidence{}, errors.New("stable convergence artifact is invalid")
 	}
+	defer stableSnapshot.Close()
+	stableSHA256 := sha256HexBytes(stableSnapshot.Bytes)
 	inspect := options.InspectAuthenticode
 	if inspect == nil {
 		inspect = InspectAuthenticodeFile
 	}
-	stableIdentity, err := inspect(options.ArtifactPath)
+	stableIdentity, err := inspect(stableSnapshot.Path)
 	if err != nil {
 		return StablePolicyEvidence{}, errors.New("stable convergence Authenticode is invalid")
 	}
-	stableSHA256AfterInspection, err := hashBoundedRegularFile(options.ArtifactPath, 128<<20)
-	if err != nil || stableSHA256AfterInspection != stableSHA256 {
+	if err := stableSnapshot.Revalidate(); err != nil {
 		return StablePolicyEvidence{}, errors.New("stable convergence artifact changed during Authenticode inspection")
 	}
 	epoch, err := VerifyStablePolicy(options.RootDER, options.PolicyBytes, options.ExpectedEpoch, updatepolicy.ArtifactIdentity{
@@ -281,31 +289,6 @@ func VerifyStableArtifactPolicy(options StablePolicyOptions) (StablePolicyEviden
 		PolicyEpoch: epoch, PolicySHA256: sha256HexBytes(options.PolicyBytes), StableTag: options.Tag,
 		StableChannel: options.Channel, StableArtifactSHA256: stableSHA256, StableIdentity: stableIdentity,
 	}, nil
-}
-
-func hashBoundedRegularFile(path string, maximum int64) (string, error) {
-	if maximum <= 0 {
-		return "", errors.New("artifact size policy is invalid")
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maximum {
-		return "", errors.New("artifact is unavailable")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return "", errors.New("artifact is unavailable")
-	}
-	hasher := sha256.New()
-	written, copyErr := io.Copy(hasher, io.LimitReader(file, maximum+1))
-	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil || written != info.Size() || written > maximum {
-		return "", errors.New("artifact read is invalid")
-	}
-	final, err := os.Lstat(path)
-	if err != nil || final.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, final) {
-		return "", errors.New("artifact changed during inspection")
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func extractSingleFFmpeg(archive []byte, expectedSize int64) ([]byte, error) {

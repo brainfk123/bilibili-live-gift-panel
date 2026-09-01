@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -67,6 +68,57 @@ func TestVerifyPolicyCommandRejectsDuplicateMachineEnvelopeFields(t *testing.T) 
 		return time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	}); err == nil {
 		t.Fatal("duplicate machine-envelope field was accepted")
+	}
+}
+
+func TestVerifyPolicyCommandRejectsRootAndEnvelopeSymlinksWithoutTrustedOutput(t *testing.T) {
+	for _, flagName := range []string{"--root-spki", "--verified-bundle"} {
+		t.Run(flagName, func(t *testing.T) {
+			args, _ := stablePolicyCommandFixture(t)
+			path := commandArgument(args, flagName)
+			realPath := path + ".real"
+			if err := os.Rename(path, realPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(realPath, path); err != nil {
+				t.Skipf("symlink creation unavailable: %v", err)
+			}
+			var output bytes.Buffer
+			err := runVerifyPolicyWithInspector(args, &output, func(string) (certidentity.Identity, error) {
+				return certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}, nil
+			}, func() time.Time { return time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC) })
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("symlinked reviewed input produced trusted output: error=%v output=%q", err, output.String())
+			}
+		})
+	}
+}
+
+func TestVerifyPolicyCommandPreventsRootAndEnvelopeSwapRestoreWhileOpen(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the production Authenticode workflow is Windows-only and relies on Windows share-mode locking")
+	}
+	for _, flagName := range []string{"--root-spki", "--verified-bundle"} {
+		t.Run(flagName, func(t *testing.T) {
+			args, _ := stablePolicyCommandFixture(t)
+			path := commandArgument(args, flagName)
+			var output bytes.Buffer
+			err := runVerifyPolicyWithInspector(args, &output, func(string) (certidentity.Identity, error) {
+				return certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}, nil
+			}, func() time.Time { return time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC) }, map[string]boundedReadHooks{
+				path: {AfterOpen: func() error {
+					parked := path + ".parked"
+					if renameErr := os.Rename(path, parked); renameErr != nil {
+						return renameErr
+					}
+					_ = os.Rename(parked, path)
+					return nil
+				}},
+			})
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("swap/restore attempt produced trusted output: error=%v output=%q", err, output.String())
+			}
+		})
 	}
 }
 

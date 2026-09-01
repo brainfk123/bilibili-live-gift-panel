@@ -5,12 +5,13 @@ export function verifyChecksumManifest(directory: string): Promise<void>;
 export function verifyGitHubReleaseMetadata(metadata: Record<string, unknown>, directory: string, expectedTag: string): Promise<void>;
 export function verifyComponentMetadata(manifest: Record<string, unknown>, identity: { descriptor: Buffer; descriptorSha256: string; fingerprint: string }, expectedSigner: string): void;
 export function verifyPinnedSourceAssets(archive: Buffer, signature: Buffer, policy: { sourceSha256: string; sourceSignatureSha256: string }): void;
-export function prepareComponentAssets(options: { projectRoot?: string; outputDirectory: string; expectedSigner: string }): Promise<{ fingerprint: string; tag: string }>;
+export function prepareComponentAssets(options: { projectRoot?: string; toolRoot?: string; outputDirectory: string; expectedSigner?: string }): Promise<{ fingerprint: string; tag: string }>;
 export interface FFmpegComponentVerificationOptions {
   projectRoot?: string;
   toolRoot?: string;
   inputDirectory: string;
-  expectedSigner: string;
+  manifestOutputPath?: string;
+  expectedSigner?: string;
   verifyPayload?: (directory: string, expectedSigner: string) => void | Promise<void>;
   loadPolicy?: (projectRoot: string) => Promise<Record<string, unknown>>;
   sourceSignatureSHA256?: string;

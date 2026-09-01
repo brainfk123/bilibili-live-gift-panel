@@ -151,7 +151,7 @@ func TestVerifyStableArtifactPolicyRejectsMutationDuringAuthenticodeInspection(t
 		Tag: "v0.4.12", Channel: updatepolicy.ChannelStable, Now: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 		InspectAuthenticode: func(path string) (certidentity.Identity, error) {
 			if err := os.WriteFile(path, []byte("substituted during inspection"), 0o600); err != nil {
-				t.Fatal(err)
+				return certidentity.Identity{}, err
 			}
 			return identity, nil
 		},
@@ -159,6 +159,74 @@ func TestVerifyStableArtifactPolicyRejectsMutationDuringAuthenticodeInspection(t
 	if err == nil {
 		t.Fatal("stable artifact mutation during Authenticode inspection was accepted")
 	}
+}
+
+func TestVerifyStableArtifactPolicyRejectsSignerFromSwapAndRestoredArtifact(t *testing.T) {
+	stable := []byte("policy-authorized stable artifact")
+	substitute := []byte("different NaisNet-signed artifact")
+	hash := sha256Hex(stable)
+	root, policy := scopedPolicyFixture(t, hash, true)
+	artifactPath := writeFixture(t, t.TempDir(), "stable.exe", stable)
+	naisnet := certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
+	wrong := certidentity.Identity{Country: "CN", Organization: "Wrong signer", OrganizationID: "wrong"}
+
+	_, err := VerifyStableArtifactPolicy(StablePolicyOptions{
+		RootDER: root, PolicyBytes: policy, ExpectedEpoch: 1, ArtifactPath: artifactPath,
+		Tag: "v0.4.12", Channel: updatepolicy.ChannelStable, Now: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		InspectAuthenticode: func(inspectedPath string) (certidentity.Identity, error) {
+			inspected := inspectWhileOriginalIsSwapped(t, artifactPath, inspectedPath, substitute)
+			if bytes.Equal(inspected, substitute) {
+				return naisnet, nil
+			}
+			return wrong, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("hash from the stable artifact was combined with a signer from a swap-and-restored file")
+	}
+}
+
+func TestVerifyBoundArtifactRejectsOuterSignerFromSwapAndRestoredArtifact(t *testing.T) {
+	fixture := boundArtifactFixture(t)
+	substitute := syntheticPEWithPayload(t, []byte("different RushRush-signed bridge"))
+	call := 0
+	fixture.options.InspectAuthenticode = func(inspectedPath string) (certidentity.Identity, error) {
+		call++
+		switch call {
+		case 1:
+			return naisNetIdentity, nil // stable convergence snapshot
+		case 2:
+			inspected := inspectWhileOriginalIsSwapped(t, fixture.options.SignedPath, inspectedPath, substitute)
+			if bytes.Equal(inspected, substitute) {
+				return rushRushIdentity, nil
+			}
+			return naisNetIdentity, nil
+		default:
+			return naisNetIdentity, nil // embedded FFmpeg snapshot
+		}
+	}
+	if _, err := VerifyBoundArtifact(fixture.options); err == nil {
+		t.Fatal("outer bridge hash/content was combined with a signer from a swap-and-restored file")
+	}
+}
+
+func inspectWhileOriginalIsSwapped(t testing.TB, originalPath, inspectedPath string, substitute []byte) []byte {
+	t.Helper()
+	parked := originalPath + ".parked"
+	if err := os.Rename(originalPath, parked); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(originalPath, substitute, 0o600); err != nil {
+		_ = os.Rename(parked, originalPath)
+		t.Fatal(err)
+	}
+	inspected, readErr := os.ReadFile(inspectedPath)
+	removeErr := os.Remove(originalPath)
+	restoreErr := os.Rename(parked, originalPath)
+	if readErr != nil || removeErr != nil || restoreErr != nil {
+		t.Fatalf("swap/restore inspection failed: read=%v remove=%v restore=%v", readErr, removeErr, restoreErr)
+	}
+	return inspected
 }
 
 type boundArtifactTestFixture struct {

@@ -169,12 +169,14 @@ jobs:
           cache: npm
 
       - name: Set up Go
+        if: env.RELEASE_EXISTS != 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: updateapi/go.mod
           cache-dependency-path: updateapi/go.sum
 
       - name: Resolve EVSign signer profile
+        if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
         env:
           EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
@@ -190,6 +192,7 @@ jobs:
           Write-Host "Resolved closed EVSign signer profile '$($profile.profile)'."
 
       - name: Test domestic update tooling
+        if: env.RELEASE_EXISTS != 'true'
         env:
           GOWORK: 'off'
         run: go -C updateapi test ./... -race -count=1
@@ -233,7 +236,8 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
-          $identityJSON = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --tool-root $env:RELEASE_TOOL_ROOT
+          $componentKind = if ($env:RELEASE_EXISTS -eq 'true') { 'fixed' } else { 'current' }
+          $identityJSON = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --kind $componentKind --tool-root $env:RELEASE_TOOL_ROOT
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
           $identity = $identityJSON | ConvertFrom-Json
           if ($identity.schema -ne 2 -or [string]$identity.fingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$identity.tag -cne "ffmpeg-component-v2-$($identity.fingerprint)") {
@@ -297,9 +301,8 @@ jobs:
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component attestation verification failed for $($asset.Name)" }
           }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --manifest-output dist/standalone-component-manifest.json
           if ($LASTEXITCODE -ne 0) { throw "Repair signed FFmpeg component verification failed" }
-          Copy-Item -LiteralPath "$componentDirectory/manifest.json" -Destination dist/standalone-component-manifest.json
 
       - name: Set up MSYS2 host environment
         if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
@@ -364,7 +367,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" prepare --tool-root $env:RELEASE_TOOL_ROOT --output dist/ffmpeg-component-publish
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" prepare --kind current --tool-root $env:RELEASE_TOOL_ROOT --output dist/ffmpeg-component-publish
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component asset packaging failed" }
 
       - name: Attest signed FFmpeg component
@@ -438,7 +441,7 @@ jobs:
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw "FFmpeg component attestation verification failed for $($asset.Name)" }
           }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
           if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component verification or installation failed" }
           New-Item -ItemType Directory -Force -Path dist/ffmpeg-source | Out-Null
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz
@@ -454,7 +457,7 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
-          $componentDirectory = if ($env:FFMPEG_COMPONENT_EXISTS -eq 'true') { 'dist/ffmpeg-component-download' } else { 'dist/ffmpeg-component-published' }
+          $componentDirectory = 'goserver/ffmpeg'
           $standaloneDirectory = 'dist/standalone-ffmpeg'
           New-Item -ItemType Directory -Force -Path $standaloneDirectory | Out-Null
           Expand-Archive -LiteralPath "$componentDirectory/ffmpeg.zip" -DestinationPath $standaloneDirectory

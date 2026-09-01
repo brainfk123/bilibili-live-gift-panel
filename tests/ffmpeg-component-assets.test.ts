@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +17,7 @@ import {
   verifyGitHubReleaseMetadata,
   verifyComponentAssets,
 } from '../scripts/ffmpeg-component-assets.mjs';
-import { ffmpegComponentIdentity, loadFFmpegPolicy } from '../scripts/ffmpeg-policy.mjs';
+import { FFMPEG_FIXED_COMPONENT_SIGNER_SUBJECT, FFMPEG_FIXED_COMPONENT_TAG, ffmpegComponentIdentity, loadFFmpegPolicy } from '../scripts/ffmpeg-policy.mjs';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -76,7 +76,11 @@ async function v0410ComponentFixture() {
   const inspectorPath = join(toolRoot, 'artifact-inspector-fake.mjs');
   const targetLog = join(targetRoot, 'target-verifier.log');
   mkdirSync(join(toolRoot, 'scripts'), { recursive: true });
+  mkdirSync(join(toolRoot, 'third_party', 'ffmpeg'), { recursive: true });
   mkdirSync(join(targetRoot, 'scripts'), { recursive: true });
+  for (const relative of ['third_party/ffmpeg/configure.flags', 'third_party/ffmpeg/toolchain-lock.json']) {
+    copyFileSync(join(projectRoot, relative), join(toolRoot, relative));
+  }
   writeFileSync(inspectorPath, `
 import { appendFileSync } from 'node:fs';
 const args = process.argv.slice(2);
@@ -96,30 +100,37 @@ appendFileSync(${JSON.stringify(reviewedLog)}, 'reviewed\\n');
   const source = Buffer.from('bounded source fixture derived for v0.4.10 target verification');
   const signature = Buffer.from('bounded detached signature fixture');
   const policy = {
-    ...(await loadFFmpegPolicy(targetRoot)),
+    ...(await loadFFmpegPolicy(toolRoot)),
     sourceSha256: createHash('sha256').update(source).digest('hex'),
   };
-  const expectedSigner = 'C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094';
+  const expectedSigner = FFMPEG_FIXED_COMPONENT_SIGNER_SUBJECT;
   const identity = ffmpegComponentIdentity(policy, expectedSigner);
-  const historicalManifest = JSON.parse(readFileSync(join(targetRoot, 'goserver', 'ffmpeg', 'manifest.json'), 'utf8'));
-  const commit = gitRevParse(projectRoot, 'v0.4.10^{commit}');
+  const commit = gitRevParse(projectRoot, `refs/tags/${FFMPEG_FIXED_COMPONENT_TAG}`);
+  const componentArchive = Buffer.from('separate fixed signed component archive fixture');
+  const componentGate = Buffer.from('separate fixed signed component gate fixture\n');
   const manifest = Buffer.from(`${JSON.stringify({
-    ...historicalManifest,
+    schema: 1,
     component_fingerprint: identity.fingerprint,
     descriptor: identity.descriptor.toString('utf8'),
     descriptor_sha256: identity.descriptorSha256,
+    version: '9.0',
+    sha256: '1'.repeat(64),
+    archive_sha256: createHash('sha256').update(componentArchive).digest('hex'),
+    component_gate: componentGate.toString('utf8'),
+    component_gate_sha256: createHash('sha256').update(componentGate).digest('hex'),
+    size: 1,
     authenticode: true,
     signer_subject: expectedSigner,
     source_release_commit: commit,
   }, null, 2)}\n`);
   const files = new Map<string, Buffer>([
-    ['ffmpeg.zip', readFileSync(join(targetRoot, 'goserver', 'ffmpeg', 'ffmpeg.zip'))],
+    ['ffmpeg.zip', componentArchive],
     ['manifest.json', manifest],
     ['gift-clip-test-tools.zip', Buffer.from('v0.4.10 test tools fixture')],
     ['ffmpeg-9.0.tar.xz', source],
     ['ffmpeg-9.0.tar.xz.asc', signature],
     ['ffmpeg-build-config.txt', Buffer.from('v0.4.10 reviewed build config fixture\n')],
-    ['ffmpeg-component-gate.txt', Buffer.from(historicalManifest.component_gate, 'utf8')],
+    ['ffmpeg-component-gate.txt', componentGate],
     ['toolchain-lock.json', readFileSync(join(targetRoot, 'third_party', 'ffmpeg', 'toolchain-lock.json'))],
     ['NOTICE.md', readFileSync(join(targetRoot, 'third_party', 'ffmpeg', 'NOTICE.md'))],
     ['COPYING.LGPLv2.1', readFileSync(join(targetRoot, 'third_party', 'ffmpeg', 'COPYING.LGPLv2.1'))],
@@ -156,19 +167,32 @@ describe('FFmpeg component assets', () => {
     const projectRoot = fileURLToPath(new URL('..', import.meta.url));
     const environment = { ...process.env };
     delete environment.EVSIGN_EXPECTED_SUBJECT;
-    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/ffmpeg-component-assets.mjs', import.meta.url)), 'identity'], {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/ffmpeg-component-assets.mjs', import.meta.url)), 'identity', '--kind', 'fixed'], {
       cwd: projectRoot,
       encoding: 'utf8',
       env: environment,
     });
 
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ schema: 2 });
+    expect(JSON.parse(result.stdout)).toEqual({
+      schema: 2,
+      fingerprint: '2603fa9f68855ead324fe3b4ee13c9daaed984b151aae338eeca15aaee71a9c4',
+      tag: 'ffmpeg-component-v2-2603fa9f68855ead324fe3b4ee13c9daaed984b151aae338eeca15aaee71a9c4',
+    });
+    expect(gitRevParse(projectRoot, 'refs/tags/ffmpeg-component-v2-2603fa9f68855ead324fe3b4ee13c9daaed984b151aae338eeca15aaee71a9c4'))
+      .toBe('423a26e08c22eb651252d186a7c5a8ea748cece7');
     expect(`${result.stdout}${result.stderr}`).not.toContain('EVSIGN_EXPECTED_SUBJECT');
   });
 
   it('uses reviewed tooling to verify and install a real v0.4.10 target fixture without target scripts or Subject env', async () => {
     const fixture = await v0410ComponentFixture();
+    const untouchedHistoricalManifest = gitShow(fixture.projectRoot, 'v0.4.10:goserver/ffmpeg/manifest.json');
+    expect(readFileSync(join(fixture.targetRoot, 'goserver', 'ffmpeg', 'manifest.json')))
+      .toEqual(untouchedHistoricalManifest);
+    expect(JSON.parse(untouchedHistoricalManifest.toString('utf8'))).toMatchObject({
+      authenticode: false,
+      signer_subject: '',
+    });
     const priorSubject = process.env.EVSIGN_EXPECTED_SUBJECT;
     const priorInspector = process.env.AUTHENTICODE_INSPECTOR_PATH;
     delete process.env.EVSIGN_EXPECTED_SUBJECT;
@@ -176,14 +200,20 @@ describe('FFmpeg component assets', () => {
     try {
       const identityCLI = spawnSync(process.execPath, [
         join(fixture.projectRoot, 'scripts', 'ffmpeg-component-assets.mjs'),
-        'identity', '--tool-root', fixture.projectRoot,
+        'identity', '--kind', 'fixed', '--tool-root', fixture.projectRoot,
       ], {
         encoding: 'utf8',
         env: { ...process.env, RELEASE_TARGET_ROOT: fixture.targetRoot, RELEASE_TOOL_ROOT: fixture.projectRoot },
       });
       expect(identityCLI.status, identityCLI.stderr).toBe(0);
-      expect(JSON.parse(identityCLI.stdout)).toMatchObject({ schema: 2 });
+      expect(JSON.parse(identityCLI.stdout)).toEqual({
+        schema: 2,
+        fingerprint: '2603fa9f68855ead324fe3b4ee13c9daaed984b151aae338eeca15aaee71a9c4',
+        tag: 'ffmpeg-component-v2-2603fa9f68855ead324fe3b4ee13c9daaed984b151aae338eeca15aaee71a9c4',
+      });
       await expect(verifyComponentAssets(fixture.options)).resolves.toMatchObject({ fingerprint: fixture.identity.fingerprint });
+      expect(readFileSync(join(fixture.targetRoot, 'goserver', 'ffmpeg', 'manifest.json')))
+        .toEqual(untouchedHistoricalManifest);
       await expect(installComponentAssets(fixture.options)).resolves.toMatchObject({ fingerprint: fixture.identity.fingerprint });
     } finally {
       if (priorSubject === undefined) delete process.env.EVSIGN_EXPECTED_SUBJECT;
@@ -199,6 +229,104 @@ describe('FFmpeg component assets', () => {
       .toEqual(readFileSync(join(fixture.inputDirectory, 'ffmpeg.zip')));
     expect(readFileSync(join(fixture.targetRoot, 'goserver', 'ffmpeg', 'manifest.json')))
       .toEqual(readFileSync(join(fixture.inputDirectory, 'manifest.json')));
+  });
+
+  it.each(['ffmpeg.zip', 'manifest.json'] as const)(
+    'installs the exact verified %s snapshot when the downloaded source is swapped after verification',
+    async (swappedAsset) => {
+      const fixture = await v0410ComponentFixture();
+      const verifiedArchive = readFileSync(join(fixture.inputDirectory, 'ffmpeg.zip'));
+      const verifiedManifest = readFileSync(join(fixture.inputDirectory, 'manifest.json'));
+      let installedArchive: Buffer | undefined;
+      let installedManifest: Buffer | undefined;
+      const options = {
+        ...fixture.options,
+        verifyPayload: async (snapshotDirectory: string) => {
+          expect(snapshotDirectory).not.toBe(fixture.inputDirectory);
+          expect(readFileSync(join(snapshotDirectory, 'ffmpeg.zip'))).toEqual(verifiedArchive);
+          expect(readFileSync(join(snapshotDirectory, 'manifest.json'))).toEqual(verifiedManifest);
+          writeFileSync(join(fixture.inputDirectory, swappedAsset), Buffer.from(`attacker ${swappedAsset}`));
+        },
+        publishPair: async (directory: string, archive: Buffer, manifest: Buffer) => {
+          installedArchive = Buffer.from(archive);
+          installedManifest = Buffer.from(manifest);
+          writeFileSync(join(directory, 'ffmpeg.zip'), archive);
+          writeFileSync(join(directory, 'manifest.json'), manifest);
+        },
+      };
+
+      await installComponentAssets(options);
+      expect(installedArchive).toEqual(verifiedArchive);
+      expect(installedManifest).toEqual(verifiedManifest);
+    },
+    20_000,
+  );
+
+  it('writes the exact verified manifest snapshot when the downloaded manifest changes after verification', async () => {
+    const fixture = await v0410ComponentFixture();
+    const verifiedManifest = readFileSync(join(fixture.inputDirectory, 'manifest.json'));
+    const outputDirectory = join(fixture.targetRoot, 'dist');
+    const manifestOutputPath = join(outputDirectory, 'standalone-component-manifest.json');
+    mkdirSync(outputDirectory, { recursive: true });
+    await verifyComponentAssets({
+      ...fixture.options,
+      manifestOutputPath,
+      verifyPayload: async () => {
+        writeFileSync(join(fixture.inputDirectory, 'manifest.json'), Buffer.from('attacker manifest'));
+      },
+    });
+    expect(readFileSync(manifestOutputPath)).toEqual(verifiedManifest);
+  });
+
+  it.each(['project', 'goserver', 'destination'] as const)(
+    'rejects a junction at the %s installation boundary before publishing',
+    async (boundary) => {
+      const fixture = await v0410ComponentFixture();
+      let projectRoot = fixture.targetRoot;
+      const outside = temporaryRoot();
+      let link: string;
+      let target: string;
+      if (boundary === 'project') {
+        link = join(temporaryRoot(), 'project-link');
+        target = fixture.targetRoot;
+        projectRoot = link;
+      } else if (boundary === 'goserver') {
+        link = join(fixture.targetRoot, 'goserver');
+        target = join(outside, 'goserver');
+        mkdirSync(join(target, 'ffmpeg'), { recursive: true });
+        rmSync(link, { recursive: true, force: true });
+      } else {
+        link = join(fixture.targetRoot, 'goserver', 'ffmpeg');
+        target = join(outside, 'ffmpeg');
+        mkdirSync(target, { recursive: true });
+        rmSync(link, { recursive: true, force: true });
+      }
+      try {
+        symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+      } catch {
+        return;
+      }
+      let published = false;
+      await expect(installComponentAssets({
+        ...fixture.options,
+        projectRoot,
+        verifyPayload: async () => undefined,
+        publishPair: async () => { published = true; },
+      })).rejects.toThrow(/destination|reparse|symbolic/i);
+      expect(published).toBe(false);
+    },
+  );
+
+  it('rejects lexical traversal in the installation project before publishing', async () => {
+    const fixture = await v0410ComponentFixture();
+    let published = false;
+    await expect(installComponentAssets({
+      ...fixture.options,
+      projectRoot: `${fixture.targetRoot}${process.platform === 'win32' ? '\\' : '/'}goserver${process.platform === 'win32' ? '\\' : '/'}..`,
+      verifyPayload: async () => undefined,
+      publishPair: async () => { published = true; },
+    })).rejects.toThrow(/traversal/i);
+    expect(published).toBe(false);
   });
 
   it('rejects mismatched signed metadata before preparing publishable component assets', async () => {

@@ -6,6 +6,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const FFMPEG_VERSION = '9.0';
 export const FFMPEG_SOURCE_SHA256 = '7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52';
 export const FFMPEG_SOURCE_SIGNATURE_SHA256 = 'f9607bb4d90bbaeff196318a55547da66c9f5921dad39b1c49b7544286e4876c';
+export const FFMPEG_SIGNED_COMPONENT_SIGNER = 'C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094';
+// This historical display Subject is descriptor input only, pinned to the
+// immutable v0.4.10 component tag. Authenticode trust always uses DER fields.
+export const FFMPEG_FIXED_COMPONENT_SIGNER_SUBJECT = 'CN="NaisNet Technology Co., Ltd.", O="NaisNet Technology Co., Ltd.", L=Shenyang, S=Liaoning, C=CN, SERIALNUMBER=91210103MA7CJ3C094, OID.1.3.6.1.4.1.311.60.2.1.1=Shenyang, OID.1.3.6.1.4.1.311.60.2.1.2=Liaoning, OID.1.3.6.1.4.1.311.60.2.1.3=CN, OID.2.5.4.15=Private Organization';
+export const FFMPEG_FIXED_COMPONENT_FINGERPRINT = '2603fa9f68855ead324fe3b4ee13c9daaed984b151aae338eeca15aaee71a9c4';
+export const FFMPEG_FIXED_COMPONENT_TAG = `ffmpeg-component-v2-${FFMPEG_FIXED_COMPONENT_FINGERPRINT}`;
 export const FFMPEG_SOURCE_DATE_EPOCH = '1785797913';
 export const FFMPEG_COMPONENTS = Object.freeze([
   'AAC_ADTSTOASC_BSF', 'AC3_PARSER', 'AFORMAT_FILTER', 'ALPHAMERGE_FILTER', 'ANULL_FILTER', 'ATRIM_FILTER',
@@ -85,6 +91,16 @@ export function ffmpegComponentIdentity(policy, signerSubject) {
     fingerprint,
     tag: `ffmpeg-component-v2-${fingerprint}`,
   };
+}
+
+export async function reviewedSignedFFmpegComponentIdentity(toolRoot) {
+  return ffmpegComponentIdentity(await loadFFmpegPolicy(toolRoot), FFMPEG_SIGNED_COMPONENT_SIGNER);
+}
+
+export async function reviewedFixedFFmpegComponentIdentity(toolRoot) {
+  const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(toolRoot), FFMPEG_FIXED_COMPONENT_SIGNER_SUBJECT);
+  assert(identity.fingerprint === FFMPEG_FIXED_COMPONENT_FINGERPRINT && identity.tag === FFMPEG_FIXED_COMPONENT_TAG, 'Fixed signed FFmpeg component descriptor drifted.');
+  return identity;
 }
 
 export function componentGateRecord(policy, binary) {

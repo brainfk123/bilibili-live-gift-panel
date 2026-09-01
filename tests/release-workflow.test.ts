@@ -95,6 +95,16 @@ function semanticCommands(job: WorkflowJob | undefined): string[] {
   });
 }
 
+function releaseStepRuns(step: ReleaseStep, environment: Record<string, string>): boolean {
+  if (!step.if) return true;
+  const substituted = step.if.replace(/env\.([A-Z][A-Z0-9_]*)/g, (_match, name: string) =>
+    JSON.stringify(environment[name] ?? ''));
+  if (!/^[\s()'"A-Za-z0-9._:/=!-]+(?:&&|\|\||[\s()'"A-Za-z0-9._:/=!-]+)*$/.test(substituted)) {
+    throw new Error(`unsupported workflow condition: ${step.if}`);
+  }
+  return Boolean(Function(`"use strict"; return (${substituted});`)());
+}
+
 function stepIndex(steps: ReleaseStep[], name: string): number {
   const index = steps.findIndex((step) => step.name === name);
   expect(index, `missing workflow step ${name}`).toBeGreaterThanOrEqual(0);
@@ -261,6 +271,49 @@ describe('release workflow supply-chain contract', () => {
     const toolingCheckout=stepIndex(steps,'Check out reviewed release tooling');const buildTools=stepIndex(steps,'Build reviewed release security tools');const target=stepIndex(steps,'Check out release tag');const profile=stepIndex(steps,'Resolve EVSign signer profile');const validate=stepIndex(steps,'Validate published release assets');
     expect(steps[toolingCheckout]?.with).toMatchObject({ref:'${{ vars.RELEASE_TOOLING_COMMIT_SHA }}',path:'release-tools','persist-credentials':false});expect(toolingCheckout).toBeLessThan(buildTools);expect(buildTools).toBeLessThan(target);
     expect(steps[buildTools]?.run).toContain('artifact-inspector.exe');expect(steps[buildTools]?.run).toContain('sign-evsign.mjs');expect(steps[profile]?.run).toContain('$env:EVSIGN_SCRIPT_PATH');expect(steps[validate]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH');
+  });
+
+  it('routes an existing v0.4.10 Release repair through reviewed validation without executing target code', () => {
+    const { steps } = releaseWorkflow();
+    const environment = {
+      RELEASE_EXISTS: 'true',
+      RELEASE_STANDALONE_FFMPEG: 'true',
+      FFMPEG_COMPONENT_EXISTS: 'true',
+    };
+    const executed = steps.filter((step) => releaseStepRuns(step, environment));
+    const names = new Set(executed.map((step) => step.name));
+
+    expect(names).toContain('Verify standalone FFmpeg repair component');
+    expect(names).toContain('Validate published release assets');
+    expect(names).toContain('Resolve FFmpeg component identity');
+    expect(names).not.toContain('Set up Go');
+    for (const name of [
+      'Test domestic update tooling', 'Install dependencies', 'Install pinned Playwright Chromium for release E2E',
+      'Run tests', 'Type check', 'Build frontend', 'Prepare backend UI assets', 'Build and verify pinned FFmpeg',
+      'Sign and verify inner FFmpeg', 'Package and verify signed FFmpeg payload', 'Package signed FFmpeg component',
+      'Verify and install signed FFmpeg component', 'Build release executable', 'Run backend tests',
+      'Prepare and sign release executable', 'Verify deterministic gift clip exports from signed package chain',
+    ]) {
+      expect(names, `existing repair executed target step ${name}`).not.toContain(name);
+    }
+
+    const commands = executed.flatMap((step) => step.run?.split(/\r?\n/).map((line) => line.trim()) ?? []);
+    expect(commands.some((line) => /^npm(?:\.cmd)?\b/i.test(line))).toBe(false);
+    expect(commands.some((line) => /^go\s+-C\s+(?!release-tools(?:[\\/]|\b))/i.test(line))).toBe(false);
+    const nodeCommands = commands.filter((line) => /\bnode\b/i.test(line));
+    expect(nodeCommands.length).toBeGreaterThan(0);
+    for (const line of nodeCommands) {
+      expect(line).toMatch(/\$env:(?:EVSIGN_SCRIPT_PATH|RELEASE_TOOL_ROOT)/);
+    }
+
+    const newReleaseNames = new Set(steps
+      .filter((step) => releaseStepRuns(step, {
+        RELEASE_EXISTS: 'false', RELEASE_STANDALONE_FFMPEG: 'true', FFMPEG_COMPONENT_EXISTS: 'true',
+      }))
+      .map((step) => step.name));
+    for (const name of ['Set up Go', 'Test domestic update tooling', 'Install dependencies', 'Run tests', 'Type check', 'Build release executable', 'Run backend tests']) {
+      expect(newReleaseNames, `new Release lost reviewed target execution ${name}`).toContain(name);
+    }
   });
   it('pins every external Action to an immutable commit SHA', () => {
     const { steps } = releaseWorkflow();
@@ -430,9 +483,11 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[identity]?.env).toBeUndefined();
     expect(steps[identity]?.run).toContain('$identity.schema -ne 2');
     expect(steps[identity]?.run).toContain('ffmpeg-component-v2-$($identity.fingerprint)');
+    expect(steps[identity]?.run).toContain("$componentKind = if ($env:RELEASE_EXISTS -eq 'true') { 'fixed' } else { 'current' }");
+    expect(steps[identity]?.run).toContain('identity --kind $componentKind');
     expect(steps[packageComponent]?.env).toBeUndefined();
     expect(steps[install]?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(steps[install]?.run).toContain('install --tool-root');
+    expect(steps[install]?.run).toContain('install --kind current --tool-root');
     expect(steps[install]?.run).toContain('--input $componentDirectory');
     expect(steps[install]?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(steps[install]?.run).toContain('verify-metadata');
@@ -470,6 +525,7 @@ describe('release workflow supply-chain contract', () => {
     expect(createRelease).toBeLessThan(redownloadStandalone);
     expect(redownloadStandalone).toBeLessThan(validatePublished);
     expect(steps[prepareStandalone]?.if).toBe("env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
+    expect(steps[prepareStandalone]?.run).toContain("$componentDirectory = 'goserver/ffmpeg'");
     expect(steps[prepareStandalone]?.run).toContain('$componentDirectory/ffmpeg.zip');
     expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe');
     expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe.sha256');
@@ -484,6 +540,9 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[downloadExisting]?.run).toContain('--pattern ffmpeg-windows-x64.exe');
     expect(steps[verifyRepairComponent]?.if).toBe("env.RELEASE_EXISTS == 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
     expect(steps[verifyRepairComponent]?.run).toContain('verify-metadata');
+    expect(steps[verifyRepairComponent]?.run).toContain('verify --kind fixed');
+    expect(steps[verifyRepairComponent]?.run).toContain('--manifest-output dist/standalone-component-manifest.json');
+    expect(steps[verifyRepairComponent]?.run).not.toContain('Copy-Item -LiteralPath "$componentDirectory/manifest.json"');
     expect(steps[verifyRepairComponent]?.run).toContain('gh attestation verify');
     expect(steps[verifyRepairComponent]?.run).toContain('standalone-component-manifest.json');
     expect(steps[validatePublished]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg-windows-x64.exe');
@@ -1060,13 +1119,13 @@ describe('exact RushRush bridge release workflow contract', () => {
     const verifyBefore = steps[stepIndex(steps, 'Verify NaisNet FFmpeg component before packaging')];
     const verifyAfter = steps[stepIndex(steps, 'Verify NaisNet FFmpeg after packaging')];
     expect(inspect?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(inspect?.run).toContain('identity --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json');
+    expect(inspect?.run).toContain('identity --kind fixed --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json');
     expect(inspect?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(inspect?.run).toContain('FFMPEG_COMPONENT_EXISTS');
     expect(verifyBefore?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
     expect(verifyBefore?.run).toContain('verify-metadata --tool-root');
     expect(verifyBefore?.run).toContain('--metadata dist/bridge-ffmpeg-component-release.json');
-    expect(verifyBefore?.run).toContain('verify --tool-root');
+    expect(verifyBefore?.run).toContain('verify --kind fixed --tool-root');
     expect(verifyBefore?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(verifyBefore?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode');
     expect(verifyBefore?.run).toContain('--organization-id 91210103MA7CJ3C094');
