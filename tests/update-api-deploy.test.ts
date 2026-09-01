@@ -859,14 +859,17 @@ useradd() { ACCOUNT_CREATED=1; printf 'useradd\\n' >> "$ACCOUNT_LOG"; }
       /Check out update publisher tooling/i,
       /Mirror release to Tencent COS/i,
       /test-cos-connectivity/i,
+      /EVSIGN_ACTIVE_PROFILE/i,
+      /EVSIGN_SIGNER_PROFILES_JSON/i,
+      /EVSIGN_EXPECTED_SUBJECT/i,
     ]) {
       expect(readme).not.toMatch(forbidden);
     }
     expect(readme).toContain(
-      'Preferred GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_ACTIVE_PROFILE`, `EVSIGN_SIGNER_PROFILES_JSON`.',
+      'Stable GitHub Actions variables are `UPDATE_API_BASE_URL`, `EVSIGN_CERTIFICATE`, `EVSIGN_PUBLISHER_IDENTITY`, and `RELEASE_TOOLING_COMMIT_SHA`.',
     );
-    expect(readme).toContain('Legacy fallback variables: required `EVSIGN_EXPECTED_SUBJECT` and optional `EVSIGN_CERT`.');
-    expect(readme).toContain('Changing `EVSIGN_ACTIVE_PROFILE` switches the certificate selection mode and exact Subject together.');
+    expect(readme).toContain('The closed stable profile rejects missing, unknown, bridge, legacy, or free-form Subject configuration before signing.');
+    expect(readme).toContain('Subject serialNumber (`2.5.4.5`)');
     expect(readme).toContain('GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.');
     expect(readme).toContain('every five minutes');
     expect(readme).toContain('lighthouse-cos-publisher');

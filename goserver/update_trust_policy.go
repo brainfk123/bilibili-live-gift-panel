@@ -52,6 +52,13 @@ func (p verifiedUpdateTrustPolicy) Authorize(input updateArtifactIdentity) error
 	}
 	return nil
 }
+func (p verifiedUpdateTrustPolicy) AuthorizeAt(input updateArtifactIdentity, at time.Time) error {
+	err := (updatepolicy.Verified{Epoch: p.Epoch, ExpiresAt: p.ExpiresAt, SignedRaw: p.SignedRaw, Rules: p.Rules}).AuthorizeAt(input, at)
+	if err != nil {
+		return policyError(err.Error())
+	}
+	return nil
+}
 func canonicalizePublisherPolicySigned(s publisherPolicySigned) ([]byte, error) {
 	return updatepolicy.CanonicalSigned(s)
 }
@@ -71,12 +78,4 @@ var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func normalizeUpdateCertificateIdentity(input updateCertificateIdentity) updateCertificateIdentity {
 	return updateCertificateIdentity{Country: strings.ToUpper(strings.TrimSpace(input.Country)), Organization: strings.TrimSpace(input.Organization), OrganizationID: strings.ToUpper(strings.TrimSpace(input.OrganizationID))}
-}
-func publisherRuleAllowsTag(rule updatePublisherRule, tag string) bool {
-	for _, allowed := range rule.AllowedTags {
-		if allowed == tag {
-			return true
-		}
-	}
-	return false
 }

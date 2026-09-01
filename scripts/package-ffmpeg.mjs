@@ -10,7 +10,7 @@ import { ffmpegComponentIdentity, loadFFmpegPolicy } from './ffmpeg-policy.mjs';
 const version = '9.0';
 const warningSize = 30_000_000;
 const maximumSize = 40_000_000;
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = process.env.RELEASE_TARGET_ROOT ? resolve(process.env.RELEASE_TARGET_ROOT) : join(dirname(fileURLToPath(import.meta.url)), '..');
 const outputDirectory = join(root, 'goserver', 'ffmpeg');
 const naisNetStructuredSigner = 'C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094';
 const componentGatePath = join(root, 'dist', 'ffmpeg-component-gate.txt');

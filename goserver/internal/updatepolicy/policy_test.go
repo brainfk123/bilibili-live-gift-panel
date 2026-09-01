@@ -44,6 +44,27 @@ func TestProductionVerifierRejectsNoncanonicalAndWrongManifestHash(t *testing.T)
 	}
 }
 
+func TestAuthorizeAtIsSingleCurrentPolicyMutationBoundary(t *testing.T) {
+	identity := certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
+	hash := strings.Repeat("a", 64)
+	policy := Verified{Epoch: 1, ExpiresAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), Rules: []PublisherRule{{ID: "naisnet-primary", Role: "primary", Country: identity.Country, Organization: identity.Organization, OrganizationID: identity.OrganizationID, AllowedChannel: ChannelStable, AllowedTags: []string{"v0.4.12"}, ManifestSHA256: hash}}}
+	base := ArtifactIdentity{Tag: "v0.4.12", Channel: ChannelStable, SHA256: hash, Certificate: identity}
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if err := policy.AuthorizeAt(base, now); err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*ArtifactIdentity){"tag": func(v *ArtifactIdentity) { v.Tag = "v0.4.13" }, "channel": func(v *ArtifactIdentity) { v.Channel = ChannelLegacyRushRush }, "hash": func(v *ArtifactIdentity) { v.SHA256 = strings.Repeat("b", 64) }, "organization": func(v *ArtifactIdentity) { v.Certificate.OrganizationID = "DIFFERENT" }}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			if err := policy.AuthorizeAt(candidate, now); err == nil {
+				t.Fatal("mutation authorized")
+			}
+		})
+	}
+}
+
 func fixture(t testing.TB, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "update-trust", name))

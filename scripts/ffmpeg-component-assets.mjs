@@ -20,7 +20,7 @@ export const REQUIRED_COMPONENT_ASSETS = Object.freeze([
 ]);
 
 const CHECKSUM_ASSET = 'SHA256SUMS.txt';
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const root = process.env.RELEASE_TARGET_ROOT ? resolve(process.env.RELEASE_TARGET_ROOT) : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export function buildChecksumManifest(files) {
   if (!(files instanceof Map)) throw new Error('FFmpeg component files must be a Map.');

@@ -4,24 +4,15 @@ This deployment serves private COS release metadata through the API only. Keep t
 
 ## Required names
 
-Preferred GitHub Actions variables: `UPDATE_API_BASE_URL`, `EVSIGN_ACTIVE_PROFILE`, `EVSIGN_SIGNER_PROFILES_JSON`.
+Stable GitHub Actions variables are `UPDATE_API_BASE_URL`, `EVSIGN_CERTIFICATE`, `EVSIGN_PUBLISHER_IDENTITY`, and `RELEASE_TOOLING_COMMIT_SHA`.
 
-`EVSIGN_SIGNER_PROFILES_JSON` is a JSON array of 1 to 16 exact signer profiles. Each profile has only `name`, `cert`, and `subject`. Set `cert` to `null` when the reviewed EVSign account default is intended; an empty string remains accepted for compatibility. Set `cert` to a non-empty string only for a provider-issued certificate selector. `subject` must always be the complete reviewed Authenticode Subject. Example:
+`EVSIGN_CERTIFICATE` is the reviewed provider certificate selector. `EVSIGN_PUBLISHER_IDENTITY` is exactly `{"country":"CN","organization":"NaisNet Technology Co., Ltd.","organizationId":"91210103MA7CJ3C094"}`. The closed stable profile rejects missing, unknown, bridge, legacy, or free-form Subject configuration before signing. Verification parses Authenticode certificate DER and requires one C, one O, one Subject serialNumber (`2.5.4.5`), and Code Signing EKU; display Subject, thumbprint, and RDN ordering are not trust inputs.
 
-```json
-[
-  {"name":"current","cert":null,"subject":"CN=Reviewed Current Signer, O=Reviewed Organization, C=CN"},
-  {"name":"next","cert":"reviewed-next-certificate-selector","subject":"CN=Reviewed Next Signer, O=Reviewed Organization, C=CN"}
-]
-```
-
-Changing `EVSIGN_ACTIVE_PROFILE` switches the certificate selection mode and exact Subject together. The workflow resolves that pair once and uses it for the signed FFmpeg component identity, inner signature, embedded application publisher, outer signature, and published-asset verification. An unknown profile, malformed JSON, duplicate name, or actual signer mismatch fails closed; never add a signer only because an unexpected release failed.
-
-Legacy fallback variables: required `EVSIGN_EXPECTED_SUBJECT` and optional `EVSIGN_CERT`. When `EVSIGN_CERT` is absent, EVSign uses the provider default certificate and the workflow still verifies the exact expected Subject after signing. The fallback remains supported only when both profile variables are absent. Do not configure only one profile variable; when both profile variables exist, the selected profile is authoritative and the legacy values are ignored.
+The dedicated bridge workflow has distinct protected certificate/identity/credential names and cannot be selected by the stable workflow. See `docs/runbooks/bridge-release.md` for its approval-only public inputs; do not duplicate bridge secrets in deployment files.
 
 GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.
 
-Store these signing variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. Review a new profile before selecting it, retain the previous profile until no release run is in flight, and change only `EVSIGN_ACTIVE_PROFILE` for the cutover. The Release workflow uses the requested tag checkout for the update-module race test, build, signature, GitHub Release creation or complete-Release repair, and final asset validation. A validated GitHub Release is the workflow's terminal success condition; the workflow does not hold COS credentials or invoke the COS publisher.
+Store these signing variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. The workflow prebuilds security tooling from `RELEASE_TOOLING_COMMIT_SHA`, then treats the requested tag only as target source/assets. Exact `v0.4.11` is rejected before the protected environment because only the bridge workflow owns it. A validated GitHub Release is the workflow's terminal success condition; the workflow does not hold COS credentials or invoke the COS publisher.
 
 Server environment variables: `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`. The channel object is fixed in the binary as `channels/stable/latest.json` and is not configurable.
 

@@ -117,7 +117,11 @@ func CanonicalSigned(s Signed) ([]byte, error) {
 }
 
 func (p Verified) Authorize(input ArtifactIdentity) error {
-	if p.Epoch == 0 || p.ExpiresAt.IsZero() || !p.ExpiresAt.After(time.Now().UTC()) {
+	return p.AuthorizeAt(input, time.Now().UTC())
+}
+
+func (p Verified) AuthorizeAt(input ArtifactIdentity, at time.Time) error {
+	if p.Epoch == 0 || p.ExpiresAt.IsZero() || !p.ExpiresAt.After(at.UTC()) {
 		return failure("policy_expired")
 	}
 	if !canonicalTag.MatchString(input.Tag) {

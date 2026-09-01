@@ -61,7 +61,7 @@ function releaseWorkflow() {
   const release = workflow.jobs?.release;
   const steps = release?.steps;
   expect(Array.isArray(steps)).toBe(true);
-  return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [] };
+  return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [], workflow };
 }
 
 function publisherRotationWorkflow(): PublisherRotationWorkflow {
@@ -243,6 +243,16 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
 }
 
 describe('release workflow supply-chain contract', () => {
+  it('rejects the bridge tag in a no-environment job before stable protected work for push and dispatch', () => {
+    const { workflow } = releaseWorkflow();
+    const jobs = workflow.jobs as Record<string, WorkflowJob & { outputs?:Record<string,string> }>;
+    expect(Object.keys(jobs)).toEqual(['validate-tag','release']);
+    const gate=jobs['validate-tag'];const stable=jobs.release;
+    expect(gate.environment).toBeUndefined();expect(stable.environment).toBe('release');expect(stable.needs).toBe('validate-tag');
+    const steps=jobSteps(gate);expect(steps).toHaveLength(1);expect(steps[0]?.env?.RELEASE_TAG).toBe('${{ inputs.tag || github.ref_name }}');expect(steps[0]?.run).toContain("\"$RELEASE_TAG\" == 'v0.4.11'");expect(steps[0]?.run).toContain('bridge workflow alone owns v0.4.11');
+    expect(stable.env?.RELEASE_TAG).toBe('${{ needs.validate-tag.outputs.tag }}');
+    expect(semanticCommands(gate).some((command)=>/checkout|build|sign|release create|--latest/.test(command))).toBe(false);
+  });
   it('builds security tooling from a protected reviewed commit before any historical target checkout', () => {
     const { steps } = releaseWorkflow();
     const toolingCheckout=stepIndex(steps,'Check out reviewed release tooling');const buildTools=stepIndex(steps,'Build reviewed release security tools');const target=stepIndex(steps,'Check out release tag');const profile=stepIndex(steps,'Resolve EVSign signer profile');const validate=stepIndex(steps,'Validate published release assets');
@@ -388,7 +398,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[setup]?.id).toBe('msys2');
     expect(steps[build]?.run).toContain('${{ steps.msys2.outputs.msys2-location }}');
     expect(steps[build]?.run).toContain('npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain');
-    expect(steps[build]?.run).toContain('npm run verify:ffmpeg');
+    expect(steps[build]?.run).toContain('RELEASE_TOOLING_ROOT/scripts/verify-ffmpeg.mjs');
     expect(steps[e2e]?.run).toContain('scripts/gift-clip-test-tools.mjs');
     expect(steps[e2e]?.run).toContain('npm run verify:gift-clip-export');
   });
@@ -418,7 +428,8 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[identity]?.run).toContain('$identity.schema -ne 2');
     expect(steps[identity]?.run).toContain('ffmpeg-component-v2-$($identity.fingerprint)');
     expect(steps[packageComponent]?.env).toBeUndefined();
-    expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
+    expect(steps[install]?.run).toContain('RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs');
+    expect(steps[install]?.run).toContain('install --input');
     expect(steps[install]?.run).toContain('verify-metadata');
     expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');
     expect(steps[downloadPublished]?.run).toContain('ffmpeg-component-release.json');
@@ -879,6 +890,8 @@ describe('publisher rotation workflow contract', () => {
 
 describe('exact RushRush bridge release workflow contract', () => {
   it('uses reviewed prebuilt security tools and bounded policy downloads',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const tools=stepIndex(steps,'Build reviewed bridge security tools');const target=stepIndex(steps,'Check out exact bridge tag');const trust=stepIndex(steps,'Fetch immutable production trust binding');expect(tools).toBeLessThan(target);expect(steps[tools]?.run).toContain('bounded-github-asset.mjs');expect(steps[trust]?.run).toContain('BOUNDED_GITHUB_ASSET_SCRIPT_PATH');expect(steps[trust]?.run).not.toContain('gh release download');expect(steps[trust]?.run).toContain('verify-bundle');});
+
+  it('isolates the exact Task9 bundle under a private parent while allowing readiness siblings',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const trust=steps[stepIndex(steps,'Fetch immutable production trust binding')]?.run??'';expect(trust).toContain('private-bundle/bundle');expect(trust).toContain('icacls');expect(trust).toContain("@('audit.json','commit.json','policy.json')");expect(trust).toContain('Unexpected private bundle entry');expect(trust).toContain('--policy dist/bridge-readiness/private-bundle/bundle/policy.json');expect(trust).toContain('--audit dist/bridge-readiness/private-bundle/bundle/audit.json');expect(trust).not.toContain('--policy dist/bridge-readiness/policy.json');});
   it('is manual, fixed to v0.4.11, isolated, and minimally permissioned', () => {
     const workflow = bridgeReleaseWorkflow();
     expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
@@ -1016,10 +1029,12 @@ describe('exact RushRush bridge release workflow contract', () => {
     const inspect = steps[stepIndex(steps, 'Resolve fixed signed FFmpeg component')];
     const verifyBefore = steps[stepIndex(steps, 'Verify NaisNet FFmpeg component before packaging')];
     const verifyAfter = steps[stepIndex(steps, 'Verify NaisNet FFmpeg after packaging')];
-    expect(inspect?.run).toContain('ffmpeg-component-assets.mjs identity');
+    expect(inspect?.run).toContain('RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs');
+    expect(inspect?.run).toContain('identity | ConvertFrom-Json');
     expect(inspect?.run).toContain('FFMPEG_COMPONENT_EXISTS');
-    expect(verifyBefore?.run).toContain('ffmpeg-component-assets.mjs verify-metadata');
-    expect(verifyBefore?.run).toContain('ffmpeg-component-assets.mjs verify');
+    expect(verifyBefore?.run).toContain('RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs');
+    expect(verifyBefore?.run).toContain('verify-metadata --metadata');
+    expect(verifyBefore?.run).toContain('verify --input');
     expect(verifyBefore?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode');
     expect(verifyBefore?.run).toContain('--organization-id 91210103MA7CJ3C094');
     expect(verifyAfter?.run).toContain('$componentManifest.sha256');

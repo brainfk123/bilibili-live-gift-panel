@@ -15,7 +15,7 @@ import {
 
 const maximumSize = 40_000_000;
 const warningSize = 30_000_000;
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = process.env.RELEASE_TARGET_ROOT ? resolve(process.env.RELEASE_TARGET_ROOT) : join(dirname(fileURLToPath(import.meta.url)), '..');
 
 if (process.argv.includes('--self-test')) await runSelfTests();
 else await main();

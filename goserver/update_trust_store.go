@@ -57,7 +57,7 @@ type resolvedUpdateTrustPolicy struct {
 
 func (p resolvedUpdateTrustPolicy) Authorize(input updateArtifactIdentity) error {
 	if p.Mode == updateTrustModeCurrent {
-		return authorizeCurrentUpdateTrustPolicyAt(p.Policy, input, p.resolvedAt)
+		return p.Policy.AuthorizeAt(input, p.resolvedAt)
 	}
 	if p.Mode != updateTrustModeExpiredIdentityFallback || input.Channel != updateChannelStable || !canonicalPolicyTag.MatchString(input.Tag) {
 		return policyError("publisher_not_authorized")
@@ -67,28 +67,6 @@ func (p resolvedUpdateTrustPolicy) Authorize(input updateArtifactIdentity) error
 		if identity == frozen {
 			return nil
 		}
-	}
-	return policyError("publisher_not_authorized")
-}
-
-func authorizeCurrentUpdateTrustPolicyAt(policy verifiedUpdateTrustPolicy, input updateArtifactIdentity, at time.Time) error {
-	if policy.Epoch == 0 || policy.ExpiresAt.IsZero() || !policy.ExpiresAt.After(at.UTC()) {
-		return policyError("policy_expired")
-	}
-	if !canonicalPolicyTag.MatchString(input.Tag) {
-		return policyError("publisher_not_authorized")
-	}
-	inputHash := strings.ToLower(strings.TrimSpace(input.SHA256))
-	certificate := normalizeUpdateCertificateIdentity(input.Certificate)
-	for _, rule := range policy.Rules {
-		if input.Channel != rule.AllowedChannel || !publisherRuleAllowsTag(rule, input.Tag) ||
-			certificate.Country != rule.Country || certificate.Organization != rule.Organization || certificate.OrganizationID != rule.OrganizationID {
-			continue
-		}
-		if rule.ManifestSHA256 != "" && inputHash != rule.ManifestSHA256 {
-			continue
-		}
-		return nil
 	}
 	return policyError("publisher_not_authorized")
 }

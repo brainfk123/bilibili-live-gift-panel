@@ -41,6 +41,13 @@ describe('FFmpeg component assets', () => {
     expect(`${result.stdout}${result.stderr}`).not.toContain('EVSIGN_EXPECTED_SUBJECT');
   });
 
+  it('uses reviewed tooling against the real v0.4.10 target inputs without target scripts or Subject env', () => {
+    const root=temporaryRoot();
+    const projectRoot=fileURLToPath(new URL('..',import.meta.url));const safeRoot=projectRoot.replace(/[\\/]$/,'').replace(/\\/g,'/');for(const relative of ['goserver/ffmpeg/manifest.json','third_party/ffmpeg/configure.flags','third_party/ffmpeg/toolchain-lock.json']){const shown=spawnSync('git',['-c',`safe.directory=${safeRoot}`,'show',`v0.4.10:${relative}`],{cwd:projectRoot,encoding:null});expect(shown.status,shown.stderr?.toString()).toBe(0);const target=join(root,relative);mkdirSync(dirname(target),{recursive:true});writeFileSync(target,shown.stdout);}
+    const result=spawnSync(process.execPath,[fileURLToPath(new URL('../scripts/ffmpeg-component-assets.mjs',import.meta.url)),'identity'],{cwd:root,encoding:'utf8',env:{...process.env,RELEASE_TARGET_ROOT:root,EVSIGN_EXPECTED_SUBJECT:''}});
+    expect(result.status,result.stderr).toBe(0);expect(JSON.parse(result.stdout)).toMatchObject({schema:2});expect(`${result.stdout}${result.stderr}`).not.toContain('EVSIGN_EXPECTED_SUBJECT');
+  });
+
   it('rejects mismatched signed metadata before preparing publishable component assets', async () => {
     const root = temporaryRoot();
     for (const relative of [

@@ -21,11 +21,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+    steps:
+      - name: Reject bridge tag from stable workflow
+        id: validate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'stable release tag is not canonical' >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" == 'v0.4.11' ]]; then
+            echo 'bridge workflow alone owns v0.4.11' >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: validate-tag
     runs-on: windows-latest
     environment: release
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
     steps:
       - name: Validate release tag
         shell: pwsh
@@ -61,11 +86,14 @@ jobs:
       - name: Build reviewed release security tools
         shell: pwsh
         run: |
+          Copy-Item -LiteralPath release-tools -Destination "$env:RUNNER_TEMP/release-tools" -Recurse
           go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
           if ($LASTEXITCODE -ne 0) { throw 'Reviewed artifact inspector build failed.' }
           Copy-Item -LiteralPath release-tools/scripts/sign-evsign.mjs -Destination "$env:RUNNER_TEMP/sign-evsign.mjs"
           "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOLING_ROOT=$env:RUNNER_TEMP/release-tools" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Check out release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -205,7 +233,7 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
-          $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
+          $identityJSON = node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" identity
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
           $identity = $identityJSON | ConvertFrom-Json
           if ($identity.schema -ne 2 -or [string]$identity.fingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$identity.tag -cne "ffmpeg-component-v2-$($identity.fingerprint)") {
@@ -263,13 +291,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $componentDirectory = 'dist/ffmpeg-component-download'
-          node scripts/ffmpeg-component-assets.mjs verify-metadata --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
+          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
           if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component GitHub metadata or digest verification failed" }
           foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component attestation verification failed for $($asset.Name)" }
           }
-          node scripts/ffmpeg-component-assets.mjs verify --input $componentDirectory
+          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" verify --input $componentDirectory
           if ($LASTEXITCODE -ne 0) { throw "Repair signed FFmpeg component verification failed" }
           Copy-Item -LiteralPath "$componentDirectory/manifest.json" -Destination dist/standalone-component-manifest.json
 
@@ -292,7 +320,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned FFmpeg build failed with exit code $LASTEXITCODE"
           }
-          npm run verify:ffmpeg
+          node "$env:RELEASE_TOOLING_ROOT/scripts/verify-ffmpeg.mjs"
           if ($LASTEXITCODE -ne 0) {
             throw "FFmpeg verification failed with exit code $LASTEXITCODE"
           }
@@ -322,11 +350,11 @@ jobs:
           APP_VERSION: ${{ env.RELEASE_TAG }}
           APP_COMMIT: ${{ env.RELEASE_COMMIT }}
         run: |
-          node scripts/package-ffmpeg.mjs --input dist/ffmpeg/ffmpeg.exe
+          node "$env:RELEASE_TOOLING_ROOT/scripts/package-ffmpeg.mjs" --input dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
             throw "FFmpeg packaging failed with exit code $LASTEXITCODE"
           }
-          npm run verify:ffmpeg
+          node "$env:RELEASE_TOOLING_ROOT/scripts/verify-ffmpeg.mjs"
           if ($LASTEXITCODE -ne 0) {
             throw "Signed FFmpeg payload verification failed with exit code $LASTEXITCODE"
           }
@@ -336,7 +364,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
-          node scripts/ffmpeg-component-assets.mjs prepare --output dist/ffmpeg-component-publish
+          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" prepare --output dist/ffmpeg-component-publish
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component asset packaging failed" }
 
       - name: Attest signed FFmpeg component
@@ -404,13 +432,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $componentDirectory = if ($env:FFMPEG_COMPONENT_EXISTS -eq 'true') { 'dist/ffmpeg-component-download' } else { 'dist/ffmpeg-component-published' }
-          node scripts/ffmpeg-component-assets.mjs verify-metadata --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
+          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component GitHub metadata or digest verification failed" }
           foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw "FFmpeg component attestation verification failed for $($asset.Name)" }
           }
-          node scripts/ffmpeg-component-assets.mjs install --input $componentDirectory
+          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" install --input $componentDirectory
           if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component verification or installation failed" }
           New-Item -ItemType Directory -Force -Path dist/ffmpeg-source | Out-Null
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz
@@ -419,7 +447,7 @@ jobs:
           Copy-Item -LiteralPath "$componentDirectory/ffmpeg-component-gate.txt" -Destination dist/ffmpeg-component-gate.txt
           if (Test-Path dist/gift-clip-test-tools) { Remove-Item -LiteralPath dist/gift-clip-test-tools -Recurse -Force }
           Expand-Archive -LiteralPath "$componentDirectory/gift-clip-test-tools.zip" -DestinationPath dist/gift-clip-test-tools
-          node scripts/gift-clip-test-tools.mjs | Out-Null
+          node "$env:RELEASE_TOOLING_ROOT/scripts/gift-clip-test-tools.mjs" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Cached gift clip test tools failed verification" }
 
       - name: Prepare standalone FFmpeg release asset
@@ -481,7 +509,7 @@ jobs:
         env:
           GIFT_CLIP_FFMPEG_E2E: '1'
         run: |
-          $tools = node scripts/gift-clip-test-tools.mjs | ConvertFrom-Json
+          $tools = node "$env:RELEASE_TOOLING_ROOT/scripts/gift-clip-test-tools.mjs" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) {
             throw "Gift clip test-tool verification failed with exit code $LASTEXITCODE"
           }
