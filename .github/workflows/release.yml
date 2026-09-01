@@ -368,6 +368,13 @@ jobs:
           $historyBytes=[IO.File]::ReadAllBytes($historyItem.FullName);$historyHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($historyBytes)).ToLowerInvariant()
           if($historyHash -cne $env:STABLE_CHANGELOG_HISTORY_SHA256){throw 'Reviewed changelog history digest mismatch'}
           $history=@(Read-Changelog $historyBytes 'reviewed history');$currentVersion=[Version]$env:RELEASE_VERSION
+          if($env:RELEASE_VERSION -ceq '0.4.12'){
+            $requiredEnrollmentHistory=@('0.4.10','0.4.9','0.4.7')
+            if($history.Count -lt $requiredEnrollmentHistory.Count){throw 'First enrollment reviewed changelog history is incomplete'}
+            for($index=0;$index -lt $requiredEnrollmentHistory.Count;$index++){
+              if([string]$history[$index].version -cne $requiredEnrollmentHistory[$index]){throw 'First enrollment reviewed changelog history sequence is invalid'}
+            }
+          }
           foreach($release in $history){if([Version]$release.version -ge $currentVersion){throw 'Reviewed changelog history collides with or exceeds the current version'}}
           $merged=@($current)+@($history);if($merged.Count -gt 512){throw 'Canonical changelog contains too many releases'}
           $canonicalJSON=[ordered]@{schemaVersion=1;releases=$merged}|ConvertTo-Json -Depth 12

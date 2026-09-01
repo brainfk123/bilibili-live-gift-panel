@@ -104,6 +104,30 @@ interface ChangelogReleaseFixture {
   visuals: string[];
 }
 
+interface ChangelogHistoryFixture {
+  schemaVersion: number;
+  releases: ChangelogReleaseFixture[];
+}
+
+const reviewedChangelogHistoryURL = new URL('../.github/changelog-history.json', import.meta.url);
+
+function reviewedChangelogHistory() {
+  const bytes = readFileSync(reviewedChangelogHistoryURL);
+  return {
+    bytes,
+    digest: createHash('sha256').update(bytes).digest('hex'),
+    document: JSON.parse(bytes.toString('utf8')) as ChangelogHistoryFixture,
+  };
+}
+
+function mutateReviewedChangelogHistory(
+  mutate: (releases: ChangelogReleaseFixture[]) => void,
+): Buffer {
+  const document = structuredClone(reviewedChangelogHistory().document);
+  mutate(document.releases);
+  return Buffer.from(JSON.stringify(document));
+}
+
 function changelogRelease(version: string): ChangelogReleaseFixture {
   return {
     version,
@@ -117,9 +141,12 @@ function changelogRelease(version: string): ChangelogReleaseFixture {
 
 function runCandidateChangelogStep(options: {
   target: readonly ChangelogReleaseFixture[];
-  history?: readonly ChangelogReleaseFixture[] | Buffer;
+  history?: Buffer;
+  omitHistory?: boolean;
   sourceHistory?: readonly ChangelogReleaseFixture[];
   expectedHistorySHA256?: string;
+  releaseTag?: string;
+  releaseVersion?: string;
 }) {
   const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
   const steps = jobSteps(jobs['prepare-candidate']);
@@ -131,13 +158,11 @@ function runCandidateChangelogStep(options: {
     mkdirSync(join(root, 'dist'));
     mkdirSync(join(tooling, '.github'), { recursive: true });
     writeFileSync(join(root, 'gift-panel-changelog.json'), JSON.stringify({ schemaVersion: 1, releases: options.target }));
-    const historyBytes = Buffer.isBuffer(options.history)
-      ? options.history
-      : Buffer.from(JSON.stringify({ schemaVersion: 1, releases: options.history ?? [] }));
-    if (options.history !== undefined) writeFileSync(join(tooling, '.github', 'changelog-history.json'), historyBytes);
+    const historyBytes = options.history ?? reviewedChangelogHistory().bytes;
+    if (!options.omitHistory) writeFileSync(join(tooling, '.github', 'changelog-history.json'), historyBytes);
     writeFileSync(join(root, '.github', 'changelog-history.json'), JSON.stringify({
       schemaVersion: 1,
-      releases: options.sourceHistory ?? (Array.isArray(options.history) ? options.history : [changelogRelease('0.3.0')]),
+      releases: options.sourceHistory ?? [changelogRelease('0.3.0')],
     }));
     const outputPath = join(root, 'dist', 'canonical-gift-panel-changelog.json');
     const githubOutput = join(root, 'github-output.txt');
@@ -149,8 +174,8 @@ function runCandidateChangelogStep(options: {
       env: {
         ...process.env,
         GITHUB_OUTPUT: githubOutput,
-        RELEASE_TAG: 'v0.4.12',
-        RELEASE_VERSION: '0.4.12',
+        RELEASE_TAG: options.releaseTag ?? 'v0.4.12',
+        RELEASE_VERSION: options.releaseVersion ?? '0.4.12',
         RELEASE_TOOL_ROOT: tooling,
         RELEASE_TOOLING_COMMIT_SHA: 'a'.repeat(40),
         STABLE_CHANGELOG_HISTORY_SHA256: expectedHistorySHA256,
@@ -161,6 +186,7 @@ function runCandidateChangelogStep(options: {
     return {
       result,
       output: existsSync(outputPath) ? readFileSync(outputPath) : undefined,
+      githubOutput: existsSync(githubOutput) ? readFileSync(githubOutput, 'utf8') : undefined,
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -471,24 +497,57 @@ describe('release workflow supply-chain contract', () => {
 	  expect(publishSteps[stepIndex(publishSteps,'Revalidate reviewed stable candidate')]?.run).toContain('historySha256');
 	});
 
-	it('deterministically merges one exact target release with reviewed history', () => {
-	  const history=[changelogRelease('0.4.10'),changelogRelease('0.4.9'),changelogRelease('0.4.7')];
-	  const options={target:[changelogRelease('0.4.12')],history,sourceHistory:[changelogRelease('0.3.0')]};
+	it('deterministically prepends v0.4.12 to the exact checked-in reviewed history', () => {
+	  const reviewed=reviewedChangelogHistory();
+	  const options={target:[changelogRelease('0.4.12')],history:reviewed.bytes,sourceHistory:[changelogRelease('0.3.0')]};
 	  const first=runCandidateChangelogStep(options);expect(first.result.status,`${first.result.stdout}${first.result.stderr}`).toBe(0);
 	  const second=runCandidateChangelogStep(options);expect(second.result.status,`${second.result.stdout}${second.result.stderr}`).toBe(0);
 	  expect(first.output).toEqual(second.output);
-	  const merged=JSON.parse(first.output!.toString('utf8'));
-	  expect(merged.releases.map((release:{version:string})=>release.version)).toEqual(['0.4.12','0.4.10','0.4.9','0.4.7']);
+	  expect(first.githubOutput).toContain(`history_sha256=${reviewed.digest}`);
+	  const merged=JSON.parse(first.output!.toString('utf8')) as ChangelogHistoryFixture;
+	  const versions=merged.releases.map((release)=>release.version);
+	  expect(versions.slice(0,4)).toEqual(['0.4.12','0.4.10','0.4.9','0.4.7']);
+	  expect(versions.slice(1)).toEqual(reviewed.document.releases.map((release)=>release.version));
+	  expect(versions).not.toContain('0.4.8');
+	});
+
+	it('keeps later stable history digest-bound without reusing the v0.4.12 sequence invariant', () => {
+	  const history=mutateReviewedChangelogHistory((releases)=>releases.unshift(changelogRelease('0.4.11')));
+	  const execution=runCandidateChangelogStep({
+		target:[changelogRelease('0.4.13')],history,releaseTag:'v0.4.13',releaseVersion:'0.4.13',
+	  });
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).toBe(0);
+	  const merged=JSON.parse(execution.output!.toString('utf8')) as ChangelogHistoryFixture;
+	  expect(merged.releases.slice(0,5).map((release)=>release.version)).toEqual(['0.4.13','0.4.11','0.4.10','0.4.9','0.4.7']);
+	});
+
+	it.each(['0.4.10','0.4.9','0.4.7'])('rejects checked-in reviewed history missing %s for first enrollment', (version) => {
+	  const history=mutateReviewedChangelogHistory((releases)=>{
+		const index=releases.findIndex((release)=>release.version===version);
+		expect(index,`checked-in reviewed history must contain ${version}`).toBeGreaterThanOrEqual(0);
+		releases.splice(index,1);
+	  });
+	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],history});
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);
 	});
 
 	it.each([
-	  ['an extra target entry',{target:[changelogRelease('0.4.12'),changelogRelease('0.4.11')],history:[changelogRelease('0.4.10')]}],
-	  ['reviewed history from a higher moved tag',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.13'),changelogRelease('0.4.10')]}],
-	  ['a reviewed history digest mismatch',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.10')],expectedHistorySHA256:'0'.repeat(64)}],
-	  ['duplicate reviewed history versions',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.10'),changelogRelease('0.4.10')]}],
-	  ['a current-version history collision',{target:[changelogRelease('0.4.12')],history:[changelogRelease('0.4.12'),changelogRelease('0.4.10')]}],
-	  ['missing reviewed history',{target:[changelogRelease('0.4.12')],history:undefined}],
-	  ['malformed reviewed history',{target:[changelogRelease('0.4.12')],history:Buffer.from('{"schemaVersion":1,"releases":') }],
+	  ['an inserted v0.4.8',()=>mutateReviewedChangelogHistory((releases)=>releases.splice(2,0,changelogRelease('0.4.8'))),undefined],
+	  ['reordered required recent versions',()=>mutateReviewedChangelogHistory((releases)=>{[releases[0],releases[1]]=[releases[1],releases[0]];}),undefined],
+	  ['changed reviewed history content',()=>mutateReviewedChangelogHistory((releases)=>{releases[0].summary=`${releases[0].summary} changed`;}),reviewedChangelogHistory().digest],
+	  ['a reviewed history digest mismatch',()=>reviewedChangelogHistory().bytes,'0'.repeat(64)],
+	  ['reviewed history from a higher moved tag',()=>mutateReviewedChangelogHistory((releases)=>releases.unshift(changelogRelease('0.4.13'))),undefined],
+	  ['duplicate reviewed history versions',()=>mutateReviewedChangelogHistory((releases)=>releases.splice(1,0,structuredClone(releases[0]))),undefined],
+	  ['a current-version history collision',()=>mutateReviewedChangelogHistory((releases)=>releases.unshift(changelogRelease('0.4.12'))),undefined],
+	] as const)('rejects %s',(_name,historyFactory,expectedHistorySHA256)=>{
+	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],history:historyFactory(),expectedHistorySHA256});
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);
+	});
+
+	it.each([
+	  ['an extra target entry',{target:[changelogRelease('0.4.12'),changelogRelease('0.4.11')]}],
+	  ['missing reviewed history',{target:[changelogRelease('0.4.12')],omitHistory:true}],
+	  ['malformed reviewed history',{target:[changelogRelease('0.4.12')],history:Buffer.from('{"schemaVersion":1,"releases":')}],
 	] as const)('rejects %s',(_name,options)=>{
 	  const execution=runCandidateChangelogStep(options);
 	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);

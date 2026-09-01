@@ -90,6 +90,13 @@ duplicate-free, and entirely older than the current release. Candidate and
 published evidence expose only the canonical changelog hash, reviewed history
 hash, and tooling commit—never paths. The deterministic merge fails on missing,
 malformed, mismatched, duplicate, current-colliding, or future history.
+For the first enrollment Release, `v0.4.12`, that reviewed history must begin
+with the exact sequence `0.4.10`, `0.4.9`, `0.4.7`; `0.4.8` is not synthesized.
+Later stable versions continue to require reviewed history bytes and their
+protected digest and may add their own separately reviewed sequence invariant.
+The tooling checkout's history file and protected
+`STABLE_CHANGELOG_HISTORY_SHA256` value are one review unit and must be reviewed
+and updated together before candidate preparation or publication.
 
 ## Action-time approvals
 
