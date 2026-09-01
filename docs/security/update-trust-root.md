@@ -17,9 +17,8 @@ only for local tests and enrollment seams:
 - SPKI SHA-256: `5cd252fb0ce8932436faf8ccd1040981b89ee4ad6b9fe9e2a2b7e71aacb27cd3`
 - Bootstrap policy SHA-256: `205b8ea9bf7e79d55292d63a1266a4882ab01fa5edb3eb79421724ddb9265d0e`
 
-No production rotation root has been generated or independently reviewed.
-Do not substitute a placeholder value or add a claimed production digest to
-this document.
+These two listed fixture digests remain test-only and must never be substituted
+for the separately listed production public root.
 
 ## Production public root
 
@@ -41,11 +40,12 @@ stored only in the `publisher-rotation` Environment Secret plus its Windows-DPAP
 backup. Separately verify the signed bootstrap policy's canonical bytes,
 signature, epoch, expiry, and authorized publisher rules.
 
-Only after both reviewers record the same SPKI and policy SHA-256 digests may
-the release owner supply their Base64 encodings as
+Only after the independently derived SPKI matches the committed public digest
+and the protected workflow's policy signature is verified may the release
+owner supply their Base64 encodings as
 `APP_UPDATE_TRUST_ROOT_SPKI_B64` and
 `APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64`, together with
-`APP_UPDATE_TRUST_REQUIRED=1`. The release evidence must preserve the two
-reviewer identity, non-secret key ID, GitHub workflow run/attempt, policy
+`APP_UPDATE_TRUST_REQUIRED=1`. The release evidence must preserve the reviewer's
+identity, non-secret key ID, GitHub workflow run/attempt, policy
 epoch, both public digests, and the approval timestamp; it must never include
 private-key material, Environment Secret values, or Tencent credentials.

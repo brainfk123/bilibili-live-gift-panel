@@ -530,14 +530,16 @@ export function createCOSPublisherAdapter(environment, fetchImpl = fetch, now = 
   const secretKey = environment.TENCENTCLOUD_SECRET_KEY ?? '';
   const sessionToken = environment.TENCENTCLOUD_SESSION_TOKEN ?? '';
   if (!/^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?-[1-9][0-9]{4,19}$/.test(bucket) ||
-    !/^[a-z][a-z0-9-]{1,30}[a-z0-9]$/.test(region) || !secretID.trim() || !secretKey.trim() || !sessionToken.trim()) {
+    !/^[a-z][a-z0-9-]{1,30}[a-z0-9]$/.test(region) || !secretID.trim() || !secretKey.trim() ||
+    (sessionToken !== '' && !sessionToken.trim())) {
     throw new PublicationFailure();
   }
   const endpoint = `${bucket}.cos.${region}.myqcloud.com`;
   async function request(method, key, body, extraHeaders = {}) {
     if (!/^trust\/publisher\/(?:epochs\/[0-9]{8}\.json|latest\.json)$/.test(key)) throw new PublicationFailure();
     const url = new URL(`https://${endpoint}/${key.split('/').map(safeEncode).join('/')}`);
-    const headers = new Headers({ host: endpoint, 'x-cos-security-token': sessionToken, 'accept-encoding': 'identity', ...extraHeaders });
+    const headers = new Headers({ host: endpoint, 'accept-encoding': 'identity', ...extraHeaders });
+    if (sessionToken !== '') headers.set('x-cos-security-token', sessionToken);
     if (body !== undefined) {
       headers.set('content-length', String(body.length));
       headers.set('content-type', 'application/json');

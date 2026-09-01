@@ -319,6 +319,24 @@ describe('real publisher remote adapters', () => {
     expect(requestedEncoding).toBe('identity');
   });
 
+  it('signs COS requests with the exact permanent-credential workflow shape and omits a security-token header', async () => {
+    const permanentEnvironment = {
+      COS_BUCKET: remoteEnvironment.COS_BUCKET,
+      COS_REGION: remoteEnvironment.COS_REGION,
+      TENCENTCLOUD_SECRET_ID: 'permanent-id',
+      TENCENTCLOUD_SECRET_KEY: 'permanent-key',
+    };
+    let headers = new Headers();
+    const adapter = createCOSPublisherAdapter(permanentEnvironment, async (_input, init) => {
+      headers = new Headers(init?.headers);
+      return new Response(null, { status: 404 });
+    }, () => new Date('2029-01-02T03:04:05Z'));
+
+    await expect(adapter.read('trust/publisher/latest.json')).resolves.toBeNull();
+    expect(headers.get('x-cos-security-token')).toBeNull();
+    expect(headers.get('authorization')).not.toContain('x-cos-security-token');
+  });
+
   it.each([
     { name: 'direct 200', redirect: false },
     { name: 'one reviewed 302', redirect: true },
