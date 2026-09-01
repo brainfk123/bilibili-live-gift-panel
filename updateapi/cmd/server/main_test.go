@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
@@ -75,6 +76,18 @@ func TestLoadConfigRejectsInvalidClosedRoutingValue(t *testing.T) {
 	t.Setenv("UPDATE_STABLE_CHANNEL_KEY", "channels/preview/latest.json")
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("loadConfig() error = nil, want invalid routing configuration rejected")
+	}
+}
+
+func TestLoadConfigRejectsUnknownRoutingEnvironmentFromProcess(t *testing.T) {
+	setRequiredServerEnvironment(t)
+	t.Setenv("UPDATE_LEGACY_ROUTING_ACTVE", "private-marker")
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("loadConfig() error = nil, want typo rejected")
+	}
+	if err.Error() != "invalid update routing environment" || strings.Contains(err.Error(), "private-marker") {
+		t.Fatalf("loadConfig() error = %q, want generic non-sensitive classification", err)
 	}
 }
 

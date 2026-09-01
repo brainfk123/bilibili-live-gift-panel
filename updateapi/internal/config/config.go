@@ -1,24 +1,26 @@
 // Package config validates the update API's closed deployment routing inputs.
 package config
 
-import "fmt"
+import (
+	"errors"
+	"strings"
+
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/service"
+)
 
 const (
-	stableChannelKey   = "channels/stable/latest.json"
-	legacyChannelKey   = "channels/legacy-rushrush/latest.json"
-	publisherPolicyKey = "trust/publisher/latest.json"
 	stableChannelEnv   = "UPDATE_STABLE_CHANNEL_KEY"
 	legacyChannelEnv   = "UPDATE_LEGACY_CHANNEL_KEY"
 	legacyRoutingEnv   = "UPDATE_LEGACY_ROUTING_ACTIVE"
 	publisherPolicyEnv = "UPDATE_PUBLISHER_POLICY_KEY"
 )
 
+var errInvalidRoutingEnvironment = errors.New("invalid update routing environment")
+
 // Config is the closed set of routing inputs accepted by the update API.
 type Config struct {
-	StableChannelKey    string
-	LegacyChannelKey    string
+	ObjectKeys          service.ObjectKeys
 	LegacyRoutingActive bool
-	PublisherPolicyKey  string
 }
 
 // FromEnv validates a map containing only the reviewed routing variables.
@@ -29,22 +31,53 @@ func FromEnv(values map[string]string) (Config, error) {
 		switch name {
 		case stableChannelEnv, legacyChannelEnv, legacyRoutingEnv, publisherPolicyEnv:
 		default:
-			return Config{}, fmt.Errorf("unknown update routing variable %q", name)
+			return Config{}, errInvalidRoutingEnvironment
 		}
 	}
+	return fromValues(values)
+}
 
-	configuration := Config{
-		StableChannelKey:   stableChannelKey,
-		LegacyChannelKey:   legacyChannelKey,
-		PublisherPolicyKey: publisherPolicyKey,
+// FromEnviron enumerates process environment entries in the closed routing
+// namespaces before applying defaults. Unrelated process variables are ignored;
+// every unknown, malformed, or duplicate owned entry fails closed.
+func FromEnviron(entries []string) (Config, error) {
+	values := make(map[string]string)
+	for _, entry := range entries {
+		name, value, hasValue := strings.Cut(entry, "=")
+		upperName := strings.ToUpper(name)
+		owned := strings.HasPrefix(upperName, "UPDATE_STABLE_") ||
+			strings.HasPrefix(upperName, "UPDATE_LEGACY_") ||
+			strings.HasPrefix(upperName, "UPDATE_PUBLISHER_")
+		if !owned {
+			continue
+		}
+		if !hasValue {
+			return Config{}, errInvalidRoutingEnvironment
+		}
+		switch name {
+		case stableChannelEnv, legacyChannelEnv, legacyRoutingEnv, publisherPolicyEnv:
+		default:
+			return Config{}, errInvalidRoutingEnvironment
+		}
+		if _, duplicate := values[name]; duplicate {
+			return Config{}, errInvalidRoutingEnvironment
+		}
+		values[name] = value
 	}
+	return fromValues(values)
+}
+
+func fromValues(values map[string]string) (Config, error) {
+
+	reviewed := service.ReviewedObjectKeys()
+	configuration := Config{ObjectKeys: reviewed}
 	for name, expected := range map[string]string{
-		stableChannelEnv:   stableChannelKey,
-		legacyChannelEnv:   legacyChannelKey,
-		publisherPolicyEnv: publisherPolicyKey,
+		stableChannelEnv:   reviewed.StableChannel,
+		legacyChannelEnv:   reviewed.LegacyChannel,
+		publisherPolicyEnv: reviewed.PublisherPolicy,
 	} {
 		if value, present := values[name]; present && value != expected {
-			return Config{}, fmt.Errorf("%s must use the reviewed object key", name)
+			return Config{}, errInvalidRoutingEnvironment
 		}
 	}
 
@@ -55,7 +88,7 @@ func FromEnv(values map[string]string) (Config, error) {
 		case "true":
 			configuration.LegacyRoutingActive = true
 		default:
-			return Config{}, fmt.Errorf("%s must be exactly true or false", legacyRoutingEnv)
+			return Config{}, errInvalidRoutingEnvironment
 		}
 	}
 	return configuration, nil

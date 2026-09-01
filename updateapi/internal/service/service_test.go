@@ -377,6 +377,111 @@ func TestPublisherPolicyRejectsOversizedEnvelope(t *testing.T) {
 	}
 }
 
+func TestObjectKeysDriveEveryConfiguredServiceRead(t *testing.T) {
+	keys := service.ObjectKeys{
+		StableChannel:   "fixtures/channels/stable.json",
+		LegacyChannel:   "fixtures/channels/legacy.json",
+		PublisherPolicy: "fixtures/trust/policy.json",
+	}
+
+	t.Run("stable", func(t *testing.T) {
+		store := &fakeStore{
+			get: func(key string, maxBytes int64) ([]byte, string, error) {
+				if key != keys.StableChannel || maxBytes != 64<<10 {
+					t.Fatalf("unexpected configured read %q (%d)", key, maxBytes)
+				}
+				return validManifestForChannel(t, release.ChannelStable, "v0.4.12"), "stable-etag", nil
+			},
+			presign: func(string, time.Duration) (string, error) { return "https://fixture.invalid/stable", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("changelog starts from stable pointer", func(t *testing.T) {
+		store := &fakeStore{
+			get: func(key string, maxBytes int64) ([]byte, string, error) {
+				switch key {
+				case keys.StableChannel:
+					return validManifestForChannel(t, release.ChannelStable, "v0.4.12"), "stable-etag", nil
+				case "releases/v0.4.12/gift-panel-changelog.json":
+					return []byte(`{"schemaVersion":1,"releases":[{"version":"0.4.12"}]}`), "changelog-etag", nil
+				default:
+					t.Fatalf("unexpected configured read %q (%d)", key, maxBytes)
+					return nil, "", nil
+				}
+			},
+			presign: func(string, time.Duration) (string, error) { return "", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.Changelog(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		store := &fakeStore{
+			get: func(key string, _ int64) ([]byte, string, error) {
+				if key != keys.LegacyChannel {
+					t.Fatalf("legacy read key = %q, want injected key", key)
+				}
+				return validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11"), "legacy-etag", nil
+			},
+			presign: func(string, time.Duration) (string, error) { return "https://fixture.invalid/legacy", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.Latest(context.Background(), release.ChannelLegacyRushRush); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("publisher policy", func(t *testing.T) {
+		policy := []byte(`{"signed":{"epoch":1},"signatures":[{"algorithm":"ecdsa-p256-sha256","signature":"fixture"}]}`)
+		store := &fakeStore{
+			get: func(key string, _ int64) ([]byte, string, error) {
+				if key != keys.PublisherPolicy {
+					t.Fatalf("policy read key = %q, want injected key", key)
+				}
+				return policy, "policy-etag", nil
+			},
+			presign: func(string, time.Duration) (string, error) { return "", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.PublisherPolicy(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestObjectKeysRejectEmptyOrAliasedConfiguredReads(t *testing.T) {
+	valid := service.ObjectKeys{StableChannel: "stable", LegacyChannel: "legacy", PublisherPolicy: "policy"}
+	tests := []service.ObjectKeys{
+		{},
+		{StableChannel: "", LegacyChannel: valid.LegacyChannel, PublisherPolicy: valid.PublisherPolicy},
+		{StableChannel: valid.StableChannel, LegacyChannel: valid.StableChannel, PublisherPolicy: valid.PublisherPolicy},
+		{StableChannel: valid.StableChannel, LegacyChannel: valid.LegacyChannel, PublisherPolicy: valid.StableChannel},
+	}
+	for _, keys := range tests {
+		if _, err := service.NewWithObjectKeys(&fakeStore{}, time.Now, keys); err == nil {
+			t.Fatalf("NewWithObjectKeys(%#v) error = nil, want rejection", keys)
+		}
+	}
+}
+
 func TestChannelRefreshesDoNotBlockEachOther(t *testing.T) {
 	for _, test := range []struct {
 		name           string

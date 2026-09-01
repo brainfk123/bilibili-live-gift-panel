@@ -11,17 +11,31 @@ import (
 )
 
 const (
-	manifestMaxBytes  = int64(64 << 10)
-	changelogMaxBytes = int64(2 << 20)
-	policyMaxBytes    = int64(256 << 10)
-	cacheFreshness    = time.Minute
-	presignTTL        = 10 * time.Minute
-	policyKey         = "trust/publisher/latest.json"
+	manifestMaxBytes   = int64(64 << 10)
+	changelogMaxBytes  = int64(2 << 20)
+	policyMaxBytes     = int64(256 << 10)
+	cacheFreshness     = time.Minute
+	presignTTL         = 10 * time.Minute
+	stableChannelKey   = "channels/stable/latest.json"
+	legacyChannelKey   = "channels/legacy-rushrush/latest.json"
+	publisherPolicyKey = "trust/publisher/latest.json"
 )
 
-var channelKeys = map[release.Channel]string{
-	release.ChannelStable:         "channels/stable/latest.json",
-	release.ChannelLegacyRushRush: "channels/legacy-rushrush/latest.json",
+// ObjectKeys is the closed set of configurable discovery reads used by the
+// update service. Release asset and changelog keys remain manifest-bound.
+type ObjectKeys struct {
+	StableChannel   string
+	LegacyChannel   string
+	PublisherPolicy string
+}
+
+// ReviewedObjectKeys returns the single production object-key authority.
+func ReviewedObjectKeys() ObjectKeys {
+	return ObjectKeys{
+		StableChannel:   stableChannelKey,
+		LegacyChannel:   legacyChannelKey,
+		PublisherPolicy: publisherPolicyKey,
+	}
 }
 
 var (
@@ -71,6 +85,7 @@ type Document struct {
 type Service struct {
 	store Store
 	now   func() time.Time
+	keys  ObjectKeys
 
 	cacheMu sync.RWMutex
 	cache   map[release.Channel]manifestCache
@@ -85,18 +100,37 @@ type manifestCache struct {
 }
 
 func New(store Store, now func() time.Time) *Service {
+	configured, err := NewWithObjectKeys(store, now, ReviewedObjectKeys())
+	if err != nil {
+		panic("reviewed service object keys are invalid")
+	}
+	return configured
+}
+
+// NewWithObjectKeys constructs a service from an already validated, typed key
+// set. Production callers must obtain this set from deployment config.
+func NewWithObjectKeys(store Store, now func() time.Time, keys ObjectKeys) (*Service, error) {
+	if store == nil || !validObjectKeys(keys) {
+		return nil, errors.New("service object keys are invalid")
+	}
 	if now == nil {
 		now = time.Now
 	}
 	return &Service{
 		store: store,
 		now:   now,
+		keys:  keys,
 		cache: make(map[release.Channel]manifestCache),
 		refreshMu: map[release.Channel]*sync.Mutex{
 			release.ChannelStable:         {},
 			release.ChannelLegacyRushRush: {},
 		},
-	}
+	}, nil
+}
+
+func validObjectKeys(keys ObjectKeys) bool {
+	return keys.StableChannel != "" && keys.LegacyChannel != "" && keys.PublisherPolicy != "" &&
+		keys.StableChannel != keys.LegacyChannel && keys.StableChannel != keys.PublisherPolicy && keys.LegacyChannel != keys.PublisherPolicy
 }
 
 func (service *Service) Latest(ctx context.Context, channel release.Channel) (release.PublicRelease, error) {
@@ -132,7 +166,7 @@ func (service *Service) Changelog(ctx context.Context) (Document, error) {
 }
 
 func (service *Service) PublisherPolicy(ctx context.Context) ([]byte, error) {
-	body, _, err := service.store.Get(ctx, policyKey, policyMaxBytes)
+	body, _, err := service.store.Get(ctx, service.keys.PublisherPolicy, policyMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrReleaseUnavailable, err)
 	}
@@ -143,8 +177,13 @@ func (service *Service) PublisherPolicy(ctx context.Context) ([]byte, error) {
 }
 
 func (service *Service) manifest(ctx context.Context, channel release.Channel) (release.ChannelManifest, error) {
-	channelKey, ok := channelKeys[channel]
-	if !ok {
+	var channelKey string
+	switch channel {
+	case release.ChannelStable:
+		channelKey = service.keys.StableChannel
+	case release.ChannelLegacyRushRush:
+		channelKey = service.keys.LegacyChannel
+	default:
 		return release.ChannelManifest{}, releaseInvalid("unsupported_channel_key", errors.New("unsupported channel key"))
 	}
 

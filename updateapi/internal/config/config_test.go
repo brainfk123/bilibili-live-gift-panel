@@ -13,6 +13,51 @@ import (
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/service"
 )
 
+func TestRoutingEnvironmentRejectsUnknownAndDuplicateProcessEntries(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []string
+	}{
+		{name: "typo", entries: []string{"UPDATE_LEGACY_ROUTING_ACTVE=true"}},
+		{name: "unknown legacy namespace", entries: []string{"UPDATE_LEGACY_PRIVATE_MARKER=true"}},
+		{name: "unknown stable namespace", entries: []string{"UPDATE_STABLE_PRIVATE_MARKER=channels/private/latest.json"}},
+		{name: "unknown publisher namespace", entries: []string{"UPDATE_PUBLISHER_PRIVATE_MARKER=trust/private.json"}},
+		{name: "reviewed name with arbitrary value", entries: []string{"UPDATE_STABLE_CHANNEL_KEY=private-marker"}},
+		{name: "case variant", entries: []string{"update_legacy_routing_active=true"}},
+		{name: "duplicate", entries: []string{"UPDATE_LEGACY_ROUTING_ACTIVE=false", "UPDATE_LEGACY_ROUTING_ACTIVE=true"}},
+		{name: "malformed owned entry", entries: []string{"UPDATE_LEGACY_ROUTING_ACTIVE"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := FromEnviron(test.entries)
+			if err == nil {
+				t.Fatal("FromEnviron() error = nil, want rejection")
+			}
+			if err.Error() != "invalid update routing environment" {
+				t.Fatalf("error = %q, want generic classification", err)
+			}
+			if strings.Contains(strings.ToLower(err.Error()), "private") || strings.Contains(err.Error(), "ACTVE") {
+				t.Fatalf("error exposed environment name or value: %q", err)
+			}
+		})
+	}
+}
+
+func TestRoutingEnvironmentIgnoresNormalUnrelatedProcessEntries(t *testing.T) {
+	cfg, err := FromEnviron([]string{
+		"PATH=C:\\Windows\\System32",
+		"UPDATE_API_LISTEN=127.0.0.1:12450",
+		"COS_BUCKET=private-marker",
+		"UPDATE_LEGACY_ROUTING_ACTIVE=false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LegacyRoutingActive {
+		t.Fatal("unrelated process entries changed routing activation")
+	}
+}
+
 const (
 	stableKey = "channels/stable/latest.json"
 	legacyKey = "channels/legacy-rushrush/latest.json"
@@ -63,7 +108,7 @@ func TestChannelConfigurationUsesOnlyReviewedObjectKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.StableChannelKey != stableKey || cfg.LegacyChannelKey != legacyKey || cfg.PublisherPolicyKey != policyKey {
+	if cfg.ObjectKeys.StableChannel != stableKey || cfg.ObjectKeys.LegacyChannel != legacyKey || cfg.ObjectKeys.PublisherPolicy != policyKey {
 		t.Fatalf("default object keys = %#v, want reviewed stable, legacy, and policy keys", cfg)
 	}
 

@@ -54,8 +54,13 @@ func main() {
 		logger.Printf("startup cause=%v", err)
 		os.Exit(1)
 	}
+	releaseService, err := service.NewWithObjectKeys(store, time.Now, configuration.routing.ObjectKeys)
+	if err != nil {
+		logger.Printf("startup cause=%v", err)
+		os.Exit(1)
+	}
 	handler := httpapi.New(
-		service.New(store, time.Now),
+		releaseService,
 		newChannelRouter(configuration.routing),
 		nil,
 		standardLogger{logger},
@@ -111,18 +116,7 @@ func serve(server *http.Server, signals <-chan os.Signal, logger *log.Logger) in
 }
 
 func loadConfig() (serverConfig, error) {
-	routingValues := make(map[string]string)
-	for _, name := range []string{
-		"UPDATE_STABLE_CHANNEL_KEY",
-		"UPDATE_LEGACY_CHANNEL_KEY",
-		"UPDATE_LEGACY_ROUTING_ACTIVE",
-		"UPDATE_PUBLISHER_POLICY_KEY",
-	} {
-		if value, present := os.LookupEnv(name); present {
-			routingValues[name] = value
-		}
-	}
-	routing, err := deploymentconfig.FromEnv(routingValues)
+	routing, err := deploymentconfig.FromEnviron(os.Environ())
 	if err != nil {
 		return serverConfig{}, err
 	}

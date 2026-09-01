@@ -82,7 +82,17 @@ curl --fail --silent --show-error https://PUBLIC_DOMAIN/api/v1/changelog
 
 ### Stage version-aware routing with legacy inactive
 
-This is a local/read-only acceptance gate, not deployment authorization. Start the candidate API on an unused loopback port with a copy of the proposed root-owned environment and `UPDATE_LEGACY_ROUTING_ACTIVE=false`. Use the captured public User-Agent values verbatim and record only status, bounded error code, and `X-Gift-Panel-Update-Channel`; never record signed download query strings.
+The routing environment owns exactly three namespaces: `UPDATE_STABLE_`, `UPDATE_LEGACY_`, and `UPDATE_PUBLISHER_`. Startup enumerates all process entries in those namespaces before applying defaults and rejects unknown, malformed, duplicate, empty, or non-reviewed values with one generic error. Normal unrelated variables, including `UPDATE_API_LISTEN`, are outside that boundary.
+
+First run the credential-free local harness from the repository root:
+
+```sh
+go -C updateapi run ./cmd/routecheck
+```
+
+It uses an in-memory fixture Store and the real service, router, and HTTP handler composition. It performs no COS or network read/write and has no server fake-store switch. It covers every reviewed stable User-Agent, inactive v0.4.7, active legacy missing/malformed/wrong-channel pointers without stable fallback, invalid User-Agent forms, and the policy endpoint. The embedded public test policy is verified locally against its test SPKI before the endpoint body is accepted. Output is limited to canonical case, HTTP status, channel, bounded outcome, and the terminal `routecheck=ok cases=13`; a passing test fixture is evidence about routing composition, not production policy or pointer state.
+
+The following candidate check is a local/read-only deployment gate, not deployment authorization. Start the candidate API on an unused loopback port with a copy of the proposed root-owned environment and `UPDATE_LEGACY_ROUTING_ACTIVE=false`. Use the captured public User-Agent values verbatim and record only status, bounded error code, and `X-Gift-Panel-Update-Channel`; never record signed download query strings.
 
 ```sh
 set -euo pipefail
