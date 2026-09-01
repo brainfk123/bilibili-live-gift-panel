@@ -1,15 +1,49 @@
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parseDocument } from 'yaml';
 import { verifyBridgeReadiness } from '../scripts/bridge-release-inputs.mjs';
 import { publishTrustPolicy, type PublisherAdapters } from '../scripts/publish-trust-policy.mjs';
 import { mapPolicyReleaseToLocalBundle } from '../scripts/publisher-policy-release-contract.mjs';
 
 const sha256 = (value: Buffer) => createHash('sha256').update(value).digest('hex');
+
+function materializeWorkflowReadinessTool(root: string) {
+  const workflowSource = readFileSync(new URL('../.github/workflows/bridge-release.yml', import.meta.url), 'utf8');
+  const document = parseDocument(workflowSource);
+  expect(document.errors).toEqual([]);
+  const workflow = document.toJS() as { jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }> };
+  const setup = workflow.jobs?.['bridge-build']?.steps?.find((step) => step.name === 'Build reviewed bridge security tools')?.run;
+  expect(setup).toBeTruthy();
+
+  const toolingScripts = join(root, 'release-tools', 'scripts');
+  const runnerTemp = join(root, 'runner-temp');
+  const githubEnv = join(root, 'github-env');
+  mkdirSync(toolingScripts, { recursive: true });
+  mkdirSync(runnerTemp, { recursive: true });
+  for (const name of ['bridge-release-inputs.mjs', 'publisher-policy-release-contract.mjs', 'bounded-github-asset.mjs']) {
+    copyFileSync(fileURLToPath(new URL(`../scripts/${name}`, import.meta.url)), join(toolingScripts, name));
+  }
+
+  const layoutScript = setup!.split(/\r?\n/).filter((line) =>
+    line.includes('Copy-Item -LiteralPath release-tools') || line.includes('BRIDGE_READINESS_SCRIPT_PATH='),
+  ).join('\n');
+  const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'\n${layoutScript}`], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_ENV: githubEnv },
+  });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  expect(result.stdout).toBe('');
+  expect(result.stderr).toBe('');
+  const readinessEntry = readFileSync(githubEnv, 'utf8').split(/\r?\n/).find((line) => line.startsWith('BRIDGE_READINESS_SCRIPT_PATH='));
+  expect(readinessEntry).toBeTruthy();
+  return readinessEntry!.slice('BRIDGE_READINESS_SCRIPT_PATH='.length);
+}
 
 function signedPolicy(privateKey: KeyObject, signed: Record<string, unknown>) {
   const signature = sign('sha256', Buffer.from(JSON.stringify(signed)), privateKey).toString('base64');
@@ -154,9 +188,24 @@ describe('bridge readiness reviewed evidence', () => {
     expect(() => verifyBridgeReadiness(fixture)).toThrow(/test fixture/);
   });
 
-  it('executes the two-stage workflow filesystem layout', () => {
+  it('loads the actual workflow-copied private readiness module closure', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bridge-readiness-import-'));
+    try {
+      const scriptPath = materializeWorkflowReadinessTool(root);
+      const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `await import(${JSON.stringify(pathToFileURL(scriptPath).href)})`], {
+        cwd: root,
+        encoding: 'utf8',
+      });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('executes readiness validation from the actual workflow runtime closure and rejects a missing sibling', () => {
     const fixture = readinessFixture(); const root = mkdtempSync(join(tmpdir(), 'bridge-readiness-layout-'));
     try {
+      const scriptPath = materializeWorkflowReadinessTool(root);
       const readiness = join(root, 'bridge-readiness'); const bundle = join(readiness, 'private-bundle', 'bundle'); mkdirSync(bundle, { recursive: true });
       const writes = new Map<string, Buffer>([
         [join(readiness, 'stable-release.json'), fixture.stableReleaseBytes], [join(readiness, 'stable-artifact.exe'), fixture.stableArtifactBytes], [join(readiness, 'stable-checksum.txt'), fixture.stableChecksumBytes],
@@ -166,8 +215,8 @@ describe('bridge readiness reviewed evidence', () => {
         [join(readiness, 'authorization-evidence.json'), fixture.authorizationEvidenceBytes], [join(readiness, 'trust-attestation.json'), fixture.trustAttestationBytes],
       ]);
       for (const [path, bytes] of writes) writeFileSync(path, bytes);
-      const result = spawnSync(process.execPath, [
-        fileURLToPath(new URL('../scripts/bridge-release-inputs.mjs', import.meta.url)), 'verify',
+      const execute = () => spawnSync(process.execPath, [
+        scriptPath, 'verify',
         '--stable-release', join(readiness, 'stable-release.json'), '--stable-artifact', join(readiness, 'stable-artifact.exe'), '--stable-checksum', join(readiness, 'stable-checksum.txt'),
         '--observation-evidence', join(readiness, 'observation-evidence.json'), '--observation-sha256', fixture.expectedObservationSHA256,
         '--root-spki', join(readiness, 'root-spki.der'), '--bootstrap-policy', join(readiness, 'bootstrap-policy.json'), '--bootstrap-policy-sha256', fixture.expectedBootstrapPolicySHA256, '--bootstrap-policy-epoch', String(fixture.bootstrapPolicyEpoch),
@@ -175,7 +224,14 @@ describe('bridge readiness reviewed evidence', () => {
         '--authorization-policy-release', join(readiness, 'policy-release.json'), '--authorization-evidence', join(readiness, 'authorization-evidence.json'),
         '--trust-attestation', join(readiness, 'trust-attestation.json'), '--trust-attestation-sha256', fixture.expectedTrustAttestationSHA256,
       ], { cwd: root, encoding: 'utf8' });
+      const result = execute();
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0); expect(JSON.parse(result.stdout)).toMatchObject({ bootstrapPolicyEpoch: 1, authorizationPolicyEpoch: 2 });
+
+      rmSync(join(dirname(scriptPath), 'publisher-policy-release-contract.mjs'));
+      const missingSibling = execute();
+      expect(missingSibling.status).not.toBe(0);
+      expect(missingSibling.stderr).toContain('ERR_MODULE_NOT_FOUND');
+      expect(missingSibling.stderr).toContain('publisher-policy-release-contract.mjs');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
