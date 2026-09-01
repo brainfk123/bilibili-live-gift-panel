@@ -122,11 +122,35 @@ func TestVerifyAuthenticodePublisherWithRunnerRejectsUnknownOrMismatchedIdentity
 	}
 }
 
-func TestInspectAuthenticodeRejectsMissingSystemPowerShell(t *testing.T) {
-	t.Setenv("WINDIR", t.TempDir())
-	_, err := inspectAuthenticode(`C:\download\candidate.exe`)
+func TestSystemWindowsPowerShellPathFailsClosedWhenTheSystemBinaryIsMissing(t *testing.T) {
+	_, err := systemWindowsPowerShellPathWith(func() (string, error) { return t.TempDir(), nil }, os.Stat)
 	if err == nil || !strings.Contains(err.Error(), "PowerShell") {
 		t.Fatalf("error = %v, want missing PowerShell error", err)
+	}
+}
+
+func TestSystemWindowsPowerShellPathIgnoresPoisonedEnvironmentAndPATH(t *testing.T) {
+	want, err := systemWindowsPowerShellPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	poison := t.TempDir()
+	fake := filepath.Join(poison, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if err := os.MkdirAll(filepath.Dir(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fake, []byte("target-controlled executable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WINDIR", poison)
+	t.Setenv("SystemRoot", poison)
+	t.Setenv("PATH", poison)
+	got, err := systemWindowsPowerShellPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(got) || !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) || strings.HasPrefix(strings.ToLower(got), strings.ToLower(poison)) {
+		t.Fatalf("system PowerShell path = %q, want trusted absolute %q", got, want)
 	}
 }
 

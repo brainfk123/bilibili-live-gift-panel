@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as evsign from '../scripts/sign-evsign.mjs';
-import { signFileWithRetry, signWithProfile } from '../scripts/sign-evsign.mjs';
+import { EVSIGN_API_ENDPOINT, requestSignedBytes, signFileWithRetry, signWithProfile } from '../scripts/sign-evsign.mjs';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -26,6 +26,19 @@ function failure(properties: Record<string, unknown>) {
 }
 
 describe('EV Sign retry orchestration', () => {
+  it('posts only to the one reviewed EVSign API endpoint', async () => {
+    let requested = '';
+    const response = await requestSignedBytes(Buffer.from('unsigned'), {
+      headers: {}, attemptTimeoutMs: 1_000, maximumResponseBytes: 1024,
+      fetchImpl: async (input: string | URL | Request) => {
+        requested = String(input);
+        return new Response(Buffer.from('signed'), { status: 200, headers: { 'content-length': '6' } });
+      },
+    });
+    expect(EVSIGN_API_ENDPOINT).toBe('https://api.evsign.cn/v1');
+    expect(requested).toBe(EVSIGN_API_ENDPOINT);
+    expect(response).toEqual(Buffer.from('signed'));
+  });
   it.each([
     ['timeout', failure({ code: 'ETIMEDOUT' })],
     ['HTTP 408', failure({ statusCode: 408 })],
@@ -215,6 +228,21 @@ describe('EV Sign signer profile resolution', () => {
 });
 
 describe('closed-profile signing entry point', () => {
+  it('rejects every endpoint override before any signing request', async () => {
+    const { inputPath, outputPath } = fixture();
+    let requests = 0;
+    await expect(signWithProfile({
+      profile: 'stable', inputPath, outputPath,
+      environment: {
+        EVSIGN_CERTIFICATE: 'stable-selector',
+        EVSIGN_PUBLISHER_IDENTITY: JSON.stringify({ country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094' }),
+        EVSIGN_KEY: 'synthetic-key', EVSIGN_ENDPOINT: 'https://attacker.example/sign',
+      },
+    }, { request: async () => { requests += 1; return Buffer.from('signed'); }, sleep: async () => {}, log: () => {} }))
+      .rejects.toThrow(/endpoint override is forbidden/);
+    expect(requests).toBe(0);
+  });
+
   it('runs the stable signing fake with only the stable certificate selector', async () => {
     const { inputPath, outputPath } = fixture();
     const seenHeaders: Record<string, string>[] = [];

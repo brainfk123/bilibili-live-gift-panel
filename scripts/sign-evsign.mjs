@@ -8,6 +8,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 600_000;
 const DEFAULT_RETRY_DELAYS_MS = Object.freeze([15_000, 45_000]);
 const SIGNATURE_GROWTH_LIMIT = 4 * 1024 * 1024;
+export const EVSIGN_API_ENDPOINT = 'https://api.evsign.cn/v1';
 const RETRYABLE_NETWORK_CODES = new Set(['ECONNABORTED', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETDOWN', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ETIMEDOUT']);
 const IDENTITY_KEYS = new Set(['country', 'organization', 'organizationId']);
 const SIGNER_PROFILES = Object.freeze({
@@ -57,9 +58,23 @@ function validProfileString(value, maximumBytes) {
   return typeof value === 'string' && value.length > 0 && value === value.trim() && !/[\r\n]/.test(value) && Buffer.byteLength(value, 'utf8') <= maximumBytes;
 }
 
-export async function requestSignedBytes(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes }) {
-  const url = new URL(endpoint);
-  if (url.protocol !== 'https:') throw new Error('EV Sign endpoint must use HTTPS.');
+export async function requestSignedBytes(source, { headers, attemptTimeoutMs, maximumResponseBytes, fetchImpl }) {
+  const url = new URL(EVSIGN_API_ENDPOINT);
+  if (fetchImpl) {
+    const response = await fetchImpl(url, { method: 'POST', headers, body: source, redirect: 'error' });
+    if (response.status !== 200) {
+      const error = new Error(`EV Sign failed with HTTP ${response.status}.`);
+      error.statusCode = response.status;
+      throw error;
+    }
+    const declared = response.headers.get('content-length');
+    if (declared !== null && (!/^(?:0|[1-9][0-9]*)$/.test(declared) || Number(declared) > maximumResponseBytes)) {
+      throw integrityError('EV Sign response exceeds the signed-file size limit.');
+    }
+    const signed = Buffer.from(await response.arrayBuffer());
+    if (signed.length > maximumResponseBytes) throw integrityError('EV Sign response exceeds the signed-file size limit.');
+    return signed;
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
     let deadline;
@@ -103,9 +118,9 @@ export async function requestSignedBytes(source, { endpoint, headers, attemptTim
 }
 
 export async function signFileWithRetry(options, dependencies = {}) {
-  const { inputPath, outputPath, endpoint, headers, maxAttempts = DEFAULT_MAX_ATTEMPTS, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS, retryDelaysMs = DEFAULT_RETRY_DELAYS_MS } = options;
+  const { inputPath, outputPath, headers, maxAttempts = DEFAULT_MAX_ATTEMPTS, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS, retryDelaysMs = DEFAULT_RETRY_DELAYS_MS } = options;
   validateRetryPolicy(maxAttempts, attemptTimeoutMs, retryDelaysMs);
-  const request = dependencies.request || ((source) => requestSignedBytes(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT }));
+  const request = dependencies.request || ((source) => requestSignedBytes(source, { headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT }));
   const sleep = dependencies.sleep || ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   const log = dependencies.log || console.log;
   const source = await readFile(inputPath);
@@ -114,7 +129,7 @@ export async function signFileWithRetry(options, dependencies = {}) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const started = Date.now();
     try {
-      const signed = await request(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT });
+      const signed = await request(source, { endpoint: EVSIGN_API_ENDPOINT, headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT });
       if (!Buffer.isBuffer(signed) || signed.length === 0) throw integrityError('EV Sign returned an empty file.');
       if (signed.length > source.length + SIGNATURE_GROWTH_LIMIT) throw integrityError('EV Sign response exceeds the signed-file size limit.');
       const temporaryPath = `${outputPath}.signing-${process.pid}-${randomBytes(8).toString('hex')}`;
@@ -141,12 +156,12 @@ export async function signFileWithRetry(options, dependencies = {}) {
 
 export async function signWithProfile(options, dependencies = {}) {
   const environment = options.environment || process.env;
+  if ((environment.EVSIGN_ENDPOINT?.trim() || '') !== '') throw new Error('EVSign endpoint override is forbidden.');
   const signerProfile = resolveEVSignSignerProfile(options.profile, environment);
   const key = environment.EVSIGN_KEY?.trim();
   if (!key) throw new Error('EVSIGN_KEY is required. Store the EV Sign license UUID in GitHub Actions Secrets.');
   const inputPath = resolve(options.inputPath);
   const outputPath = resolve(options.outputPath || options.inputPath);
-  const endpoint = environment.EVSIGN_ENDPOINT?.trim() || 'https://api.evsign.cn/v1';
   const headers = {
     'Content-Type': 'application/octet-stream',
     'X-Key': key,
@@ -161,7 +176,6 @@ export async function signWithProfile(options, dependencies = {}) {
   await signFileWithRetry({
     inputPath,
     outputPath,
-    endpoint,
     headers,
     maxAttempts: readIntegerEnvironmentFrom(environment, 'EVSIGN_MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS),
     attemptTimeoutMs: readIntegerEnvironmentFrom(environment, 'EVSIGN_ATTEMPT_TIMEOUT_MS', DEFAULT_ATTEMPT_TIMEOUT_MS),

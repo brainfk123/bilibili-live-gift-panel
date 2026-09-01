@@ -241,15 +241,14 @@ jobs:
     needs: classify
     if: needs.classify.outputs.mode == 'prepare-candidate'
     runs-on: windows-latest
-    environment: stable-prepare
     permissions:
       contents: read
     outputs:
-      candidate-sha256: ${{ steps.candidate.outputs.sha256 }}
-      candidate-size: ${{ steps.candidate.outputs.size }}
+      unsigned-sha256: ${{ steps.unsigned.outputs.sha256 }}
+      unsigned-size: ${{ steps.unsigned.outputs.size }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
-      artifact-name: ${{ steps.candidate.outputs.artifact-name }}
+      artifact-name: ${{ steps.unsigned.outputs.artifact-name }}
     env:
       RELEASE_TAG: ${{ needs.classify.outputs.tag }}
       RELEASE_VERSION: ${{ needs.classify.outputs.version }}
@@ -272,15 +271,9 @@ jobs:
         with:
           go-version-file: tooling/goserver/go.mod
           cache-dependency-path: tooling/goserver/go.sum
-      - name: Build credential-scoped candidate tools
+      - name: Establish unprivileged candidate helper roots
         shell: pwsh
         run: |
-          go -C tooling/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
-          if ($LASTEXITCODE -ne 0) { throw 'Candidate inspector build failed.' }
-          Copy-Item tooling/scripts/sign-evsign.mjs "$env:RUNNER_TEMP/sign-evsign.mjs"
-          Copy-Item tooling/scripts/verify-enrollment-build.mjs "$env:RUNNER_TEMP/verify-enrollment-build.mjs"
-          "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/tooling" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE/source" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Check out exact candidate tag
@@ -391,15 +384,6 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: source/package-lock.json
-      - name: Resolve closed stable signer
-        working-directory: source
-        shell: pwsh
-        env:
-          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
-          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
-        run: |
-          $profile = node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $profile.profile -cne 'stable' -or $profile.identity.country -cne 'CN' -or $profile.identity.organization -cne 'NaisNet Technology Co., Ltd.' -or $profile.identity.organizationId -cne '91210103MA7CJ3C094') { throw 'Stable signer profile is invalid.' }
       - name: Install and test candidate source
         working-directory: source
         run: |
@@ -443,8 +427,148 @@ jobs:
           APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
         run: |
           npm run build:exe
-      - name: Sign stable candidate executable
+      - name: Prepare closed unsigned stable handoff
         working-directory: source
+        id: unsigned
+        shell: pwsh
+        run: |
+          $unsignedHash=(Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel.exe).Hash.ToLowerInvariant()
+          $unsignedSize=(Get-Item -LiteralPath dist/gift-panel.exe).Length
+          if($unsignedHash -cnotmatch '^[0-9a-f]{64}$' -or $unsignedSize -le 0 -or $unsignedSize -gt 134217728){throw 'Unsigned stable executable is invalid.'}
+          $handoff='dist/stable-unsigned-handoff'
+          New-Item -ItemType Directory -Path $handoff -ErrorAction Stop|Out-Null
+          Copy-Item -LiteralPath dist/gift-panel.exe -Destination "$handoff/$unsignedHash.exe"
+          Copy-Item -LiteralPath "$env:CANDIDATE_TRUST_ROOT/root-spki.der" -Destination "$handoff/root-spki.der"
+          Copy-Item -LiteralPath "$env:CANDIDATE_TRUST_ROOT/bootstrap-policy.json" -Destination "$handoff/bootstrap-policy.json"
+          Copy-Item -LiteralPath dist/canonical-gift-panel-changelog.json -Destination "$handoff/gift-panel-changelog.json"
+          Copy-Item -LiteralPath dist/release-ffmpeg-sealed/ffmpeg.zip -Destination "$handoff/ffmpeg.zip"
+          Copy-Item -LiteralPath dist/release-ffmpeg-sealed/manifest.json -Destination "$handoff/manifest.json"
+          Expand-Archive -LiteralPath dist/release-ffmpeg-sealed/ffmpeg.zip -DestinationPath dist/stable-unsigned-ffmpeg
+          Copy-Item -LiteralPath dist/stable-unsigned-ffmpeg/ffmpeg.exe -Destination "$handoff/ffmpeg-windows-x64.exe"
+          Copy-Item -LiteralPath dist/ffmpeg-component/ffmpeg-9.0.tar.xz,dist/ffmpeg-component/ffmpeg-9.0.tar.xz.asc,dist/ffmpeg-component/ffmpeg-build-config.txt,dist/ffmpeg-component/ffmpeg-component-gate.txt -Destination $handoff
+          Copy-Item -LiteralPath third_party/ffmpeg/toolchain-lock.json,third_party/ffmpeg/NOTICE.md,third_party/ffmpeg/COPYING.LGPLv2.1 -Destination $handoff
+          [ordered]@{schemaVersion=1;tag=$env:RELEASE_TAG;version=$env:RELEASE_VERSION;commit=$env:RELEASE_COMMIT;unsignedSha256=$unsignedHash;unsignedSize=[int64]$unsignedSize;changelogSha256='${{ steps.changelog.outputs.sha256 }}';changelogHistorySha256='${{ steps.changelog.outputs.history_sha256 }}';toolingCommit='${{ steps.changelog.outputs.tooling_commit }}'}|ConvertTo-Json -Compress|Set-Content -NoNewline -Encoding utf8 "$handoff/handoff.json"
+          $allowed=@("$unsignedHash.exe",'root-spki.der','bootstrap-policy.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','handoff.json')|Sort-Object
+          $actual=@(Get-ChildItem -LiteralPath $handoff -File|ForEach-Object{$_.Name}|Sort-Object)
+          if(Compare-Object $allowed $actual){throw 'Unsigned stable handoff closure is invalid.'}
+          "sha256=$unsignedHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "size=$unsignedSize"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact-name=stable-unsigned-$env:RELEASE_TAG-$unsignedHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Upload content-addressed unsigned stable handoff
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.unsigned.outputs.artifact-name }}
+          path: source/dist/stable-unsigned-handoff
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Read back uploaded unsigned stable handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.unsigned.outputs.artifact-name }}
+          path: source/dist/unsigned-readback
+      - name: Verify uploaded unsigned handoff is bit-identical
+        working-directory: source
+        shell: pwsh
+        run: |
+          if ('${{ steps.upload.outputs.artifact-id }}' -cnotmatch '^[1-9][0-9]*$' -or '${{ steps.upload.outputs.artifact-digest }}' -cnotmatch '^[0-9a-f]{64}$') { throw 'Actions unsigned artifact identity is invalid.' }
+          $sourceRoot=(Resolve-Path dist/stable-unsigned-handoff).Path
+          $readbackRoot=(Resolve-Path dist/unsigned-readback).Path
+          $source=@(Get-ChildItem $sourceRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($sourceRoot.Length+1) } | Sort-Object)
+          $readback=@(Get-ChildItem $readbackRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($readbackRoot.Length+1) } | Sort-Object)
+          if (Compare-Object $source $readback) { throw 'Unsigned handoff closure changed during upload/readback.' }
+          foreach($relative in $source){ $left=Join-Path $sourceRoot $relative; $right=Join-Path $readbackRoot $relative; if((Get-FileHash $left -Algorithm SHA256).Hash -cne (Get-FileHash $right -Algorithm SHA256).Hash -or (Get-Item $left).Length -ne (Get-Item $right).Length){ throw 'Unsigned handoff bytes changed during Actions artifact upload/readback.' } }
+
+  sign-candidate:
+    needs: prepare-candidate
+    if: needs.prepare-candidate.result == 'success'
+    runs-on: windows-latest
+    environment: stable-sign
+    permissions:
+      contents: read
+    outputs:
+      candidate-sha256: ${{ steps.candidate.outputs.sha256 }}
+      candidate-size: ${{ steps.candidate.outputs.size }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-name: ${{ steps.candidate.outputs.artifact-name }}
+    steps:
+      - name: Download exact unsigned stable handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.prepare-candidate.outputs.artifact-name }}
+          path: handoff
+      - name: Validate unsigned stable handoff
+        shell: pwsh
+        env:
+          EXPECTED_UNSIGNED_SHA256: ${{ needs.prepare-candidate.outputs.unsigned-sha256 }}
+          EXPECTED_UNSIGNED_SIZE: ${{ needs.prepare-candidate.outputs.unsigned-size }}
+          STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
+        run: |
+          if($env:EXPECTED_UNSIGNED_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:EXPECTED_UNSIGNED_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$'){throw 'Unsigned stable handoff binding is malformed.'}
+          $root=(Resolve-Path handoff).Path
+          if((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Unsigned stable handoff root is a reparse point.'}
+          $metadata=Get-Content -LiteralPath "$root/handoff.json" -Raw|ConvertFrom-Json
+          $names=@($metadata.psobject.Properties.Name|Sort-Object)
+          if(Compare-Object @('changelogHistorySha256','changelogSha256','commit','schemaVersion','tag','toolingCommit','unsignedSha256','unsignedSize','version') $names){throw 'Unsigned stable handoff metadata schema is invalid.'}
+          if($metadata.schemaVersion -ne 1 -or $metadata.unsignedSha256 -cne $env:EXPECTED_UNSIGNED_SHA256 -or [int64]$metadata.unsignedSize -ne [int64]$env:EXPECTED_UNSIGNED_SIZE -or $metadata.commit -cne $env:STABLE_REVIEWED_COMMIT_SHA -or $metadata.tag -cne "v$($metadata.version)" -or $metadata.changelogSha256 -cnotmatch '^[0-9a-f]{64}$' -or $metadata.changelogHistorySha256 -cnotmatch '^[0-9a-f]{64}$' -or $metadata.toolingCommit -cnotmatch '^[0-9a-f]{40}$'){throw 'Unsigned stable handoff metadata binding failed.'}
+          $allowed=@("$env:EXPECTED_UNSIGNED_SHA256.exe",'root-spki.der','bootstrap-policy.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','handoff.json')|Sort-Object
+          $items=@(Get-ChildItem -LiteralPath $root -Force)
+          if($items|Where-Object{$_ -isnot [IO.FileInfo] -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}){throw 'Unsigned stable handoff contains an unsafe entry.'}
+          if($items|Where-Object{$_.Name -match '^(?i:PATH|GITHUB_ENV|AUTHENTICODE_INSPECTOR_PATH|EVSIGN_SCRIPT_PATH)(?:\.|$)'}){throw 'Unsigned stable handoff closure contains target-controlled runner state.'}
+          $difference=Compare-Object $allowed @($items|ForEach-Object{$_.Name}|Sort-Object)
+          if($null -ne $difference){throw 'Unsigned stable handoff closure is invalid.'}
+          $unsigned="$root/$env:EXPECTED_UNSIGNED_SHA256.exe"
+          if((Get-FileHash -Algorithm SHA256 -LiteralPath $unsigned).Hash.ToLowerInvariant() -cne $env:EXPECTED_UNSIGNED_SHA256 -or (Get-Item -LiteralPath $unsigned).Length -ne [int64]$env:EXPECTED_UNSIGNED_SIZE){throw 'Unsigned stable handoff executable bytes differ.'}
+          "STABLE_HANDOFF_ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TAG=$($metadata.tag)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_VERSION=$($metadata.version)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_COMMIT=$($metadata.commit)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CHANGELOG_SHA256=$($metadata.changelogSha256)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CHANGELOG_HISTORY_SHA256=$($metadata.changelogHistorySha256)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOLING_COMMIT_SHA=$($metadata.toolingCommit)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check out reviewed stable signing tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+          path: signing-tools-source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up reviewed stable signing Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: signing-tools-source/goserver/go.mod
+          cache-dependency-path: signing-tools-source/goserver/go.sum
+      - name: Set up reviewed stable signing Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Build reviewed stable signing tools after handoff
+        shell: pwsh
+        env:
+          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+        run: |
+          $head=git -C signing-tools-source rev-parse HEAD
+          if($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $head -cne $env:RELEASE_TOOLING_COMMIT_SHA){throw 'Reviewed stable signing tooling commit mismatch.'}
+          $tools="$env:RUNNER_TEMP/protected-stable-tools"
+          New-Item -ItemType Directory -Path $tools -ErrorAction Stop|Out-Null
+          go -C signing-tools-source/goserver build -o "$tools/artifact-inspector.exe" ./cmd/artifact-inspector
+          if($LASTEXITCODE -ne 0){throw 'Reviewed stable inspector build failed.'}
+          Copy-Item -LiteralPath signing-tools-source/scripts/sign-evsign.mjs -Destination "$tools/sign-evsign.mjs"
+          Copy-Item -LiteralPath signing-tools-source/scripts/verify-enrollment-build.mjs -Destination "$tools/verify-enrollment-build.mjs"
+          "AUTHENTICODE_INSPECTOR_PATH=$tools/artifact-inspector.exe"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "EVSIGN_SCRIPT_PATH=$tools/sign-evsign.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ENROLLMENT_VERIFIER_PATH=$tools/verify-enrollment-build.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Resolve protected stable signer
+        shell: pwsh
+        env:
+          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
+          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
+        run: |
+          $profile=node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable|ConvertFrom-Json
+          if($LASTEXITCODE -ne 0 -or $profile.profile -cne 'stable' -or $profile.identity.country -cne 'CN' -or $profile.identity.organization -cne 'NaisNet Technology Co., Ltd.' -or $profile.identity.organizationId -cne '91210103MA7CJ3C094'){throw 'Stable signer profile is invalid.'}
+      - name: Sign stable executable on protected runner
         shell: pwsh
         env:
           EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
@@ -452,87 +576,64 @@ jobs:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
         run: |
-          Copy-Item dist/gift-panel.exe dist/gift-panel-windows-x64.unsigned.exe
-          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
-          if ($LASTEXITCODE -ne 0) { throw 'Stable candidate signing failed.' }
-      - name: Prepare signed stable candidate
-        working-directory: source
+          node $env:EVSIGN_SCRIPT_PATH --profile stable "$env:STABLE_HANDOFF_ROOT/${{ needs.prepare-candidate.outputs.unsigned-sha256 }}.exe" "$env:RUNNER_TEMP/stable-signed.exe"
+          if($LASTEXITCODE -ne 0){throw 'Stable candidate signing failed.'}
+      - name: Seal and close signed stable candidate
         id: candidate
         shell: pwsh
         env:
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
-          STABLE_CANDIDATE_CHANGELOG_SHA256: ${{ steps.changelog.outputs.sha256 }}
-          STABLE_CHANGELOG_HISTORY_SHA256: ${{ steps.changelog.outputs.history_sha256 }}
-          RELEASE_TOOLING_COMMIT_SHA: ${{ steps.changelog.outputs.tooling_commit }}
         run: |
-          New-Item -ItemType Directory -Path dist/stable-candidate/sealed -ErrorAction Stop | Out-Null
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/stable-candidate/sealed --version $env:RELEASE_VERSION --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/stable-artifact-inspection.json
-          if ($LASTEXITCODE -ne 0) { throw 'Candidate seal failed.' }
-          $inspection = Get-Content dist/stable-candidate/stable-artifact-inspection.json -Raw | ConvertFrom-Json
-          $sealed = "dist/stable-candidate/sealed/$($inspection.signedFileSha256).exe"
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-candidate --artifact $sealed --pe-content-sha256 $inspection.peContentSha256 --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --root-spki "$env:CANDIDATE_TRUST_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$env:CANDIDATE_TRUST_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/candidate-evidence.json
-          if ($LASTEXITCODE -ne 0) { throw 'Candidate enrollment verification failed.' }
-          $candidateEvidence = Get-Content dist/stable-candidate/candidate-evidence.json -Raw | ConvertFrom-Json
-          $changelogHash=(Get-FileHash dist/canonical-gift-panel-changelog.json -Algorithm SHA256).Hash.ToLowerInvariant()
-          if($changelogHash -cne $env:STABLE_CANDIDATE_CHANGELOG_SHA256 -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $null -ne $candidateEvidence.changelog){throw 'Candidate changelog provenance binding failed.'}
-          $candidateEvidence|Add-Member -NotePropertyName changelog -NotePropertyValue ([pscustomobject][ordered]@{sha256=$changelogHash;historySha256=$env:STABLE_CHANGELOG_HISTORY_SHA256;toolingCommit=$env:RELEASE_TOOLING_COMMIT_SHA})
-          $candidateEvidence|ConvertTo-Json -Depth 12|Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/candidate-evidence.json
-          $candidateEvidence = Get-Content dist/stable-candidate/candidate-evidence.json -Raw | ConvertFrom-Json
-          if ($candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256" -or $candidateEvidence.signedFileSha256 -cne $inspection.signedFileSha256 -or $candidateEvidence.changelog.sha256 -cne $changelogHash -or $candidateEvidence.changelog.historySha256 -cne $env:STABLE_CHANGELOG_HISTORY_SHA256 -or $candidateEvidence.changelog.toolingCommit -cne $env:RELEASE_TOOLING_COMMIT_SHA) { throw 'Candidate evidence cross-binding failed.' }
-          "$($inspection.signedFileSha256)  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/gift-panel-windows-x64.exe.sha256
-          [ordered]@{ tag_name=$env:RELEASE_TAG; draft=$false; prerelease=$false; assets=@([ordered]@{ name='gift-panel-windows-x64.exe'; browser_download_url="https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"; size=[int64]$inspection.signedFileSize; digest="sha256:$($inspection.signedFileSha256)" }) } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/gift-panel-update.json
-          Copy-Item dist/canonical-gift-panel-changelog.json dist/stable-candidate/gift-panel-changelog.json
-          Copy-Item dist/release-ffmpeg-sealed/ffmpeg.zip dist/stable-candidate/ffmpeg.zip
-          Copy-Item dist/release-ffmpeg-sealed/manifest.json dist/stable-candidate/manifest.json
-          Expand-Archive dist/release-ffmpeg-sealed/ffmpeg.zip -DestinationPath dist/stable-candidate/standalone
-          Copy-Item dist/stable-candidate/standalone/ffmpeg.exe dist/stable-candidate/ffmpeg-windows-x64.exe
-          Remove-Item -LiteralPath dist/stable-candidate/standalone/ffmpeg.exe -Force
-          Remove-Item -LiteralPath dist/stable-candidate/standalone -Force
-          $ffmpegHash=(Get-FileHash dist/stable-candidate/ffmpeg-windows-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$ffmpegHash  ffmpeg-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/ffmpeg-windows-x64.exe.sha256
-          Copy-Item dist/ffmpeg-component/ffmpeg-9.0.tar.xz,dist/ffmpeg-component/ffmpeg-9.0.tar.xz.asc,dist/ffmpeg-component/ffmpeg-build-config.txt,dist/ffmpeg-component/ffmpeg-component-gate.txt dist/stable-candidate
-          Copy-Item third_party/ffmpeg/toolchain-lock.json,third_party/ffmpeg/NOTICE.md,third_party/ffmpeg/COPYING.LGPLv2.1 dist/stable-candidate
-          New-Item -ItemType Directory -Path dist/stable-candidate/tools -ErrorAction Stop | Out-Null
-          Copy-Item $env:AUTHENTICODE_INSPECTOR_PATH dist/stable-candidate/tools/artifact-inspector.exe
-          Copy-Item "$env:RUNNER_TEMP/verify-enrollment-build.mjs" dist/stable-candidate/tools/verify-enrollment-build.mjs
-          $inspectorHash=(Get-FileHash dist/stable-candidate/tools/artifact-inspector.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $verifierHash=(Get-FileHash dist/stable-candidate/tools/verify-enrollment-build.mjs -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$inspectorHash  artifact-inspector.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/tools/artifact-inspector.exe.sha256
-          "$verifierHash  verify-enrollment-build.mjs" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/tools/verify-enrollment-build.mjs.sha256
-          $candidateRoot=(Resolve-Path dist/stable-candidate).Path
+          $candidate="$env:RUNNER_TEMP/stable-candidate"
+          New-Item -ItemType Directory -Path "$candidate/sealed","$candidate/tools" -ErrorAction Stop|Out-Null
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned "$env:STABLE_HANDOFF_ROOT/${{ needs.prepare-candidate.outputs.unsigned-sha256 }}.exe" --signed "$env:RUNNER_TEMP/stable-signed.exe" --sealed-directory "$candidate/sealed" --version $env:RELEASE_VERSION --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive "$env:STABLE_HANDOFF_ROOT/ffmpeg.zip" --ffmpeg-manifest "$env:STABLE_HANDOFF_ROOT/manifest.json"|Set-Content -NoNewline -Encoding utf8 "$candidate/stable-artifact-inspection.json"
+          if($LASTEXITCODE -ne 0){throw 'Signed stable candidate seal failed.'}
+          $inspection=Get-Content "$candidate/stable-artifact-inspection.json" -Raw|ConvertFrom-Json
+          $sealed="$candidate/sealed/$($inspection.signedFileSha256).exe"
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-candidate --artifact $sealed --pe-content-sha256 $inspection.peContentSha256 --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --root-spki "$env:STABLE_HANDOFF_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$env:STABLE_HANDOFF_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive "$env:STABLE_HANDOFF_ROOT/ffmpeg.zip" --ffmpeg-manifest "$env:STABLE_HANDOFF_ROOT/manifest.json"|Set-Content -NoNewline -Encoding utf8 "$candidate/candidate-evidence.json"
+          if($LASTEXITCODE -ne 0){throw 'Stable candidate enrollment verification failed.'}
+          $candidateEvidence=Get-Content "$candidate/candidate-evidence.json" -Raw|ConvertFrom-Json
+          $candidateEvidence|Add-Member -NotePropertyName changelog -NotePropertyValue ([pscustomobject][ordered]@{sha256=$env:STABLE_CHANGELOG_SHA256;historySha256=$env:STABLE_CHANGELOG_HISTORY_SHA256;toolingCommit=$env:RELEASE_TOOLING_COMMIT_SHA})
+          $candidateEvidence|ConvertTo-Json -Depth 12|Set-Content -NoNewline -Encoding utf8 "$candidate/candidate-evidence.json"
+          "$($inspection.signedFileSha256)  gift-panel-windows-x64.exe"|Set-Content -NoNewline -Encoding ascii "$candidate/gift-panel-windows-x64.exe.sha256"
+          [ordered]@{tag_name=$env:RELEASE_TAG;draft=$false;prerelease=$false;assets=@([ordered]@{name='gift-panel-windows-x64.exe';browser_download_url="https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe";size=[int64]$inspection.signedFileSize;digest="sha256:$($inspection.signedFileSha256)"})}|ConvertTo-Json -Depth 6|Set-Content -NoNewline -Encoding utf8 "$candidate/gift-panel-update.json"
+          foreach($name in @('gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1')){Copy-Item -LiteralPath "$env:STABLE_HANDOFF_ROOT/$name" -Destination "$candidate/$name"}
+          $ffmpegHash=(Get-FileHash -Algorithm SHA256 -LiteralPath "$candidate/ffmpeg-windows-x64.exe").Hash.ToLowerInvariant()
+          if($ffmpegHash -cne $inspection.ffmpegSha256){throw 'Stable standalone FFmpeg differs from verified archive.'}
+          "$ffmpegHash  ffmpeg-windows-x64.exe"|Set-Content -NoNewline -Encoding ascii "$candidate/ffmpeg-windows-x64.exe.sha256"
+          Copy-Item -LiteralPath $env:AUTHENTICODE_INSPECTOR_PATH -Destination "$candidate/tools/artifact-inspector.exe"
+          Copy-Item -LiteralPath $env:ENROLLMENT_VERIFIER_PATH -Destination "$candidate/tools/verify-enrollment-build.mjs"
+          foreach($name in @('artifact-inspector.exe','verify-enrollment-build.mjs')){$hash=(Get-FileHash -Algorithm SHA256 -LiteralPath "$candidate/tools/$name").Hash.ToLowerInvariant();"$hash  $name"|Set-Content -NoNewline -Encoding ascii "$candidate/tools/$name.sha256"}
           $allowed=@("sealed/$($inspection.signedFileSha256).exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
-          $actual=@(Get-ChildItem $candidateRoot -File -Recurse|ForEach-Object{$_.FullName.Substring($candidateRoot.Length+1).Replace('\','/')}|Sort-Object)
-          if(Compare-Object $allowed $actual){throw 'Candidate closure contains a missing or unexpected candidate file.'}
-          "sha256=$($inspection.signedFileSha256)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "size=$($inspection.signedFileSize)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "artifact-name=stable-candidate-$env:RELEASE_TAG-$($inspection.signedFileSha256)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
-      - name: Upload content-addressed stable candidate
+          $root=(Resolve-Path $candidate).Path;$actual=@(Get-ChildItem $root -File -Recurse|ForEach-Object{$_.FullName.Substring($root.Length+1).Replace('\','/')}|Sort-Object)
+          if(Compare-Object $allowed $actual){throw 'Signed stable candidate closure is invalid.'}
+          "sha256=$($inspection.signedFileSha256)"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "size=$($inspection.signedFileSize)"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact-name=stable-candidate-$env:RELEASE_TAG-$($inspection.signedFileSha256)"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Upload exact signed stable candidate
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.candidate.outputs.artifact-name }}
-          path: source/dist/stable-candidate
+          path: ${{ runner.temp }}/stable-candidate
           compression-level: 0
           if-no-files-found: error
           retention-days: 30
-      - name: Read back uploaded stable candidate
+      - name: Read back exact signed stable candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ steps.candidate.outputs.artifact-name }}
-          path: source/dist/candidate-readback
-      - name: Verify uploaded candidate is bit-identical
-        working-directory: source
+          path: ${{ runner.temp }}/stable-candidate-readback
+      - name: Verify signed stable candidate artifact handoff
         shell: pwsh
         run: |
-          if ('${{ steps.upload.outputs.artifact-id }}' -cnotmatch '^[1-9][0-9]*$' -or '${{ steps.upload.outputs.artifact-digest }}' -cnotmatch '^[0-9a-f]{64}$') { throw 'Actions candidate artifact identity is invalid.' }
-          $sourceRoot=(Resolve-Path dist/stable-candidate).Path
-          $readbackRoot=(Resolve-Path dist/candidate-readback).Path
-          $source=@(Get-ChildItem $sourceRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($sourceRoot.Length+1) } | Sort-Object)
-          $readback=@(Get-ChildItem $readbackRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($readbackRoot.Length+1) } | Sort-Object)
-          if (Compare-Object $source $readback) { throw 'Candidate artifact file closure changed during upload/readback.' }
-          foreach($relative in $source){ $left=Join-Path $sourceRoot $relative; $right=Join-Path $readbackRoot $relative; if((Get-FileHash $left -Algorithm SHA256).Hash -cne (Get-FileHash $right -Algorithm SHA256).Hash -or (Get-Item $left).Length -ne (Get-Item $right).Length){ throw 'Candidate bytes changed during Actions artifact upload/readback.' } }
+          if('${{ steps.upload.outputs.artifact-id }}' -cnotmatch '^[1-9][0-9]*$' -or '${{ steps.upload.outputs.artifact-digest }}' -cnotmatch '^[0-9a-f]{64}$'){throw 'Signed stable Actions artifact identity is invalid.'}
+          $left=(Resolve-Path "$env:RUNNER_TEMP/stable-candidate").Path;$right=(Resolve-Path "$env:RUNNER_TEMP/stable-candidate-readback").Path
+          $files=@(Get-ChildItem $left -File -Recurse|ForEach-Object{$_.FullName.Substring($left.Length+1)}|Sort-Object);$readback=@(Get-ChildItem $right -File -Recurse|ForEach-Object{$_.FullName.Substring($right.Length+1)}|Sort-Object)
+          if(Compare-Object $files $readback){throw 'Signed stable candidate readback closure changed.'}
+          foreach($relative in $files){if((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $left $relative)).Hash -cne (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $right $relative)).Hash){throw 'Signed stable candidate readback bytes changed.'}}
 
   publish-candidate:
     needs: classify

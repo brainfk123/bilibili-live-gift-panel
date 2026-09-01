@@ -344,17 +344,36 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
 }
 
 describe('release workflow supply-chain contract', () => {
+	it('hands an unsigned closed candidate to a fresh protected stable signing runner', () => {
+	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const build = jobs['prepare-candidate'];
+	  const sign = jobs['sign-candidate'];
+	  expect(build?.environment).toBeUndefined();
+	  expect(build?.permissions).toEqual({ contents: 'read' });
+	  expect(semanticCommands(build).join('\n')).not.toMatch(/EVSIGN_|sign-evsign|signed-candidate/i);
+	  expect(sign?.environment).toBe('stable-sign');
+	  expect(sign?.permissions).toEqual({ contents: 'read' });
+	  expect(sign?.needs).toBe('prepare-candidate');
+	  const steps = jobSteps(sign);
+	  expect(stepIndex(steps, 'Download exact unsigned stable handoff')).toBeLessThan(stepIndex(steps, 'Check out reviewed stable signing tools'));
+	  expect(stepIndex(steps, 'Validate unsigned stable handoff')).toBeLessThan(stepIndex(steps, 'Check out reviewed stable signing tools'));
+	  const commands = semanticCommands(sign).join('\n');
+	  expect(commands).toContain('sign-evsign');
+	  expect(commands).not.toMatch(/working-directory: source|npm (?:ci|test|run)|build:exe|refs\/tags\/\$\{\{/i);
+	});
+
 	it('splits stable classification, historical verification, candidate preparation, and publication into isolated capabilities', () => {
 	  const { workflow } = releaseWorkflow();
 	  const jobs = workflow.jobs as unknown as Record<string, WorkflowJob>;
 	  expect(workflow.permissions).toEqual({ contents: 'read' });
 	  expect(releaseWorkflow().source).not.toContain('STABLE_TRUST_ROOT_KEY_ID');
-	  expect(Object.keys(jobs)).toEqual(['classify', 'historical-verify', 'prepare-candidate', 'publish-candidate']);
+	  expect(Object.keys(jobs)).toEqual(['classify', 'historical-verify', 'prepare-candidate', 'sign-candidate', 'publish-candidate']);
 	  expect(jobs.classify?.permissions).toEqual({ contents: 'read' });
 	  expect(jobs['historical-verify']?.permissions).toEqual({ contents: 'read' });
 	  expect(jobs['historical-verify']?.environment).toBeUndefined();
 	  expect(jobs['prepare-candidate']?.permissions).toEqual({ contents: 'read' });
-	  expect(jobs['prepare-candidate']?.environment).toBe('stable-prepare');
+	  expect(jobs['prepare-candidate']?.environment).toBeUndefined();
+	  expect(jobs['sign-candidate']?.environment).toBe('stable-sign');
 	  expect(jobs['publish-candidate']?.permissions).toEqual({ actions: 'read', contents: 'write', 'id-token': 'write', attestations: 'write' });
 	  expect(jobs['publish-candidate']?.environment).toBe('stable-publish');
 	});
@@ -408,7 +427,8 @@ describe('release workflow supply-chain contract', () => {
 	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
 	  const steps=jobSteps(jobs['prepare-candidate']);
 	  const build=steps[stepIndex(steps,'Build stable candidate executable')];
-	  const sign=steps[stepIndex(steps,'Sign stable candidate executable')];
+	  const signSteps=jobSteps(jobs['sign-candidate']);
+	  const sign=signSteps[stepIndex(signSteps,'Sign stable executable on protected runner')];
 	  for(const key of Object.keys(build?.env??{})) expect(key).not.toMatch(/^EVSIGN_/);
 	  expect(build?.run).toContain('npm run build:exe');
 	  expect(build?.run).not.toContain('sign-evsign');
@@ -486,7 +506,8 @@ describe('release workflow supply-chain contract', () => {
 	  expect(run).toContain('duplicate changelog version');
 	  expect(run).toContain('changelog version order');
 	  expect(run).not.toMatch(/\bgit\s+(?:tag|show)\b|\bgh\s+release\s+download\b|Invoke-RestMethod/);
-	  const prepare=steps[stepIndex(steps,'Prepare signed stable candidate')];
+	  const signSteps=jobSteps(jobs['sign-candidate']);
+	  const prepare=signSteps[stepIndex(signSteps,'Seal and close signed stable candidate')];
 	  expect(prepare?.run).toContain('historySha256');
 	  expect(prepare?.run).toContain('toolingCommit');
 	  const publishSteps=jobSteps(jobs['publish-candidate']);
@@ -576,45 +597,23 @@ describe('release workflow supply-chain contract', () => {
 	  }finally{rmSync(root,{recursive:true,force:true});}
 	});
 
-	it('prepares and reads back a content-addressed candidate without Release, KMS, or publication authority', () => {
-	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
-	  const prepare = jobs['prepare-candidate'];
-	  const steps = jobSteps(prepare);
-	  const upload = steps[stepIndex(steps, 'Upload content-addressed stable candidate')];
-	  const readback = steps[stepIndex(steps, 'Read back uploaded stable candidate')];
-	  expect(upload?.uses).toBe('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
-	  expect(upload?.with).toMatchObject({ 'compression-level': 0, 'if-no-files-found': 'error' });
-	  expect(String(upload?.with?.name)).toContain('steps.candidate.outputs.artifact-name');
-	  expect(readback?.uses).toBe('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
-	  const commands = semanticCommands(prepare).join('\n');
-	  expect(commands).toContain('sign-evsign');
-	  expect(commands).toContain('signedFileSha256');
-	  expect(commands).toContain('artifact-digest');
-	  expect(commands).toContain('candidate-readback');
-	  expect(commands).not.toMatch(/gh release (?:create|upload|edit)|SignByAsymmetricKey|TENCENTCLOUD_|\bCOS_/i);
-	});
-
-	it('executes candidate upload readback equality and rejects substituted bytes', () => {
-	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
-	  const step = jobSteps(jobs['prepare-candidate'])[stepIndex(jobSteps(jobs['prepare-candidate']), 'Verify uploaded candidate is bit-identical')];
-	  const root = mkdtempSync(join(tmpdir(), 'stable-candidate-readback-'));
-	  try {
-		for (const directory of ['dist/stable-candidate/sealed', 'dist/candidate-readback/sealed']) mkdirSync(join(root, directory), { recursive: true });
-		for (const relative of ['evidence.json', 'sealed/candidate.exe']) {
-		  const contents = Buffer.from(`exact:${relative}`);
-		  writeFileSync(join(root, 'dist/stable-candidate', relative), contents);
-		  writeFileSync(join(root, 'dist/candidate-readback', relative), contents);
-		}
-		const script=(step?.run ?? '')
-		  .replace("'${{ steps.upload.outputs.artifact-id }}'", "'123'")
-		  .replace("'${{ steps.upload.outputs.artifact-digest }}'", `'${'a'.repeat(64)}'`);
-		const run=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-Command','-'],{cwd:root,input:`$ErrorActionPreference='Stop'\n${script}`,encoding:'utf8'});
-		expect(run().status).toBe(0);
-		writeFileSync(join(root,'dist/candidate-readback/sealed/candidate.exe'),Buffer.from('substituted'));
-		const rejected=run();
-		expect(rejected.status).not.toBe(0);
-		expect(rejected.stderr).toContain('Candidate bytes changed during Actions artifact upload/readback');
-	  } finally { rmSync(root,{recursive:true,force:true}); }
+	it('executes the stable unsigned handoff gate and rejects PATH or tool poisoning before checkout', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['sign-candidate']);
+	  const validation=steps[stepIndex(steps,'Validate unsigned stable handoff')];
+	  expect(stepIndex(steps,'Validate unsigned stable handoff')).toBeLessThan(stepIndex(steps,'Check out reviewed stable signing tools'));
+	  const root=mkdtempSync(join(tmpdir(),'stable-unsigned-poison-'));
+	  try{
+		const handoff=join(root,'handoff');mkdirSync(handoff);
+		const unsigned=Buffer.from('unsigned-stable-fixture');const digest=createHash('sha256').update(unsigned).digest('hex');
+		writeFileSync(join(handoff,digest+'.exe'),unsigned);
+		for(const name of ['root-spki.der','bootstrap-policy.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1'])writeFileSync(join(handoff,name),name);
+		writeFileSync(join(handoff,'handoff.json'),JSON.stringify({schemaVersion:1,tag:'v0.4.12',version:'0.4.12',commit:'a'.repeat(40),unsignedSha256:digest,unsignedSize:unsigned.length,changelogSha256:'b'.repeat(64),changelogHistorySha256:'c'.repeat(64),toolingCommit:'d'.repeat(40)}));
+		const githubEnv=join(root,'fresh-github-env');const poison=join(root,'poison');mkdirSync(poison);
+		const execute=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,PATH:poison+';'+(process.env.PATH??''),GITHUB_ENV:githubEnv,EXPECTED_UNSIGNED_SHA256:digest,EXPECTED_UNSIGNED_SIZE:String(unsigned.length),STABLE_REVIEWED_COMMIT_SHA:'a'.repeat(40)},input:"$ErrorActionPreference='Stop'\n"+(validation?.run??'')});
+		writeFileSync(join(handoff,'PATH.cmd'),'target controlled');const poisoned=execute();expect(poisoned.status!==0||poisoned.stderr.includes('handoff closure'),poisoned.stderr).toBe(true);
+		rmSync(join(handoff,'PATH.cmd'));const valid=execute();expect(valid.status,valid.stderr).toBe(0);expect(readFileSync(githubEnv,'utf8')).not.toContain(poison);
+	  }finally{rmSync(root,{recursive:true,force:true});}
 	});
 
 	it('publishes only an exact protected candidate and has no signer, build, target-code, bridge, KMS, or COS capability', () => {
@@ -687,12 +686,12 @@ describe('release workflow supply-chain contract', () => {
 
 	it('rejects unexpected candidate closure entries and rechecks the exact reviewed tag before both mutations', () => {
 	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
-	  const prepare = semanticCommands(jobs['prepare-candidate']).join('\n');
+	  const prepare = semanticCommands(jobs['sign-candidate']).join('\n');
 	  const publishSteps = jobSteps(jobs['publish-candidate']);
 	  const revalidate = publishSteps[stepIndex(publishSteps, 'Revalidate reviewed stable candidate')];
 	  const beforeDraft = publishSteps[stepIndex(publishSteps, 'Recheck reviewed tag before stable draft')];
 	  const beforePublish = publishSteps[stepIndex(publishSteps, 'Recheck reviewed tag before stable publication')];
-	  expect(prepare).toContain('Candidate closure');
+	  expect(prepare).toContain('Signed stable candidate closure');
 	  expect(revalidate?.run).toContain('unexpected candidate file');
 	  for (const step of [beforeDraft, beforePublish]) {
 		expect(step?.run).toContain('/git/ref/tags/');
@@ -712,9 +711,10 @@ describe('release workflow supply-chain contract', () => {
 	  expect(stableDraft?.run).toContain('gift-panel-windows-x64.exe');
 	  expect(stableDraft?.run).not.toContain('#gift-panel-windows-x64.exe');
 
-	  const bridge = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-	  const bridgeLink = bridge[stepIndex(bridge, 'Create expected-name bridge asset')];
-	  const bridgeDraft = bridge[stepIndex(bridge, 'Create immutable-shaped bridge draft')];
+	  const bridgeSign = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-sign']);
+	  const bridgeLink = bridgeSign[stepIndex(bridgeSign, 'Seal and close signed bridge candidate')];
+	  const bridgePublish = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-publish']);
+	  const bridgeDraft = bridgePublish[stepIndex(bridgePublish, 'Create immutable-shaped bridge draft')];
 	  expect(bridgeLink?.run).toContain('link-sealed-executable');
 	  expect(bridgeDraft?.run).not.toContain('#gift-panel-windows-x64.exe');
 	});
@@ -822,292 +822,95 @@ describe('publisher rotation workflow contract', () => {
 });
 
 describe('exact RushRush bridge release workflow contract', () => {
-  it('uses reviewed prebuilt security tools and bounded policy downloads',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const tools=stepIndex(steps,'Build reviewed bridge security tools');const target=stepIndex(steps,'Check out exact bridge tag');const trust=stepIndex(steps,'Fetch immutable production trust binding');expect(tools).toBeLessThan(target);expect(steps[tools]?.run).toContain('bounded-github-asset.mjs');expect(steps[trust]?.run).toContain('BOUNDED_GITHUB_ASSET_SCRIPT_PATH');expect(steps[trust]?.run).not.toContain('gh release download');expect(steps[trust]?.run).toContain('verify-bundle');});
-
-  it('imports the exact immutable Task9 bundle before verification without pre-creating or weakening its DACL',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const trust=steps[stepIndex(steps,'Fetch immutable production trust binding')]?.run??'';const imported=trust.indexOf(' import-bundle ');const verified=trust.indexOf(' verify-bundle ');expect(imported).toBeGreaterThanOrEqual(0);expect(verified).toBeGreaterThan(imported);expect(trust).toContain('$bundleParent = "$env:BRIDGE_READINESS_ROOT/private-bundle"');expect(trust).toContain('--commit-source "$downloadDirectory/commit.json"');expect(trust).toContain('--policy "$bundleDirectory/policy.json"');expect(trust).toContain('--audit "$bundleDirectory/audit.json"');expect(trust).not.toMatch(/New-Item[^\n]+private-bundle|icacls/);});
-  it('is manual, fixed to v0.4.11, isolated, and minimally permissioned', () => {
-    const workflow = bridgeReleaseWorkflow();
-    expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
-    expect(workflow.on?.workflow_dispatch?.inputs ?? {}).toEqual({});
-    expect(workflow.permissions).toEqual({ contents: 'write', 'id-token': 'write', attestations: 'write' });
-    expect(workflow.concurrency).toEqual({ group: 'gift-panel-bridge-v0.4.11', 'cancel-in-progress': false });
-    expect(Object.keys(workflow.jobs ?? {})).toEqual(['bridge-release']);
-    const job = workflow.jobs?.['bridge-release'];
-    expect(job?.environment).toBe('bridge-release');
-    expect(job?.env?.BRIDGE_TAG).toBe('v0.4.11');
-    expect(job?.permissions).toEqual({ contents: 'write', 'id-token': 'write', attestations: 'write' });
+  it('uses fresh build, protected signing, and signer-free publish runners', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;
+    expect(Object.keys(jobs)).toEqual(['bridge-build','bridge-sign','bridge-publish']);
+    expect(jobs['bridge-build']?.environment).toBeUndefined();
+    expect(jobs['bridge-build']?.permissions).toEqual({contents:'read'});
+    expect(semanticCommands(jobs['bridge-build']).join('\n')).not.toMatch(/EVSIGN_|sign-evsign|gh release (?:create|upload|edit)/i);
+    const sign=jobSteps(jobs['bridge-sign']);
+    expect(jobs['bridge-sign']?.environment).toBe('bridge-sign');
+    expect(jobs['bridge-sign']?.permissions).toEqual({contents:'read'});
+    expect(stepIndex(sign,'Download exact unsigned bridge handoff')).toBeLessThan(stepIndex(sign,'Check out reviewed bridge signing tools'));
+    expect(stepIndex(sign,'Validate unsigned bridge handoff')).toBeLessThan(stepIndex(sign,'Check out reviewed bridge signing tools'));
+    expect(semanticCommands(jobs['bridge-sign']).join('\n')).not.toMatch(/npm (?:ci|test|run)|build:exe|gh release (?:create|upload|edit)/i);
+    expect(jobs['bridge-publish']?.environment).toBe('bridge-publish');
+    expect(jobs['bridge-publish']?.permissions).toEqual({contents:'write','id-token':'write',attestations:'write'});
+    expect(semanticCommands(jobs['bridge-publish']).join('\n')).not.toMatch(/EVSIGN_|sign-evsign|build:exe|npm (?:ci|test|run)/i);
   });
 
-  it('checks out only the fixed tag and rejects ref-derived or conflicting publication state', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const validate = stepIndex(steps, 'Validate fixed bridge release request');
-    const checkout = stepIndex(steps, 'Check out exact bridge tag');
-    const conflict = stepIndex(steps, 'Reject conflicting GitHub release');
-    expect(validate).toBe(0);
-    expect(steps[validate]?.run).toContain("$env:BRIDGE_TAG -cne 'v0.4.11'");
-    expect(steps[checkout]?.with).toMatchObject({
-      ref: 'refs/tags/v0.4.11',
-      'persist-credentials': false,
-      'fetch-depth': 0,
-    });
-    expect(steps[checkout]?.with?.ref).not.toContain('github.ref');
-    expect(checkout).toBeLessThan(conflict);
-    expect(steps[conflict]?.run).toContain('Existing v0.4.11 GitHub Release conflicts with this create-only workflow');
-    expect(steps[conflict]?.run).not.toContain('RELEASE_EXISTS=true');
+  it('is manual, exact-tagged, read-only until its dedicated publisher', () => {
+    const workflow=bridgeReleaseWorkflow();const jobs=workflow.jobs as Record<string,WorkflowJob>;
+    expect(Object.keys(workflow.on??{})).toEqual(['workflow_dispatch']);
+    expect(workflow.permissions).toEqual({contents:'read'});
+    expect(workflow.concurrency).toEqual({group:'gift-panel-bridge-v0.4.11','cancel-in-progress':false});
+    expect(jobs['bridge-build']?.env).toEqual({BRIDGE_TAG:'v0.4.11'});
+    const build=jobSteps(jobs['bridge-build']);
+    expect(build[stepIndex(build,'Check out exact bridge tag')]?.with).toMatchObject({ref:'refs/tags/v0.4.11','persist-credentials':false});
+    expect(stepIndex(build,'Build reviewed bridge security tools')).toBeLessThan(stepIndex(build,'Check out exact bridge tag'));
   });
 
-  it('fails closed on reviewed enrollment inputs before build and keeps app trust NaisNet', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const inputs = steps[stepIndex(steps, 'Validate reviewed bridge inputs')];
-    const build = steps[stepIndex(steps, 'Build bridge executable')];
-    expect(inputs?.env).toEqual({
-      BRIDGE_REVIEWED_COMMIT_SHA: '${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}',
-      BRIDGE_TRUST_ROOT_SPKI_B64: '${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}',
-      BRIDGE_TRUST_ROOT_SPKI_SHA256: '${{ vars.BRIDGE_TRUST_ROOT_SPKI_SHA256 }}',
-      BRIDGE_BOOTSTRAP_POLICY_B64: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}',
-      BRIDGE_BOOTSTRAP_POLICY_SHA256: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}',
-      BRIDGE_BOOTSTRAP_POLICY_EPOCH: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}',
-      BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: '${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}',
-      BRIDGE_UPDATE_API_BASE_URL: '${{ vars.UPDATE_API_BASE_URL }}',
-      BRIDGE_OBSERVATION_EVIDENCE_B64: '${{ vars.BRIDGE_OBSERVATION_EVIDENCE_B64 }}',
-      BRIDGE_OBSERVATION_EVIDENCE_SHA256: '${{ vars.BRIDGE_OBSERVATION_EVIDENCE_SHA256 }}',
-      BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64: '${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64 }}',
-      BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256: '${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 }}',
-    });
-    expect(inputs?.run).toContain('reviewed bridge input is missing');
-    expect(inputs?.run).not.toContain('AddDays(7)');
-    expect(build?.env).toMatchObject({
-      APP_VERSION: 'v0.4.11',
-      APP_UPDATE_PUBLISHER: 'NaisNet Technology Co., Ltd.',
-      APP_UPDATE_TRUST_REQUIRED: '1',
-      APP_UPDATE_TRUST_ROOT_SPKI_B64: '${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}',
-      APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}',
-    });
-    expect(build?.env?.APP_UPDATE_PUBLISHER).not.toContain('RushRush');
-    expect(steps.some((step) => step.name === 'Client-verify embedded enrollment contract')).toBe(false);
+  it('maps the Task9 three-asset Release into a higher exact-hash authorization bundle', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const build=jobSteps(jobs['bridge-build']);
+    const fetch=build[stepIndex(build,'Fetch immutable production trust binding')]?.run??'';
+    for(const name of ['gift-panel-publisher-policy.json','gift-panel-publisher-policy.audit.json','gift-panel-publisher-policy.commit.json','policy.json','audit.json','commit.json'])expect(fetch).toContain(name);
+    expect(fetch).toContain('import-bundle');expect(fetch).toContain('verify-bundle');
+    expect(fetch).toContain('BRIDGE_AUTHORIZATION_POLICY_EPOCH');expect(fetch).toContain('BRIDGE_BOOTSTRAP_POLICY_EPOCH');
+    expect(fetch).toContain('authorization-evidence.json');expect(fetch).not.toContain('Bootstrap policy bytes do not match');
+    const readiness=build[stepIndex(build,'Verify reviewed bridge readiness')]?.run??'';
+    for(const flag of ['--bootstrap-policy','--authorization-policy','--authorization-evidence'])expect(readiness).toContain(flag);
   });
 
-  it('binds the local and remote peeled tag commit to one protected reviewed SHA three times', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const afterCheckout = stepIndex(steps, 'Bind exact reviewed bridge tag after checkout');
-    const beforeDraft = stepIndex(steps, 'Recheck reviewed bridge tag before draft');
-    const beforePublish = stepIndex(steps, 'Recheck reviewed bridge tag before publication');
-    const create = stepIndex(steps, 'Create immutable-shaped bridge draft');
-    const publish = stepIndex(steps, 'Publish bridge as non-latest');
-    expect(afterCheckout).toBeLessThan(beforeDraft);
-    expect(beforeDraft).toBeLessThan(create);
-    expect(create).toBeLessThan(beforePublish);
-    expect(beforePublish).toBeLessThan(publish);
-    for (const index of [afterCheckout, beforeDraft, beforePublish]) {
-      expect(steps[index]?.env?.BRIDGE_REVIEWED_COMMIT_SHA).toBe('${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}');
-      expect(steps[index]?.env?.BRIDGE_REVIEWED_TAG_OBJECT_SHA).toBe('${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}');
-      expect(steps[index]?.run).toContain('git rev-parse refs/tags/v0.4.11^{commit}');
-      expect(steps[index]?.run).toContain('git rev-parse refs/tags/v0.4.11');
-      expect(steps[index]?.run).toContain('git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{}');
-      expect(steps[index]?.run).toContain('$env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch');
-      expect(steps[index]?.run).toContain('$env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cnotmatch');
-      expect(steps[index]?.run).toContain("$remote['refs/tags/v0.4.11'] -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA");
-      expect(steps[index]?.run).toContain('reviewed bridge tag binding failed');
-    }
+  it('executes target code only in the unprivileged build job before unsigned handoff', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const build=jobSteps(jobs['bridge-build']);
+    expect(stepIndex(build,'Run repository tests')).toBeLessThan(stepIndex(build,'Build bridge executable'));
+    expect(stepIndex(build,'Build bridge executable')).toBeLessThan(stepIndex(build,'Prepare closed unsigned bridge handoff'));
+    expect(stepIndex(build,'Prepare closed unsigned bridge handoff')).toBeLessThan(stepIndex(build,'Upload exact unsigned bridge handoff'));
+    const commands=semanticCommands(jobs['bridge-build']).join('\n');
+    expect(commands).toContain('npm test');expect(commands).toContain('go test');expect(commands).toContain('npm run build:exe');
+    expect(commands).not.toMatch(/secrets\.|EVSIGN_/i);
   });
 
-  it('uses actual stable and policy Releases plus reviewed artifacts for readiness before build', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const stable = stepIndex(steps, 'Fetch immutable v0.4.12 observation binding');
-    const trust = stepIndex(steps, 'Fetch immutable production trust binding');
-    const readiness = stepIndex(steps, 'Verify reviewed bridge readiness');
-    const build = stepIndex(steps, 'Build bridge executable');
-    expect(stable).toBeLessThan(readiness);
-    expect(trust).toBeLessThan(readiness);
-    expect(readiness).toBeLessThan(build);
-    expect(steps[stable]?.run).toContain('/releases/tags/v0.4.12');
-    expect(steps[stable]?.run).toContain('stable-release.json');
-    expect(steps[stable]?.run).toContain('--max-bytes 134217728');
-    expect(steps[stable]?.run).toContain('--output "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"');
-    expect(steps[trust]?.run).toContain('publisher-policy-epoch-00000001');
-    expect(steps[trust]?.run).toContain('BOUNDED_GITHUB_ASSET_SCRIPT_PATH');
-    expect(steps[trust]?.run).toContain('verify-bundle');
-    expect(steps[readiness]?.run).toContain('node $env:BRIDGE_READINESS_SCRIPT_PATH verify');
-    expect(steps[readiness]?.run).toContain('--observation-evidence');
-    expect(steps[readiness]?.run).toContain('--trust-attestation');
-    expect(steps[readiness]?.run).toContain('--stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"');
-    expect(steps[readiness]?.run).toContain('--verified-bundle "$env:BRIDGE_READINESS_ROOT/verified-bundle.json"');
-    expect(steps[readiness]?.run).toContain('stableIdentity.organization');
-    expect(steps[readiness]?.run).toContain('$env:BRIDGE_READINESS_ROOT/readiness.json');
-    expect(bridgeReleaseWorkflow().source).not.toContain('BRIDGE_STABLE_PUBLISHED_AT');
-    expect(bridgeReleaseWorkflow().source).not.toContain('BRIDGE_STABLE_OBSERVATION_APPROVED_AT');
+  it('final-inspects embedded bootstrap and external authorization on the protected runner', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const sign=jobSteps(jobs['bridge-sign']);
+    const final=sign[stepIndex(sign,'Seal and close signed bridge candidate')]?.run??'';
+    for(const value of ['verify-artifact','--bootstrap-policy','--authorization-policy','--authorization-policy-epoch','--stable-artifact','authorizationPolicyEpoch -le','link-sealed-executable'])expect(final).toContain(value);
+    expect(final).not.toContain('npm');
+    const secretStep=sign[stepIndex(sign,'Sign RushRush bridge executable on protected runner')];
+    expect(Object.keys(secretStep?.env??{}).sort()).toEqual(['EVSIGN_BRIDGE_CERTIFICATE','EVSIGN_BRIDGE_PUBLISHER_IDENTITY','EVSIGN_KEY','EVSIGN_PASSWORD']);
+    expect(JSON.stringify(jobs['bridge-build'])).not.toMatch(/EVSIGN_|secrets\./);
+    expect(JSON.stringify(jobs['bridge-publish'])).not.toMatch(/EVSIGN_|secrets\./);
   });
 
-  it('keeps the verified private readiness closure outside Vite-cleared dist through final inspection', () => {
-    const workflow = bridgeReleaseWorkflow();
-    const steps = jobSteps(workflow.jobs?.['bridge-release']);
-    const tools = steps[stepIndex(steps, 'Build reviewed bridge security tools')];
-    const readiness = stepIndex(steps, 'Verify reviewed bridge readiness');
-    const buildFrontend = stepIndex(steps, 'Build frontend');
-    const finalInspection = stepIndex(steps, 'Inspect final bound bridge artifact');
-    expect(readiness).toBeLessThan(buildFrontend);
-    expect(buildFrontend).toBeLessThan(finalInspection);
-    expect(tools?.run).toContain('BRIDGE_READINESS_ROOT=$env:RUNNER_TEMP/bridge-readiness');
-    expect(workflow.source).not.toContain('dist/bridge-readiness');
-    for (const name of ['Fetch immutable v0.4.12 observation binding', 'Fetch immutable production trust binding', 'Verify reviewed bridge readiness', 'Inspect final bound bridge artifact']) {
-      expect(steps[stepIndex(steps, name)]?.run).toContain('$env:BRIDGE_READINESS_ROOT');
-    }
+  it('executes the handoff gate and rejects PATH, GITHUB_ENV, or tool poisoning', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const steps=jobSteps(jobs['bridge-sign']);
+    const gate=steps[stepIndex(steps,'Validate unsigned bridge handoff')];const root=mkdtempSync(join(tmpdir(),'bridge-poison-'));
+    try{
+      const handoff=join(root,'handoff');const bundle=join(handoff,'readiness','private-bundle','bundle');mkdirSync(bundle,{recursive:true});
+      const unsigned=Buffer.from('unsigned-bridge');const digest=createHash('sha256').update(unsigned).digest('hex');writeFileSync(join(handoff,digest+'.exe'),unsigned);
+      for(const name of ['ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-component-manifest.json','gift-panel-changelog.json'])writeFileSync(join(handoff,name),name);
+      for(const name of ['root-spki.der','bootstrap-policy.json','stable-artifact.exe','readiness.json','authorization-evidence.json','policy-release.json','stable-release.json','observation-evidence.json','trust-attestation.json','verified-bundle.json'])writeFileSync(join(handoff,'readiness',name),name);
+      for(const name of ['policy.json','audit.json','commit.json'])writeFileSync(join(bundle,name),name);
+      writeFileSync(join(handoff,'handoff.json'),JSON.stringify({schemaVersion:1,tag:'v0.4.11',version:'0.4.11',commit:'a'.repeat(40),unsignedSha256:digest,unsignedSize:unsigned.length,rootSpkiSha256:'b'.repeat(64),bootstrapPolicySha256:'c'.repeat(64),bootstrapPolicyEpoch:1,authorizationPolicySha256:'d'.repeat(64),authorizationPolicyEpoch:2}));
+      const githubEnv=join(root,'fresh-env');const poison=join(root,'poison');mkdirSync(poison);
+      const execute=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,PATH:poison+';'+(process.env.PATH??''),GITHUB_ENV:githubEnv,EXPECTED_UNSIGNED_SHA256:digest,EXPECTED_UNSIGNED_SIZE:String(unsigned.length),BRIDGE_REVIEWED_COMMIT_SHA:'a'.repeat(40)},input:"$ErrorActionPreference='Stop'\n"+(gate?.run??'')});
+      writeFileSync(join(handoff,'GITHUB_ENV.cmd'),'target controlled');const poisoned=execute();expect(poisoned.status!==0||poisoned.stderr.includes('handoff closure'),poisoned.stderr).toBe(true);
+      rmSync(join(handoff,'GITHUB_ENV.cmd'));const valid=execute();expect(valid.status,valid.stderr).toBe(0);expect(readFileSync(githubEnv,'utf8')).not.toContain(poison);
+    }finally{rmSync(root,{recursive:true,force:true});}
   });
 
-  it('uses the closed bridge signer and structured RushRush outer identity only', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const resolveProfile = steps[stepIndex(steps, 'Validate bridge signer profile')];
-    const sign = steps[stepIndex(steps, 'Sign RushRush outer executable')];
-    expect(resolveProfile?.env).toEqual({
-      EVSIGN_BRIDGE_CERTIFICATE: '${{ vars.EVSIGN_BRIDGE_CERTIFICATE }}',
-      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '${{ vars.EVSIGN_BRIDGE_PUBLISHER_IDENTITY }}',
-    });
-    expect(resolveProfile?.run).toContain('$env:EVSIGN_SCRIPT_PATH --resolve-profile bridge');
-    expect(sign?.env).toMatchObject({
-      EVSIGN_BRIDGE_CERTIFICATE: '${{ vars.EVSIGN_BRIDGE_CERTIFICATE }}',
-      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '${{ vars.EVSIGN_BRIDGE_PUBLISHER_IDENTITY }}',
-      EVSIGN_KEY: '${{ secrets.EVSIGN_BRIDGE_KEY }}',
-      EVSIGN_PASSWORD: '${{ secrets.EVSIGN_BRIDGE_PASSWORD }}',
-    });
-    expect(sign?.run).toContain('$env:EVSIGN_SCRIPT_PATH --profile bridge');
-	expect(sign?.run).toContain('dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe');
-    expect(sign?.run).not.toContain('Get-AuthenticodeSignature');
-    for (const step of steps) {
-      expect(Object.values(step.env ?? {})).not.toContain('${{ secrets.EVSIGN_KEY }}');
-      expect(Object.values(step.env ?? {})).not.toContain('${{ vars.EVSIGN_CERTIFICATE }}');
-    }
+  it('publishes one exact eight-asset non-latest closure without signer capability', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const publish=jobSteps(jobs['bridge-publish']);
+    const validate=publish[stepIndex(publish,'Validate signed bridge publication handoff')]?.run??'';
+    for(const name of ['gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','ffmpeg-windows-x64.exe','gift-panel-changelog.json','ffmpeg-component-manifest.json','bridge-release-evidence.json','SHA256SUMS.txt'])expect(validate).toContain(name);
+    expect(publish[stepIndex(publish,'Create immutable-shaped bridge draft')]?.run).toContain('--latest=false');
+    expect(publish[stepIndex(publish,'Publish bridge as non-latest')]?.run).toContain('--latest=false');
+    expect(semanticCommands(jobs['bridge-publish']).join('\n')).not.toMatch(/EVSIGN_|SignByAsymmetricKey|channels\/|COS_|--latest(?:\s|$)(?!false)/i);
   });
 
-  it('reuses and independently verifies the fixed NaisNet FFmpeg before and after packaging', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const inspect = steps[stepIndex(steps, 'Resolve fixed signed FFmpeg component')];
-    const verifyBefore = steps[stepIndex(steps, 'Verify NaisNet FFmpeg component before packaging')];
-    const verifyAfter = steps[stepIndex(steps, 'Verify NaisNet FFmpeg after packaging')];
-    expect(inspect?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(inspect?.run).toContain('identity --kind fixed --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json');
-    expect(inspect?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
-    expect(inspect?.run).toContain('FFMPEG_COMPONENT_EXISTS');
-    expect(verifyBefore?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(verifyBefore?.run).toContain('verify-metadata --tool-root');
-    expect(verifyBefore?.run).toContain('--metadata dist/bridge-ffmpeg-component-release.json');
-	expect(verifyBefore?.run).toContain('install --kind fixed --tool-root');
-    expect(verifyBefore?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
-    expect(verifyBefore?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode');
-    expect(verifyBefore?.run).toContain('--organization-id 91210103MA7CJ3C094');
-    expect(verifyAfter?.run).toContain('$componentManifest.sha256');
-    expect(verifyAfter?.run).toContain('$componentManifest.size');
-    expect(verifyAfter?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode');
-    expect(verifyAfter?.run).not.toMatch(/sign-evsign|EVSIGN_BRIDGE_CERTIFICATE/);
-  });
-
-  it('binds EVSign output to the unsigned PE and final-inspects every embedded security input', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    expect(steps.some((step) => step.name === 'Write structured Authenticode verifier')).toBe(false);
-    const sign = stepIndex(steps, 'Sign RushRush outer executable');
-    const inspect = stepIndex(steps, 'Inspect final bound bridge artifact');
-    const evidence = stepIndex(steps, 'Prepare public bridge evidence');
-    expect(sign).toBeLessThan(inspect);
-    expect(inspect).toBeLessThan(evidence);
-    expect(steps[sign]?.run).toContain('gift-panel-windows-x64.unsigned.exe');
-    expect(steps[sign]?.run).not.toContain('Get-AuthenticodeSignature');
-    expect(steps[inspect]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH verify-artifact');
-    for (const binding of ['--unsigned', '--signed', '--version', '--tag', '--commit', '--root-spki', '--root-sha256', '--policy', '--policy-sha256', '--policy-epoch', '--stable-artifact', '--stable-tag', '--stable-channel', '--ffmpeg-archive', '--ffmpeg-manifest']) {
-      expect(steps[inspect]?.run).toContain(binding);
-    }
-    expect(steps[inspect]?.run).toContain('--policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json"');
-    expect(steps[inspect]?.run).toContain('--stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"');
-    expect(steps[inspect]?.run).not.toContain('dist/bridge-bootstrap-policy.json');
-    expect(steps[inspect]?.run).toContain('bridge-artifact-inspection.json');
-  });
-
-  it('creates complete evidence, reads back exact draft bytes, then publishes non-latest', () => {
-    const workflow = bridgeReleaseWorkflow();
-    const steps = jobSteps(workflow.jobs?.['bridge-release']);
-    const evidence = steps[stepIndex(steps, 'Prepare public bridge evidence')];
-    const create = steps[stepIndex(steps, 'Create immutable-shaped bridge draft')];
-    const verifyDraft = stepIndex(steps, 'Read back and verify bridge draft');
-    const publish = stepIndex(steps, 'Publish bridge as non-latest');
-    const verifyPublished = stepIndex(steps, 'Verify published bridge remains non-latest');
-    expect(evidence?.run).toContain('bridge-release-evidence.json');
-    expect(evidence?.run).toContain('rootSpkiSha256');
-    expect(evidence?.run).toContain('bootstrapPolicyEpoch');
-    expect(evidence?.run).toContain('ffmpegIdentity');
-    expect(create?.run).toContain('gh release create $env:BRIDGE_TAG --draft --verify-tag --title $env:BRIDGE_TAG --latest=false');
-    expect(create?.run).toContain('gift-panel-windows-x64.exe');
-    expect(create?.run).toContain('gift-panel-windows-x64.exe.sha256');
-    expect(create?.run).toContain('gift-panel-update.json');
-    expect(create?.run).toContain('gift-panel-changelog.json');
-    expect(create?.run).toContain('ffmpeg-windows-x64.exe');
-    expect(create?.run).toContain('ffmpeg-component-manifest.json');
-    expect(create?.run).toContain('bridge-release-evidence.json');
-    expect(verifyDraft).toBeLessThan(publish);
-    expect(steps[publish]?.run).toContain('gh release edit $env:BRIDGE_TAG --draft=false --latest=false');
-    expect(publish).toBeLessThan(verifyPublished);
-    expect(steps[verifyPublished]?.run).toContain('/releases/latest');
-    expect(steps[verifyPublished]?.run).toContain('$latest.id -eq $release.id');
-  });
-
-  it('validates the exact Task 7 ByTag mirror closure locally before draft creation', () => {
-    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
-    const evidence = stepIndex(steps, 'Prepare public bridge evidence');
-    const mirrorClosure = stepIndex(steps, 'Validate local bridge mirror closure');
-    const create = stepIndex(steps, 'Create immutable-shaped bridge draft');
-    expect(evidence).toBeLessThan(mirrorClosure);
-    expect(mirrorClosure).toBeLessThan(create);
-    expect(steps[evidence]?.run).toContain('gift-panel-windows-x64.exe.sha256');
-    expect(steps[evidence]?.run).toContain('gift-panel-update.json');
-    expect(steps[evidence]?.run).toContain('local-bridge-release.json');
-	expect(steps[mirrorClosure]?.run).toContain('$env:RELEASE_CLOSURE_PATH');
-    expect(steps[mirrorClosure]?.run).toContain('--tag v0.4.11');
-  });
-
-  it('executes public evidence generation with exact identities, hashes, sizes, and policy metadata', () => {
-    const prepared = runBridgeEvidencePreparation();
-    expect(prepared.result.status, prepared.result.stderr).toBe(0);
-    expect(prepared.evidence, `${prepared.result.stdout}\n${prepared.result.stderr}`).toBeDefined();
-    expect(prepared.evidence).toMatchObject({
-      schemaVersion: 1,
-      version: '0.4.11',
-      tag: 'v0.4.11',
-      commit: 'a'.repeat(40),
-      latest: false,
-      outerIdentity: {
-        country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P', authenticode: 'Valid',
-      },
-      ffmpegIdentity: {
-        country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094', authenticode: 'Valid', version: '9.0',
-      },
-      rootSpkiSha256: 'b'.repeat(64),
-      bootstrapPolicyEpoch: 1,
-      bootstrapPolicySha256: 'c'.repeat(64),
-      peContentSha256: 'd'.repeat(64),
-	  signedFileSha256: createHash('sha256').update(Buffer.from('rushrush-signed-executable')).digest('hex'),
-	  signedFileSize: Buffer.from('rushrush-signed-executable').length,
-      stableReleaseId: 412,
-      stableArtifactSha256:'1'.repeat(64),
-      observationEvidenceSha256: 'e'.repeat(64),
-      policyReleaseId: 501,
-      kmsKeyId: 'kms-production-key',
-      trustAttestationSha256: 'f'.repeat(64),
-    });
-    expect(prepared.evidence.assets).toHaveLength(6);
-    expect(prepared.checksums.split(/\r?\n/)).toHaveLength(7);
-  });
-
-  it('rejects evidence if packaged FFmpeg differs from the pre-packaging verified component', () => {
-    const prepared = runBridgeEvidencePreparation('0'.repeat(64));
-    expect(prepared.result.status).not.toBe(0);
-    expect(prepared.result.stderr).toContain('Packaged FFmpeg differs from the pre-packaging verified component');
-  });
-
-  it('cannot mutate update pointers, COS, KMS, or ordinary latest state', () => {
-    const workflow = bridgeReleaseWorkflow();
-    const commands = semanticCommands(workflow.jobs?.['bridge-release']);
-    for (const command of commands) {
-      expect(command).not.toMatch(/channels\/(?:stable|legacy-rushrush)\/latest\.json/i);
-      expect(command).not.toMatch(/SignByAsymmetricKey|trustpolicy.*\bsign\b|\bCOS_/i);
-      expect(command).not.toMatch(/--latest(?:\s|$)(?!false)/);
-    }
-    expect(workflow.source).not.toMatch(/TENCENTCLOUD_|GIFT_PANEL_KMS_|PUBLISHER_ROTATION_/);
+  it('pins every external Action and cannot mutate stable, legacy, COS, or KMS state', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;
+    for(const job of Object.values(jobs))for(const step of jobSteps(job))if(step.uses)expect(step.uses).toMatch(/^[^@]+@[0-9a-f]{40}$/);
+    expect(Object.values(jobs).flatMap(semanticCommands).join('\n')).not.toMatch(/channels\/stable|channels\/legacy-rushrush|SignByAsymmetricKey|TENCENTCLOUD_|COS_/i);
   });
 });

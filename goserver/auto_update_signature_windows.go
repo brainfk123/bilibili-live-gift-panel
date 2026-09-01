@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 const authenticodePowerShellScript = `& { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $signature = Get-AuthenticodeSignature -LiteralPath $args[0]; [pscustomobject]@{status=[string]$signature.Status;certificateDerBase64=if ($null -eq $signature.SignerCertificate) { "" } else { [Convert]::ToBase64String($signature.SignerCertificate.RawData) }} | ConvertTo-Json -Compress }`
@@ -89,19 +90,47 @@ func runAuthenticodePowerShell(path string) ([]byte, error) {
 }
 
 func systemWindowsPowerShellPath() (string, error) {
-	windowsDirectory := strings.TrimSpace(os.Getenv("WINDIR"))
-	if windowsDirectory == "" {
-		return "", errors.New("无法定位系统 PowerShell：WINDIR 为空")
+	return systemWindowsPowerShellPathWith(windowsSystemDirectory, os.Stat)
+}
+
+func systemWindowsPowerShellPathWith(systemDirectory func() (string, error), stat func(string) (os.FileInfo, error)) (string, error) {
+	if systemDirectory == nil || stat == nil {
+		return "", errors.New("无法定位系统 PowerShell")
 	}
-	powershell := filepath.Join(windowsDirectory, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-	info, err := os.Stat(powershell)
+	directory, err := systemDirectory()
+	if err != nil || !filepath.IsAbs(directory) {
+		return "", errors.New("无法定位系统 PowerShell")
+	}
+	powershell := filepath.Join(filepath.Clean(directory), "WindowsPowerShell", "v1.0", "powershell.exe")
+	info, err := stat(powershell)
 	if err != nil {
 		return "", fmt.Errorf("无法定位系统 PowerShell：%w", err)
 	}
-	if !info.Mode().IsRegular() {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return "", errors.New("系统 PowerShell 路径不是文件")
 	}
 	return powershell, nil
+}
+
+var getSystemDirectoryW = syscall.NewLazyDLL("kernel32.dll").NewProc("GetSystemDirectoryW")
+
+func windowsSystemDirectory() (string, error) {
+	buffer := make([]uint16, 260)
+	for attempts := 0; attempts < 2; attempts++ {
+		length, _, callErr := getSystemDirectoryW.Call(uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+		if length == 0 {
+			return "", fmt.Errorf("GetSystemDirectoryW failed: %w", callErr)
+		}
+		if length < uintptr(len(buffer)) {
+			directory := syscall.UTF16ToString(buffer[:length])
+			if directory == "" || !filepath.IsAbs(directory) {
+				return "", errors.New("GetSystemDirectoryW returned an invalid path")
+			}
+			return directory, nil
+		}
+		buffer = make([]uint16, int(length)+1)
+	}
+	return "", errors.New("GetSystemDirectoryW path is too long")
 }
 
 func inspectAuthenticodeWithRunner(path string, run powershellRunner) (inspectedUpdateCertificate, error) {
