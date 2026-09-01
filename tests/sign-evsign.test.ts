@@ -91,109 +91,125 @@ describe('EV Sign retry orchestration', () => {
 
 describe('EV Sign signer profile resolution', () => {
   const resolveProfile = () => (evsign as typeof evsign & {
-    resolveEVSignSignerProfile: (environment: Record<string, string | undefined>) => {
+    resolveEVSignSignerProfile: (profile: string, environment: Record<string, string | undefined>) => {
       schema: number;
-      source: string;
       profile: string;
-      cert: string;
-      subject: string;
+      certificate: string;
+      identity: { country: string; organization: string; organizationId: string };
     };
   }).resolveEVSignSignerProfile;
 
-  it('selects the active profile as one atomic certificate and subject pair', () => {
-    const result = resolveProfile()({
-      EVSIGN_ACTIVE_PROFILE: 'naisnet',
-      EVSIGN_SIGNER_PROFILES_JSON: JSON.stringify([
-        { name: 'rushrush', cert: 'cert-old', subject: 'CN=RushRush' },
-        { name: 'naisnet', cert: 'cert-new', subject: 'CN=NaisNet' },
-      ]),
-      EVSIGN_CERT: 'stale-cert',
-      EVSIGN_EXPECTED_SUBJECT: 'CN=Stale',
+  it('binds stable to its reviewed NaisNet certificate selector and structured identity', () => {
+    const result = resolveProfile()('stable', {
+      EVSIGN_CERTIFICATE: 'naisnet-certificate-selector',
+      EVSIGN_PUBLISHER_IDENTITY: JSON.stringify({
+        country: 'CN',
+        organization: 'NaisNet Technology Co., Ltd.',
+        organizationId: '91210103MA7CJ3C094',
+      }),
     });
 
     expect(result).toEqual({
-      schema: 1,
-      source: 'profiles',
-      profile: 'naisnet',
-      cert: 'cert-new',
-      subject: 'CN=NaisNet',
+      schema: 2,
+      profile: 'stable',
+      certificate: 'naisnet-certificate-selector',
+      identity: {
+        country: 'CN',
+        organization: 'NaisNet Technology Co., Ltd.',
+        organizationId: '91210103MA7CJ3C094',
+      },
     });
   });
 
-  it('normalizes a provider-default profile into an omitted certificate selector', () => {
-    expect(resolveProfile()({
-      EVSIGN_ACTIVE_PROFILE: 'naisnet',
-      EVSIGN_SIGNER_PROFILES_JSON: JSON.stringify([
-        { name: 'naisnet', cert: null, subject: 'CN=NaisNet' },
-      ]),
+  it('binds bridge to its reviewed RushRush certificate selector and structured identity', () => {
+    expect(resolveProfile()('bridge', {
+      EVSIGN_BRIDGE_CERTIFICATE: 'rushrush-certificate-selector',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: JSON.stringify({
+        country: 'CN',
+        organization: 'RushRush Network Technology Ltd',
+        organizationId: '91450900MADM3GLG5P',
+      }),
     })).toEqual({
-      schema: 1,
-      source: 'profiles',
-      profile: 'naisnet',
-      cert: '',
-      subject: 'CN=NaisNet',
+      schema: 2,
+      profile: 'bridge',
+      certificate: 'rushrush-certificate-selector',
+      identity: {
+        country: 'CN',
+        organization: 'RushRush Network Technology Ltd',
+        organizationId: '91450900MADM3GLG5P',
+      },
     });
   });
 
-  it('keeps the exact legacy pair when no profile configuration exists', () => {
-    expect(resolveProfile()({
-      EVSIGN_CERT: 'legacy-cert',
-      EVSIGN_EXPECTED_SUBJECT: 'CN=Legacy',
-    })).toEqual({
-      schema: 1,
-      source: 'legacy',
-      profile: 'legacy',
-      cert: 'legacy-cert',
-      subject: 'CN=Legacy',
-    });
-  });
-
-  it('uses the provider default certificate when legacy configuration omits EVSIGN_CERT', () => {
-    expect(resolveProfile()({
-      EVSIGN_EXPECTED_SUBJECT: 'CN=NaisNet',
-    })).toEqual({
-      schema: 1,
-      source: 'legacy',
-      profile: 'legacy',
-      cert: '',
-      subject: 'CN=NaisNet',
-    });
-  });
-
-  it('emits the selected profile as strict JSON for the release workflow', () => {
-    const result = spawnSync(process.execPath, [resolve('scripts/sign-evsign.mjs'), '--resolve-profile'], {
+  it('emits only redacted profile metadata for workflow preflight', () => {
+    const certificate = 'recognizable-rushrush-certificate-selector';
+    const result = spawnSync(process.execPath, [resolve('scripts/sign-evsign.mjs'), '--resolve-profile', 'bridge'], {
       cwd: resolve('.'),
       encoding: 'utf8',
       env: {
         ...process.env,
-        EVSIGN_ACTIVE_PROFILE: 'naisnet',
-        EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"cert-new","subject":"CN=NaisNet"}]',
-        EVSIGN_CERT: '',
-        EVSIGN_EXPECTED_SUBJECT: '',
+        EVSIGN_BRIDGE_CERTIFICATE: certificate,
+        EVSIGN_BRIDGE_PUBLISHER_IDENTITY: JSON.stringify({
+          country: 'CN',
+          organization: 'RushRush Network Technology Ltd',
+          organizationId: '91450900MADM3GLG5P',
+        }),
+        EVSIGN_CERTIFICATE: '',
+        EVSIGN_PUBLISHER_IDENTITY: '',
       },
     });
 
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      schema: 1,
-      source: 'profiles',
-      profile: 'naisnet',
-      cert: 'cert-new',
-      subject: 'CN=NaisNet',
+      schema: 2,
+      profile: 'bridge',
+      certificateConfigured: true,
+      identity: {
+        country: 'CN',
+        organization: 'RushRush Network Technology Ltd',
+        organizationId: '91450900MADM3GLG5P',
+      },
     });
+    expect(`${result.stdout}${result.stderr}`).not.toContain(certificate);
   });
 
   it.each([
-    ['unknown active profile', { EVSIGN_ACTIVE_PROFILE: 'missing', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet"}]' }, /active EVSign signer profile does not exist/],
-    ['profiles without an active name', { EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet"}]' }, /must be configured together/],
-    ['active name without profiles', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_EXPECTED_SUBJECT: 'CN=Legacy' }, /must be configured together/],
-    ['duplicate profile names', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"a","subject":"CN=A"},{"name":"naisnet","cert":"b","subject":"CN=B"}]' }, /profile name is duplicated/],
-    ['unknown profile property', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet","acceptAny":true}]' }, /unknown properties/],
-    ['subject containing a newline', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":"CN=NaisNet\\nO=Injected"}]' }, /subject is invalid/],
-    ['certificate selector with surrounding whitespace', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":" cert-new ","subject":"CN=NaisNet"}]' }, /cert is invalid/],
-    ['subject with surrounding whitespace', { EVSIGN_ACTIVE_PROFILE: 'naisnet', EVSIGN_SIGNER_PROFILES_JSON: '[{"name":"naisnet","cert":"","subject":" CN=NaisNet "}]' }, /subject is invalid/],
-    ['missing legacy subject', { EVSIGN_CERT: 'legacy-cert' }, /EVSIGN_EXPECTED_SUBJECT is required/],
-  ])('rejects %s', (_label, environment, expected) => {
-    expect(() => resolveProfile()(environment)).toThrow(expected);
+    ['unknown profile', 'naisnet', {}, /unknown EVSign signer profile/],
+    ['missing stable certificate', 'stable', { EVSIGN_PUBLISHER_IDENTITY: '{"country":"CN"}' }, /stable EVSign profile is not configured/],
+    ['missing bridge identity', 'bridge', { EVSIGN_BRIDGE_CERTIFICATE: 'selector' }, /bridge EVSign profile is not configured/],
+    ['legacy free-form configuration', 'stable', { EVSIGN_CERT: 'legacy', EVSIGN_EXPECTED_SUBJECT: 'CN=Legacy' }, /stable EVSign profile is not configured/],
+    ['cross-profile bridge values in stable', 'stable', {
+      EVSIGN_CERTIFICATE: 'stable',
+      EVSIGN_PUBLISHER_IDENTITY: '{"country":"CN","organization":"NaisNet Technology Co., Ltd.","organizationId":"91210103MA7CJ3C094"}',
+      EVSIGN_BRIDGE_CERTIFICATE: 'bridge',
+    }, /cross-profile EVSign configuration/],
+    ['wrong stable legal identity', 'stable', {
+      EVSIGN_CERTIFICATE: 'selector',
+      EVSIGN_PUBLISHER_IDENTITY: '{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P"}',
+    }, /stable EVSign publisher identity is not the reviewed identity/],
+    ['wrong bridge legal identity', 'bridge', {
+      EVSIGN_BRIDGE_CERTIFICATE: 'selector',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '{"country":"CN","organization":"NaisNet Technology Co., Ltd.","organizationId":"91210103MA7CJ3C094"}',
+    }, /bridge EVSign publisher identity is not the reviewed identity/],
+    ['identity with unknown property', 'bridge', {
+      EVSIGN_BRIDGE_CERTIFICATE: 'selector',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P","subject":"free-form"}',
+    }, /bridge EVSign publisher identity is invalid/],
+    ['certificate selector with surrounding whitespace', 'bridge', {
+      EVSIGN_BRIDGE_CERTIFICATE: ' selector ',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P"}',
+    }, /bridge EVSign profile is not configured/],
+  ])('rejects %s without exposing configuration', (_label, profile, environment, expected) => {
+    let error: unknown;
+    try {
+      resolveProfile()(profile, environment);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(expected);
+    for (const value of Object.values(environment)) {
+      if (value) expect((error as Error).message).not.toContain(value);
+    }
   });
 });

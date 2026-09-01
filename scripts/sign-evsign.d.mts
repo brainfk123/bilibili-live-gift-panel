@@ -12,5 +12,17 @@ export interface SignDependencies {
   sleep?: (milliseconds: number) => Promise<void>;
   log?: (message: string) => void;
 }
+export interface EVSignPublisherIdentity {
+  country: 'CN';
+  organization: string;
+  organizationId: string;
+}
+export interface EVSignSignerProfile {
+  schema: 2;
+  profile: 'stable' | 'bridge';
+  certificate: string;
+  identity: EVSignPublisherIdentity;
+}
+export function resolveEVSignSignerProfile(profile: string, environment?: Record<string, string | undefined>): EVSignSignerProfile;
 export function requestSignedBytes(source: Buffer, request: { endpoint: string; headers: Record<string, string>; attemptTimeoutMs: number; maximumResponseBytes: number }): Promise<Buffer>;
 export function signFileWithRetry(options: SignFileOptions, dependencies?: SignDependencies): Promise<void>;

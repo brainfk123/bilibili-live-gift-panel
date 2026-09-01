@@ -32,6 +32,13 @@ interface PublisherRotationWorkflow {
   jobs?: Record<string, WorkflowJob>;
 }
 
+interface BridgeReleaseWorkflow {
+  on?: Record<string, { inputs?: Record<string, Record<string, unknown>> }>;
+  permissions?: Record<string, string>;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  jobs?: Record<string, WorkflowJob>;
+}
+
 const auditedSetupMSYS2Commit = '66cd2cce69caa17b53920067426061ca1de3a884';
 
 function releaseWorkflow() {
@@ -62,6 +69,13 @@ function publisherRotationWorkflow(): PublisherRotationWorkflow {
   const document = parseDocument(source);
   expect(document.errors).toEqual([]);
   return document.toJS() as PublisherRotationWorkflow;
+}
+
+function bridgeReleaseWorkflow(): BridgeReleaseWorkflow & { source: string } {
+  const source = readFileSync(new URL('../.github/workflows/bridge-release.yml', import.meta.url), 'utf8');
+  const document = parseDocument(source);
+  expect(document.errors).toEqual([]);
+  return { ...(document.toJS() as BridgeReleaseWorkflow), source };
 }
 
 function jobSteps(job: WorkflowJob | undefined): ReleaseStep[] {
@@ -143,6 +157,7 @@ function Get-AuthenticodeSignature {
     SignerCertificate = [pscustomobject]@{ Subject = 'CN=Release Test' }
   }
 }
+
 ${validation}
 `;
     return spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'], {
@@ -159,6 +174,54 @@ ${validation}
       input: script,
       timeout: 30_000,
     });
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'gift-panel-bridge-evidence-'));
+  try {
+    const dist = join(temporaryRoot, 'dist');
+    mkdirSync(dist);
+    const executable = Buffer.from('rushrush-signed-executable');
+    const ffmpeg = Buffer.from('naisnet-signed-ffmpeg');
+    const componentManifest = Buffer.from('{"version":"9.0"}');
+    writeFileSync(join(dist, 'gift-panel-windows-x64.exe'), executable);
+    writeFileSync(join(dist, 'ffmpeg-windows-x64.exe'), ffmpeg);
+    writeFileSync(join(dist, 'ffmpeg-component-manifest.json'), componentManifest);
+    writeFileSync(join(temporaryRoot, 'gift-panel-changelog.json'), '{"schemaVersion":1,"releases":[{"version":"0.4.11"}]}');
+    const ffmpegHash = createHash('sha256').update(ffmpeg).digest('hex');
+    const manifestHash = createHash('sha256').update(componentManifest).digest('hex');
+    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+    const evidence = steps[stepIndex(steps, 'Prepare public bridge evidence')]?.run;
+    expect(evidence).toBeTypeOf('string');
+    const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', '-'], {
+      cwd: temporaryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BRIDGE_TAG: 'v0.4.11',
+        BRIDGE_COMMIT: 'a'.repeat(40),
+        BRIDGE_TRUST_ROOT_SPKI_SHA256: 'b'.repeat(64),
+        BRIDGE_BOOTSTRAP_POLICY_SHA256: 'c'.repeat(64),
+        BRIDGE_BOOTSTRAP_POLICY_EPOCH: '1',
+        BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: manifestHash,
+        BRIDGE_FFMPEG_SHA256: expectedFFmpegHash ?? ffmpegHash,
+        BRIDGE_FFMPEG_SIZE: String(ffmpeg.length),
+      },
+      input: `$ErrorActionPreference = 'Stop'\n${evidence}\n`,
+      timeout: 30_000,
+    });
+    return {
+      result,
+      evidence: existsSync(join(dist, 'bridge-release-evidence.json'))
+        ? JSON.parse(readFileSync(join(dist, 'bridge-release-evidence.json'), 'utf8'))
+        : undefined,
+      checksums: existsSync(join(dist, 'SHA256SUMS.txt'))
+        ? readFileSync(join(dist, 'SHA256SUMS.txt'), 'utf8')
+        : '',
+    };
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -791,5 +854,175 @@ describe('publisher rotation workflow contract', () => {
       expect(step.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');
       expect(step.env?.PUBLISHER_ROTATION_SPKI_PATH).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_PATH }}');
     }
+  });
+});
+
+describe('exact RushRush bridge release workflow contract', () => {
+  it('is manual, fixed to v0.4.11, isolated, and minimally permissioned', () => {
+    const workflow = bridgeReleaseWorkflow();
+    expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
+    expect(workflow.on?.workflow_dispatch?.inputs ?? {}).toEqual({});
+    expect(workflow.permissions).toEqual({ contents: 'write', 'id-token': 'write', attestations: 'write' });
+    expect(workflow.concurrency).toEqual({ group: 'gift-panel-bridge-v0.4.11', 'cancel-in-progress': false });
+    expect(Object.keys(workflow.jobs ?? {})).toEqual(['bridge-release']);
+    const job = workflow.jobs?.['bridge-release'];
+    expect(job?.environment).toBe('bridge-release');
+    expect(job?.env?.BRIDGE_TAG).toBe('v0.4.11');
+    expect(job?.permissions).toEqual({ contents: 'write', 'id-token': 'write', attestations: 'write' });
+  });
+
+  it('checks out only the fixed tag and rejects ref-derived or conflicting publication state', () => {
+    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+    const validate = stepIndex(steps, 'Validate fixed bridge release request');
+    const checkout = stepIndex(steps, 'Check out exact bridge tag');
+    const conflict = stepIndex(steps, 'Reject conflicting GitHub release');
+    expect(validate).toBe(0);
+    expect(steps[validate]?.run).toContain("$env:BRIDGE_TAG -cne 'v0.4.11'");
+    expect(steps[checkout]?.with).toMatchObject({
+      ref: 'refs/tags/v0.4.11',
+      'persist-credentials': false,
+      'fetch-depth': 0,
+    });
+    expect(steps[checkout]?.with?.ref).not.toContain('github.ref');
+    expect(checkout).toBeLessThan(conflict);
+    expect(steps[conflict]?.run).toContain('Existing v0.4.11 GitHub Release conflicts with this create-only workflow');
+    expect(steps[conflict]?.run).not.toContain('RELEASE_EXISTS=true');
+  });
+
+  it('fails closed on reviewed enrollment inputs before build and keeps app trust NaisNet', () => {
+    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+    const inputs = steps[stepIndex(steps, 'Validate reviewed bridge inputs')];
+    const build = steps[stepIndex(steps, 'Build bridge executable')];
+    const clientVerify = steps[stepIndex(steps, 'Client-verify embedded enrollment contract')];
+    expect(inputs?.env).toEqual({
+      BRIDGE_TRUST_ROOT_SPKI_B64: '${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}',
+      BRIDGE_TRUST_ROOT_SPKI_SHA256: '${{ vars.BRIDGE_TRUST_ROOT_SPKI_SHA256 }}',
+      BRIDGE_BOOTSTRAP_POLICY_B64: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}',
+      BRIDGE_BOOTSTRAP_POLICY_SHA256: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}',
+      BRIDGE_BOOTSTRAP_POLICY_EPOCH: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}',
+      BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: '${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}',
+      BRIDGE_UPDATE_API_BASE_URL: '${{ vars.UPDATE_API_BASE_URL }}',
+      BRIDGE_STABLE_PUBLISHED_AT: '${{ vars.BRIDGE_STABLE_PUBLISHED_AT }}',
+      BRIDGE_STABLE_OBSERVATION_APPROVED_AT: '${{ vars.BRIDGE_STABLE_OBSERVATION_APPROVED_AT }}',
+    });
+    expect(inputs?.run).toContain('reviewed bridge input is missing');
+    expect(inputs?.run).toContain('AddDays(7)');
+    expect(build?.env).toMatchObject({
+      APP_VERSION: 'v0.4.11',
+      APP_UPDATE_PUBLISHER: 'NaisNet Technology Co., Ltd.',
+      APP_UPDATE_TRUST_REQUIRED: '1',
+      APP_UPDATE_TRUST_ROOT_SPKI_B64: '${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}',
+      APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: '${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}',
+    });
+    expect(build?.env?.APP_UPDATE_PUBLISHER).not.toContain('RushRush');
+    expect(clientVerify?.run).toContain('embeddedUpdateTrust()');
+    expect(clientVerify?.run).toContain('parseAndVerifyUpdateTrustPolicy');
+    expect(clientVerify?.run).toContain('rule.Organization == "NaisNet Technology Co., Ltd."');
+    expect(clientVerify?.run).toContain('rule.allowsTag("v0.4.12")');
+  });
+
+  it('uses the closed bridge signer and structured RushRush outer identity only', () => {
+    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+    const resolveProfile = steps[stepIndex(steps, 'Validate bridge signer profile')];
+    const sign = steps[stepIndex(steps, 'Sign and verify RushRush outer executable')];
+    expect(resolveProfile?.env).toEqual({
+      EVSIGN_BRIDGE_CERTIFICATE: '${{ vars.EVSIGN_BRIDGE_CERTIFICATE }}',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '${{ vars.EVSIGN_BRIDGE_PUBLISHER_IDENTITY }}',
+    });
+    expect(resolveProfile?.run).toContain('sign-evsign.mjs --resolve-profile bridge');
+    expect(sign?.env).toMatchObject({
+      EVSIGN_BRIDGE_CERTIFICATE: '${{ vars.EVSIGN_BRIDGE_CERTIFICATE }}',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '${{ vars.EVSIGN_BRIDGE_PUBLISHER_IDENTITY }}',
+      EVSIGN_KEY: '${{ secrets.EVSIGN_BRIDGE_KEY }}',
+      EVSIGN_PASSWORD: '${{ secrets.EVSIGN_BRIDGE_PASSWORD }}',
+    });
+    expect(sign?.run).toContain('sign-evsign.mjs --profile bridge');
+    expect(sign?.run).toContain("Assert-ExactCertificateIdentity $signature.SignerCertificate 'CN' 'RushRush Network Technology Ltd' '91450900MADM3GLG5P'");
+    for (const step of steps) {
+      expect(Object.values(step.env ?? {})).not.toContain('${{ secrets.EVSIGN_KEY }}');
+      expect(Object.values(step.env ?? {})).not.toContain('${{ vars.EVSIGN_CERTIFICATE }}');
+    }
+  });
+
+  it('reuses and independently verifies the fixed NaisNet FFmpeg before and after packaging', () => {
+    const steps = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);
+    const inspect = steps[stepIndex(steps, 'Resolve fixed signed FFmpeg component')];
+    const verifyBefore = steps[stepIndex(steps, 'Verify NaisNet FFmpeg component before packaging')];
+    const verifyAfter = steps[stepIndex(steps, 'Verify NaisNet FFmpeg after packaging')];
+    expect(inspect?.run).toContain('ffmpeg-component-assets.mjs identity');
+    expect(inspect?.run).toContain('FFMPEG_COMPONENT_EXISTS');
+    expect(verifyBefore?.run).toContain('ffmpeg-component-assets.mjs verify-metadata');
+    expect(verifyBefore?.run).toContain('ffmpeg-component-assets.mjs verify');
+    expect(verifyBefore?.run).toContain("Assert-ExactCertificateIdentity $signature.SignerCertificate 'CN' 'NaisNet Technology Co., Ltd.' '91210103MA7CJ3C094'");
+    expect(verifyAfter?.run).toContain('$componentManifest.sha256');
+    expect(verifyAfter?.run).toContain('$componentManifest.size');
+    expect(verifyAfter?.run).toContain("Assert-ExactCertificateIdentity $signature.SignerCertificate 'CN' 'NaisNet Technology Co., Ltd.' '91210103MA7CJ3C094'");
+    expect(verifyAfter?.run).not.toMatch(/sign-evsign|EVSIGN_BRIDGE_CERTIFICATE/);
+  });
+
+  it('creates complete evidence, reads back exact draft bytes, then publishes non-latest', () => {
+    const workflow = bridgeReleaseWorkflow();
+    const steps = jobSteps(workflow.jobs?.['bridge-release']);
+    const evidence = steps[stepIndex(steps, 'Prepare public bridge evidence')];
+    const create = steps[stepIndex(steps, 'Create immutable-shaped bridge draft')];
+    const verifyDraft = stepIndex(steps, 'Read back and verify bridge draft');
+    const publish = stepIndex(steps, 'Publish bridge as non-latest');
+    const verifyPublished = stepIndex(steps, 'Verify published bridge remains non-latest');
+    expect(evidence?.run).toContain('bridge-release-evidence.json');
+    expect(evidence?.run).toContain('rootSpkiSha256');
+    expect(evidence?.run).toContain('bootstrapPolicyEpoch');
+    expect(evidence?.run).toContain('ffmpegIdentity');
+    expect(create?.run).toContain('gh release create $env:BRIDGE_TAG --draft --verify-tag --title $env:BRIDGE_TAG --latest=false');
+    expect(create?.run).toContain('gift-panel-windows-x64.exe');
+    expect(create?.run).toContain('gift-panel-changelog.json');
+    expect(create?.run).toContain('ffmpeg-windows-x64.exe');
+    expect(create?.run).toContain('ffmpeg-component-manifest.json');
+    expect(create?.run).toContain('bridge-release-evidence.json');
+    expect(verifyDraft).toBeLessThan(publish);
+    expect(steps[publish]?.run).toContain('gh release edit $env:BRIDGE_TAG --draft=false --latest=false');
+    expect(publish).toBeLessThan(verifyPublished);
+    expect(steps[verifyPublished]?.run).toContain('/releases/latest');
+    expect(steps[verifyPublished]?.run).toContain('$latest.id -eq $release.id');
+  });
+
+  it('executes public evidence generation with exact identities, hashes, sizes, and policy metadata', () => {
+    const prepared = runBridgeEvidencePreparation();
+    expect(prepared.result.status, prepared.result.stderr).toBe(0);
+    expect(prepared.evidence, `${prepared.result.stdout}\n${prepared.result.stderr}`).toBeDefined();
+    expect(prepared.evidence).toMatchObject({
+      schemaVersion: 1,
+      version: '0.4.11',
+      tag: 'v0.4.11',
+      commit: 'a'.repeat(40),
+      latest: false,
+      outerIdentity: {
+        country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P', authenticode: 'Valid',
+      },
+      ffmpegIdentity: {
+        country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094', authenticode: 'Valid', version: '9.0',
+      },
+      rootSpkiSha256: 'b'.repeat(64),
+      bootstrapPolicyEpoch: 1,
+      bootstrapPolicySha256: 'c'.repeat(64),
+    });
+    expect(prepared.evidence.assets).toHaveLength(4);
+    expect(prepared.checksums.split(/\r?\n/)).toHaveLength(5);
+  });
+
+  it('rejects evidence if packaged FFmpeg differs from the pre-packaging verified component', () => {
+    const prepared = runBridgeEvidencePreparation('0'.repeat(64));
+    expect(prepared.result.status).not.toBe(0);
+    expect(prepared.result.stderr).toContain('Packaged FFmpeg differs from the pre-packaging verified component');
+  });
+
+  it('cannot mutate update pointers, COS, KMS, or ordinary latest state', () => {
+    const workflow = bridgeReleaseWorkflow();
+    const commands = semanticCommands(workflow.jobs?.['bridge-release']);
+    for (const command of commands) {
+      expect(command).not.toMatch(/channels\/(?:stable|legacy-rushrush)\/latest\.json/i);
+      expect(command).not.toMatch(/SignByAsymmetricKey|trustpolicy.*\bsign\b|\bCOS_/i);
+      expect(command).not.toMatch(/--latest(?:\s|$)(?!false)/);
+    }
+    expect(workflow.source).not.toMatch(/TENCENTCLOUD_|GIFT_PANEL_KMS_|PUBLISHER_ROTATION_/);
   });
 });
