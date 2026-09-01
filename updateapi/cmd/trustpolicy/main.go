@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,9 +14,14 @@ import (
 	"time"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/trustpolicy/bundlefs"
 )
 
-const maxCandidateBytes = 256 << 10
+const (
+	maxCandidateBytes            = 256 << 10
+	verifyBundleSchemaVersion    = 1
+	maxVerifyBundleEnvelopeBytes = 512 << 10
+)
 
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -36,11 +42,17 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, lookup environmentLookup, factory signerFactory, output io.Writer, now func() time.Time) error {
-	if ctx == nil || lookup == nil || factory == nil || len(args) == 0 || args[0] != "sign" {
+	if ctx == nil || len(args) == 0 {
 		return errCommand
 	}
 	if output == nil {
 		output = io.Discard
+	}
+	if args[0] == "verify-bundle" {
+		return runVerifyBundle(args[1:], output, bundlefs.ReadCommittedBundle)
+	}
+	if lookup == nil || factory == nil || args[0] != "sign" {
+		return errCommand
 	}
 	if now == nil {
 		now = time.Now
@@ -126,6 +138,66 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	return nil
 }
 
+type verifyBundleArtifact struct {
+	Length      uint64 `json:"length"`
+	SHA256      string `json:"sha256"`
+	BytesBase64 string `json:"bytesBase64"`
+}
+
+type verifyBundleEnvelope struct {
+	SchemaVersion uint64               `json:"schemaVersion"`
+	Policy        verifyBundleArtifact `json:"policy"`
+	Audit         verifyBundleArtifact `json:"audit"`
+}
+
+type committedBundleReader func(string, string) (trustpolicy.CommittedBundle, error)
+
+func runVerifyBundle(args []string, output io.Writer, reader committedBundleReader) error {
+	if output == nil {
+		output = io.Discard
+	}
+	if reader == nil {
+		return errCommand
+	}
+	var policyPath string
+	var auditPath string
+	flags := flag.NewFlagSet("trustpolicy verify-bundle", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&policyPath, "policy", "", "committed policy path")
+	flags.StringVar(&auditPath, "audit", "", "committed audit path")
+	if hasRepeatedRegisteredFlag(args, flags) {
+		return errCommand
+	}
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !requiredFlagsPresent(flags, "policy", "audit") {
+		return errCommand
+	}
+	committed, err := reader(policyPath, auditPath)
+	if err != nil {
+		return errCommand
+	}
+	envelope, err := json.Marshal(verifyBundleEnvelope{
+		SchemaVersion: verifyBundleSchemaVersion,
+		Policy: verifyBundleArtifact{
+			Length:      committed.Commit.Policy.Length,
+			SHA256:      committed.Commit.Policy.SHA256,
+			BytesBase64: base64.StdEncoding.EncodeToString(committed.Policy),
+		},
+		Audit: verifyBundleArtifact{
+			Length:      committed.Commit.Audit.Length,
+			SHA256:      committed.Commit.Audit.SHA256,
+			BytesBase64: base64.StdEncoding.EncodeToString(committed.Audit),
+		},
+	})
+	if err != nil || len(envelope) == 0 || len(envelope)+1 > maxVerifyBundleEnvelopeBytes {
+		return errCommand
+	}
+	envelope = append(envelope, '\n')
+	if written, err := output.Write(envelope); err != nil || written != len(envelope) {
+		return errCommand
+	}
+	return nil
+}
+
 func hasRepeatedRegisteredFlag(args []string, flags *flag.FlagSet) bool {
 	seen := make(map[string]struct{})
 	for index := 0; index < len(args); index++ {
@@ -154,9 +226,13 @@ func hasRepeatedRegisteredFlag(args []string, flags *flag.FlagSet) bool {
 }
 
 func allRequiredFlagsPresent(flags *flag.FlagSet) bool {
-	seen := make(map[string]struct{})
+	return requiredFlagsPresent(flags, "candidate", "expected-previous-epoch", "kms-region", "kms-key-id-env", "expected-spki-sha256-env", "output", "audit-output")
+}
+
+func requiredFlagsPresent(flags *flag.FlagSet, names ...string) bool {
+	seen := make(map[string]struct{}, len(names))
 	flags.Visit(func(value *flag.Flag) { seen[value.Name] = struct{}{} })
-	for _, name := range []string{"candidate", "expected-previous-epoch", "kms-region", "kms-key-id-env", "expected-spki-sha256-env", "output", "audit-output"} {
+	for _, name := range names {
 		if _, ok := seen[name]; !ok {
 			return false
 		}

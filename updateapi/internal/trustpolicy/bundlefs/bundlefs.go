@@ -134,6 +134,12 @@ type retainedDirectory struct {
 	identity fileIdentity
 }
 
+type retainedFile struct {
+	handle   *os.File
+	identity fileIdentity
+	size     int64
+}
+
 func (directory *retainedDirectory) close() {
 	if directory == nil {
 		return
@@ -143,6 +149,12 @@ func (directory *retainedDirectory) close() {
 	}
 	if directory.root != nil {
 		_ = directory.root.Close()
+	}
+}
+
+func (file *retainedFile) close() {
+	if file != nil && file.handle != nil {
+		_ = file.handle.Close()
 	}
 }
 
@@ -212,15 +224,17 @@ func writeCommittedBundle(policyPath string, policy []byte, auditPath string, au
 	if err := validateExactEntries(bundle, nil); err != nil {
 		return errBundleFilesystem
 	}
-	policyInfo, err := writePrivateFile(bundle, paths.policyName, policy, writeAfterPolicyOpened, writeAfterPolicySynced, hooks)
+	policyFile, err := writePrivateFile(bundle, paths.policyName, policy, writeAfterPolicyOpened, writeAfterPolicySynced, hooks)
 	if err != nil {
 		return errBundleFilesystem
 	}
-	auditInfo, err := writePrivateFile(bundle, paths.auditName, audit, writeAfterAuditOpened, writeAfterAuditSynced, hooks)
+	defer policyFile.close()
+	auditFile, err := writePrivateFile(bundle, paths.auditName, audit, writeAfterAuditOpened, writeAfterAuditSynced, hooks)
 	if err != nil {
 		return errBundleFilesystem
 	}
-	dataEntries := map[string]os.FileInfo{paths.policyName: policyInfo, paths.auditName: auditInfo}
+	defer auditFile.close()
+	dataEntries := map[string]*retainedFile{paths.policyName: policyFile, paths.auditName: auditFile}
 	if validateWriterDirectories(parent, bundle) != nil || validateExactEntries(bundle, dataEntries) != nil {
 		return errBundleFilesystem
 	}
@@ -242,14 +256,15 @@ func writeCommittedBundle(policyPath string, policy []byte, auditPath string, au
 	if validateWriterDirectories(parent, bundle) != nil || validateExactEntries(bundle, dataEntries) != nil {
 		return errBundleFilesystem
 	}
-	commitInfo, err := writePrivateFile(bundle, trustpolicy.BundleCommitFileName, marker, writeAfterCommitOpened, writeAfterCommitSynced, hooks)
+	commitFile, err := writePrivateFile(bundle, trustpolicy.BundleCommitFileName, marker, writeAfterCommitOpened, writeAfterCommitSynced, hooks)
 	if err != nil {
 		return errBundleFilesystem
 	}
-	committedEntries := map[string]os.FileInfo{
-		paths.policyName:                 policyInfo,
-		paths.auditName:                  auditInfo,
-		trustpolicy.BundleCommitFileName: commitInfo,
+	defer commitFile.close()
+	committedEntries := map[string]*retainedFile{
+		paths.policyName:                 policyFile,
+		paths.auditName:                  auditFile,
+		trustpolicy.BundleCommitFileName: commitFile,
 	}
 	if validateWriterDirectories(parent, bundle) != nil || validateExactEntries(bundle, committedEntries) != nil {
 		return errBundleFilesystem
@@ -261,6 +276,9 @@ func writeCommittedBundle(policyPath string, policy []byte, auditPath string, au
 		return errBundleFilesystem
 	}
 	if err := hooks.reach(writeAfterCommittedDirectorySynced); err != nil {
+		return errBundleFilesystem
+	}
+	if validateWriterDirectories(parent, bundle) != nil || validateExactEntries(bundle, committedEntries) != nil {
 		return errBundleFilesystem
 	}
 	return nil
@@ -293,7 +311,7 @@ func readCommittedBundle(policyPath, auditPath string, hooks readHooks) (trustpo
 	if err := hooks.reach(readAfterDirectoryAcquired); err != nil || validateReaderDirectories(parent, bundle) != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
-	wanted := map[string]os.FileInfo{
+	wanted := map[string]*retainedFile{
 		paths.policyName: nil, paths.auditName: nil, trustpolicy.BundleCommitFileName: nil,
 	}
 	if err := validateExactEntryNames(bundle, wanted); err != nil {
@@ -302,31 +320,43 @@ func readCommittedBundle(policyPath, auditPath string, hooks readHooks) (trustpo
 	if err := hooks.reach(readAfterEntriesValidated); err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
-	policy, policyInfo, err := readStableFile(bundle, paths.policyName, maxCommittedPolicyBytes, hooks, readAfterPolicyStat, readAfterPolicyOpened)
+	policy, policyFile, err := readStableFile(bundle, paths.policyName, maxCommittedPolicyBytes, hooks, readAfterPolicyStat, readAfterPolicyOpened)
 	if err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
+	defer policyFile.close()
 	if err := hooks.reach(readAfterPolicyRead); err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
-	audit, auditInfo, err := readStableFile(bundle, paths.auditName, maxCommittedAuditBytes, hooks, readAfterAuditStat, readAfterAuditOpened)
+	if validateEntryIdentity(bundle, paths.policyName, policyFile) != nil {
+		return trustpolicy.CommittedBundle{}, errBundleFilesystem
+	}
+	audit, auditFile, err := readStableFile(bundle, paths.auditName, maxCommittedAuditBytes, hooks, readAfterAuditStat, readAfterAuditOpened)
 	if err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
+	defer auditFile.close()
 	if err := hooks.reach(readAfterAuditRead); err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
-	marker, markerInfo, err := readStableFile(bundle, trustpolicy.BundleCommitFileName, maxCommitMarkerBytes, hooks, readAfterCommitStat, readAfterCommitOpened)
+	if validateEntryIdentity(bundle, paths.auditName, auditFile) != nil {
+		return trustpolicy.CommittedBundle{}, errBundleFilesystem
+	}
+	marker, markerFile, err := readStableFile(bundle, trustpolicy.BundleCommitFileName, maxCommitMarkerBytes, hooks, readAfterCommitStat, readAfterCommitOpened)
 	if err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
+	defer markerFile.close()
 	if err := hooks.reach(readAfterCommitRead); err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
-	entries := map[string]os.FileInfo{
-		paths.policyName:                 policyInfo,
-		paths.auditName:                  auditInfo,
-		trustpolicy.BundleCommitFileName: markerInfo,
+	if validateEntryIdentity(bundle, trustpolicy.BundleCommitFileName, markerFile) != nil {
+		return trustpolicy.CommittedBundle{}, errBundleFilesystem
+	}
+	entries := map[string]*retainedFile{
+		paths.policyName:                 policyFile,
+		paths.auditName:                  auditFile,
+		trustpolicy.BundleCommitFileName: markerFile,
 	}
 	if validateReaderDirectories(parent, bundle) != nil || validateExactEntries(bundle, entries) != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
@@ -511,8 +541,7 @@ func validateParentBinding(parent *retainedDirectory) error {
 	if err != nil || !os.SameFile(info, opened) {
 		return errBundleFilesystem
 	}
-	identity, err := identityFromOpenFile(parent.handle)
-	if err != nil || identity != parent.identity {
+	if validateRootHandleBinding(parent, verifyParentDirectoryHandle) != nil {
 		return errBundleFilesystem
 	}
 	return nil
@@ -530,21 +559,41 @@ func validateChildBinding(parent, child *retainedDirectory) error {
 	if err != nil || !os.SameFile(info, opened) {
 		return errBundleFilesystem
 	}
-	identity, err := identityFromOpenFile(child.handle)
-	if err != nil || identity != child.identity {
+	if validateRootHandleBinding(child, verifyPrivateDirectoryHandle) != nil {
 		return errBundleFilesystem
 	}
 	return nil
 }
 
-func writePrivateFile(directory *retainedDirectory, name string, data []byte, openedCheckpoint, syncedCheckpoint writeCheckpoint, hooks writeHooks) (os.FileInfo, error) {
-	file, err := directory.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_SYNC, 0o600)
+func validateRootHandleBinding(directory *retainedDirectory, verify func(*os.File) error) error {
+	if directory == nil || directory.root == nil || directory.handle == nil || verify == nil {
+		return errBundleFilesystem
+	}
+	rootDot, err := directory.root.Open(".")
+	if err != nil {
+		return errBundleFilesystem
+	}
+	defer rootDot.Close()
+	rootInfo, rootStatErr := rootDot.Stat()
+	handleInfo, handleStatErr := directory.handle.Stat()
+	rootIdentity, rootIdentityErr := identityFromOpenFile(rootDot)
+	handleIdentity, handleIdentityErr := identityFromOpenFile(directory.handle)
+	if rootStatErr != nil || handleStatErr != nil || rootIdentityErr != nil || handleIdentityErr != nil ||
+		!os.SameFile(rootInfo, handleInfo) || rootIdentity != directory.identity || handleIdentity != directory.identity ||
+		verify(rootDot) != nil || verify(directory.handle) != nil {
+		return errBundleFilesystem
+	}
+	return nil
+}
+
+func writePrivateFile(directory *retainedDirectory, name string, data []byte, openedCheckpoint, syncedCheckpoint writeCheckpoint, hooks writeHooks) (*retainedFile, error) {
+	file, err := openPrivateBundleFile(directory.handle, name, true)
 	if err != nil {
 		return nil, errBundleFilesystem
 	}
-	closed := false
+	retained := false
 	defer func() {
-		if !closed {
+		if !retained {
 			_ = file.Close()
 		}
 	}()
@@ -555,30 +604,39 @@ func writePrivateFile(directory *retainedDirectory, name string, data []byte, op
 	if err != nil || !openedInfo.Mode().IsRegular() {
 		return nil, errBundleFilesystem
 	}
+	identity, err := identityFromOpenFile(file)
+	if err != nil {
+		return nil, errBundleFilesystem
+	}
+	result := &retainedFile{handle: file, identity: identity, size: openedInfo.Size()}
+	if validateRetainedFile(result) != nil || validateEntryIdentity(directory, name, result) != nil {
+		return nil, errBundleFilesystem
+	}
 	if err := hooks.reach(openedCheckpoint); err != nil {
+		return nil, errBundleFilesystem
+	}
+	if validateRetainedFile(result) != nil || validateEntryIdentity(directory, name, result) != nil {
 		return nil, errBundleFilesystem
 	}
 	if err := writeAll(file, data); err != nil || file.Sync() != nil {
 		return nil, errBundleFilesystem
 	}
+	result.size = int64(len(data))
 	endingInfo, err := file.Stat()
-	if err != nil || !os.SameFile(openedInfo, endingInfo) || endingInfo.Size() != int64(len(data)) || verifyPrivateFileHandle(file) != nil {
+	if err != nil || !os.SameFile(openedInfo, endingInfo) || validateRetainedFile(result) != nil {
 		return nil, errBundleFilesystem
 	}
-	if err := validateEntryIdentity(directory, name, openedInfo); err != nil {
-		return nil, errBundleFilesystem
-	}
-	if err := file.Close(); err != nil {
-		return nil, errBundleFilesystem
-	}
-	closed = true
-	if err := validateEntryIdentity(directory, name, openedInfo); err != nil {
+	if err := validateEntryIdentity(directory, name, result); err != nil {
 		return nil, errBundleFilesystem
 	}
 	if err := hooks.reach(syncedCheckpoint); err != nil {
 		return nil, errBundleFilesystem
 	}
-	return openedInfo, nil
+	if validateRetainedFile(result) != nil || validateEntryIdentity(directory, name, result) != nil {
+		return nil, errBundleFilesystem
+	}
+	retained = true
+	return result, nil
 }
 
 func writeAll(file *os.File, data []byte) error {
@@ -592,7 +650,7 @@ func writeAll(file *os.File, data []byte) error {
 	return nil
 }
 
-func readStableFile(directory *retainedDirectory, name string, maximum int64, hooks readHooks, afterStat, afterOpen readCheckpoint) ([]byte, os.FileInfo, error) {
+func readStableFile(directory *retainedDirectory, name string, maximum int64, hooks readHooks, afterStat, afterOpen readCheckpoint) ([]byte, *retainedFile, error) {
 	before, err := directory.root.Lstat(name)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() <= 0 || before.Size() > maximum ||
 		verifyPrivateFileInfo(before) != nil {
@@ -603,13 +661,13 @@ func readStableFile(directory *retainedDirectory, name string, maximum int64, ho
 			return nil, nil, errBundleFilesystem
 		}
 	}
-	file, err := directory.root.Open(name)
+	file, err := openPrivateBundleFile(directory.handle, name, false)
 	if err != nil {
 		return nil, nil, errBundleFilesystem
 	}
-	closed := false
+	retained := false
 	defer func() {
-		if !closed {
+		if !retained {
 			_ = file.Close()
 		}
 	}()
@@ -617,41 +675,65 @@ func readStableFile(directory *retainedDirectory, name string, maximum int64, ho
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) || opened.Size() != before.Size() || verifyPrivateFileHandle(file) != nil {
 		return nil, nil, errBundleFilesystem
 	}
+	identity, err := identityFromOpenFile(file)
+	if err != nil {
+		return nil, nil, errBundleFilesystem
+	}
+	result := &retainedFile{handle: file, identity: identity, size: opened.Size()}
+	if validateRetainedFile(result) != nil || validateEntryIdentity(directory, name, result) != nil {
+		return nil, nil, errBundleFilesystem
+	}
 	if afterOpen != "" {
 		if err := hooks.reach(afterOpen); err != nil {
 			return nil, nil, errBundleFilesystem
 		}
+	}
+	if validateRetainedFile(result) != nil || validateEntryIdentity(directory, name, result) != nil {
+		return nil, nil, errBundleFilesystem
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil || len(data) == 0 || int64(len(data)) != opened.Size() || int64(len(data)) > maximum {
 		return nil, nil, errBundleFilesystem
 	}
 	ending, err := file.Stat()
-	if err != nil || !os.SameFile(opened, ending) || ending.Size() != opened.Size() || verifyPrivateFileHandle(file) != nil {
+	if err != nil || !os.SameFile(opened, ending) || validateRetainedFile(result) != nil {
 		return nil, nil, errBundleFilesystem
 	}
-	if err := validateEntryIdentity(directory, name, before); err != nil {
+	if err := validateEntryIdentity(directory, name, result); err != nil {
 		return nil, nil, errBundleFilesystem
 	}
-	if err := file.Close(); err != nil {
-		return nil, nil, errBundleFilesystem
-	}
-	closed = true
-	if err := validateEntryIdentity(directory, name, before); err != nil {
-		return nil, nil, errBundleFilesystem
-	}
-	return data, before, nil
+	retained = true
+	return data, result, nil
 }
 
-func validateEntryIdentity(directory *retainedDirectory, name string, expected os.FileInfo) error {
-	current, err := directory.root.Lstat(name)
-	if err != nil || !current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(expected, current) || verifyPrivateFileInfo(current) != nil {
+func validateRetainedFile(file *retainedFile) error {
+	if file == nil || file.handle == nil || file.size < 0 {
+		return errBundleFilesystem
+	}
+	info, err := file.handle.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != file.size || verifyPrivateFileHandle(file.handle) != nil {
+		return errBundleFilesystem
+	}
+	identity, err := identityFromOpenFile(file.handle)
+	if err != nil || identity != file.identity {
 		return errBundleFilesystem
 	}
 	return nil
 }
 
-func validateExactEntryNames(directory *retainedDirectory, expected map[string]os.FileInfo) error {
+func validateEntryIdentity(directory *retainedDirectory, name string, expected *retainedFile) error {
+	if validateRetainedFile(expected) != nil {
+		return errBundleFilesystem
+	}
+	current, err := directory.root.Lstat(name)
+	opened, openedErr := expected.handle.Stat()
+	if err != nil || openedErr != nil || !current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) || verifyPrivateFileInfo(current) != nil {
+		return errBundleFilesystem
+	}
+	return nil
+}
+
+func validateExactEntryNames(directory *retainedDirectory, expected map[string]*retainedFile) error {
 	opened, err := directory.root.Open(".")
 	if err != nil {
 		return errBundleFilesystem
@@ -684,9 +766,9 @@ func validateExactEntryNames(directory *retainedDirectory, expected map[string]o
 	return nil
 }
 
-func validateExactEntries(directory *retainedDirectory, expected map[string]os.FileInfo) error {
+func validateExactEntries(directory *retainedDirectory, expected map[string]*retainedFile) error {
 	if expected == nil {
-		expected = map[string]os.FileInfo{}
+		expected = map[string]*retainedFile{}
 	}
 	if err := validateExactEntryNames(directory, expected); err != nil {
 		return errBundleFilesystem

@@ -27,10 +27,12 @@ const (
 
 	bundleOBJCaseInsensitive = 0x00000040
 	bundleOBJDontReparse     = 0x00001000
+	bundleFileOpen           = 0x00000001
 	bundleFileCreate         = 0x00000002
 	bundleFileDirectory      = 0x00000001
 	bundleFileWriteThrough   = 0x00000002
 	bundleFileSyncNonAlert   = 0x00000020
+	bundleFileNonDirectory   = 0x00000040
 	bundleFileBackupIntent   = 0x00004000
 	bundleFileOpenReparse    = 0x00200000
 	bundleFileGenericRead    = 0x00120089
@@ -38,12 +40,6 @@ const (
 	bundleWriteDAC           = 0x00040000
 	bundleWriteOwner         = 0x00080000
 	bundleOBJSuccess         = 0
-
-	bundleGenericRead              = 0x80000000
-	bundleGenericWrite             = 0x40000000
-	bundleFileFlagBackupSemantics  = 0x02000000
-	bundleFileFlagOpenReparsePoint = 0x00200000
-	bundleFileFlagWriteThrough     = 0x80000000
 )
 
 var (
@@ -125,29 +121,24 @@ func identityFromOpenFile(file *os.File) (fileIdentity, error) {
 	}, nil
 }
 
-func openRetainedDirectoryHandle(_ *os.Root, path string) (*os.File, error) {
-	pointer, err := syscall.UTF16PtrFromString(windowsBundlePath(path))
+func openRetainedDirectoryHandle(root *os.Root, _ string) (*os.File, error) {
+	if root == nil {
+		return nil, errBundleFilesystem
+	}
+	rootDot, err := root.Open(".")
 	if err != nil {
 		return nil, errBundleFilesystem
 	}
-	handle, err := syscall.CreateFile(
-		pointer,
-		bundleGenericRead|bundleGenericWrite,
-		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+	defer rootDot.Close()
+	return openRelativeWindowsFile(
+		rootDot,
+		"",
+		bundleFileGenericRead|bundleFileGenericWrite,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
+		bundleFileOpen,
+		bundleFileDirectory|bundleFileWriteThrough|bundleFileSyncNonAlert|bundleFileBackupIntent|bundleFileOpenReparse,
 		nil,
-		syscall.OPEN_EXISTING,
-		bundleFileFlagBackupSemantics|bundleFileFlagOpenReparsePoint|bundleFileFlagWriteThrough,
-		0,
 	)
-	if err != nil {
-		return nil, errBundleFilesystem
-	}
-	file := os.NewFile(uintptr(handle), path)
-	if file == nil {
-		_ = syscall.CloseHandle(handle)
-		return nil, errBundleFilesystem
-	}
-	return file, nil
 }
 
 func createPrivateChildDirectory(parent *os.File, name string) (*os.File, error) {
@@ -160,8 +151,43 @@ func createPrivateChildDirectory(parent *os.File, name string) (*os.File, error)
 		return nil, errBundleFilesystem
 	}
 	defer localFreeBundlePointer(descriptor)
+	file, err := openRelativeWindowsFile(
+		parent,
+		name,
+		bundleFileGenericRead|bundleFileGenericWrite|bundleWriteDAC|bundleWriteOwner,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
+		bundleFileCreate,
+		bundleFileDirectory|bundleFileWriteThrough|bundleFileSyncNonAlert|bundleFileBackupIntent|bundleFileOpenReparse,
+		descriptor,
+	)
+	if err != nil {
+		return nil, errBundleFilesystem
+	}
+	if verifyPrivateDirectoryHandle(file) != nil {
+		_ = file.Close()
+		return nil, errBundleFilesystem
+	}
+	return file, nil
+}
+
+func openPrivateBundleFile(parent *os.File, name string, create bool) (*os.File, error) {
+	access := uint32(bundleFileGenericRead)
+	disposition := uint32(bundleFileOpen)
+	options := uint32(bundleFileNonDirectory | bundleFileSyncNonAlert | bundleFileBackupIntent | bundleFileOpenReparse)
+	if create {
+		access = bundleFileGenericRead | bundleFileGenericWrite
+		disposition = bundleFileCreate
+		options |= bundleFileWriteThrough
+	}
+	return openRelativeWindowsFile(parent, name, access, syscall.FILE_SHARE_READ, disposition, options, nil)
+}
+
+func openRelativeWindowsFile(parent *os.File, name string, access, share, disposition, options uint32, descriptor unsafe.Pointer) (*os.File, error) {
+	if parent == nil {
+		return nil, errBundleFilesystem
+	}
 	nameBuffer, err := syscall.UTF16FromString(name)
-	if err != nil || len(nameBuffer) < 2 || len(nameBuffer)-1 > int(^uint16(0))/2 {
+	if err != nil || len(nameBuffer) < 1 || len(nameBuffer)-1 > int(^uint16(0))/2 {
 		return nil, errBundleFilesystem
 	}
 	unicodeName := bundleUnicodeString{
@@ -179,27 +205,26 @@ func createPrivateChildDirectory(parent *os.File, name string) (*os.File, error)
 	var handle syscall.Handle
 	status, _, _ := bundleNtCreateFile.Call(
 		uintptr(unsafe.Pointer(&handle)),
-		bundleFileGenericRead|bundleFileGenericWrite|bundleWriteDAC|bundleWriteOwner,
+		uintptr(access),
 		uintptr(unsafe.Pointer(&attributes)),
 		uintptr(unsafe.Pointer(&bundleIOStatusBlock{})),
 		0,
 		syscall.FILE_ATTRIBUTE_NORMAL,
-		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
-		bundleFileCreate,
-		bundleFileDirectory|bundleFileWriteThrough|bundleFileSyncNonAlert|bundleFileBackupIntent|bundleFileOpenReparse,
+		uintptr(share),
+		uintptr(disposition),
+		uintptr(options),
 		0,
 		0,
 	)
-	if int32(status) != bundleOBJSuccess || handle == syscall.InvalidHandle {
+	if int32(status) != bundleOBJSuccess || handle == syscall.InvalidHandle || handle == 0 {
+		if handle != syscall.InvalidHandle && handle != 0 {
+			_ = syscall.CloseHandle(handle)
+		}
 		return nil, errBundleFilesystem
 	}
 	file := os.NewFile(uintptr(handle), name)
 	if file == nil {
 		_ = syscall.CloseHandle(handle)
-		return nil, errBundleFilesystem
-	}
-	if verifyPrivateDirectoryHandle(file) != nil {
-		_ = file.Close()
 		return nil, errBundleFilesystem
 	}
 	return file, nil

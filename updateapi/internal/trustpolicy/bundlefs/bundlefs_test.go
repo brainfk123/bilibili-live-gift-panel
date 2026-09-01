@@ -1,3 +1,5 @@
+//go:build windows || linux
+
 package bundlefs
 
 import (
@@ -269,6 +271,48 @@ func TestReadCommittedBundleRejectsArtifactPrivacyChange(t *testing.T) {
 	if err == nil || len(committed.Policy) != 0 || len(committed.Audit) != 0 {
 		t.Fatal("reader exposed bytes from a bundle with non-private artifact permissions")
 	}
+}
+
+func TestReadCommittedBundleRejectsArtifactACLChangeAfterRead(t *testing.T) {
+	paths := newTestPaths(t)
+	policy, audit := testBundlePayload(t)
+	if err := WriteCommittedBundle(paths.policy, policy, paths.audit, audit); err != nil {
+		t.Fatal(err)
+	}
+	reached := false
+	committed, err := readCommittedBundle(paths.policy, paths.audit, readHooks{checkpoint: func(checkpoint readCheckpoint) error {
+		if checkpoint == readAfterPolicyRead {
+			reached = true
+			makeFileNonPrivate(t, paths.policy)
+		}
+		return nil
+	}})
+	if !reached {
+		t.Fatal("post-read ACL race window was not reached")
+	}
+	if err == nil || len(committed.Policy) != 0 || len(committed.Audit) != 0 {
+		t.Fatalf("post-read ACL broadening exposed trusted bytes: policy=%d audit=%d error=%v", len(committed.Policy), len(committed.Audit), err)
+	}
+}
+
+func TestWriteCommittedBundleRejectsArtifactACLChangeAfterSyncBeforeMarker(t *testing.T) {
+	paths := newTestPaths(t)
+	policy, audit := testBundlePayload(t)
+	reached := false
+	err := writeCommittedBundle(paths.policy, policy, paths.audit, audit, writeHooks{checkpoint: func(checkpoint writeCheckpoint) error {
+		if checkpoint == writeAfterPolicySynced {
+			reached = true
+			makeFileNonPrivate(t, paths.policy)
+		}
+		return nil
+	}})
+	if !reached {
+		t.Fatal("post-sync ACL race window was not reached")
+	}
+	if err == nil {
+		t.Fatal("writer accepted post-sync ACL broadening")
+	}
+	assertPathAbsent(t, filepath.Join(paths.bundle, trustpolicy.BundleCommitFileName))
 }
 
 func TestWriteCommittedBundleNeverCreatesMarkerWhenRequiredPreMarkerSyncFails(t *testing.T) {

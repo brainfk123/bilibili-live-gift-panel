@@ -53,6 +53,28 @@ func createPrivateChildDirectory(parent *os.File, name string) (*os.File, error)
 	return file, nil
 }
 
+func openPrivateBundleFile(parent *os.File, name string, create bool) (*os.File, error) {
+	if parent == nil || name == "" {
+		return nil, errBundleFilesystem
+	}
+	flags := syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	mode := uint32(0)
+	if create {
+		flags = syscall.O_WRONLY | syscall.O_CREAT | syscall.O_EXCL | syscall.O_SYNC | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+		mode = 0o600
+	}
+	fd, err := syscall.Openat(int(parent.Fd()), name, flags, mode)
+	if err != nil {
+		return nil, errBundleFilesystem
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = syscall.Close(fd)
+		return nil, errBundleFilesystem
+	}
+	return file, nil
+}
+
 func verifyParentDirectoryHandle(file *os.File) error {
 	info, stat, err := unixFileStat(file)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || stat.Uid != uint32(os.Geteuid()) {
