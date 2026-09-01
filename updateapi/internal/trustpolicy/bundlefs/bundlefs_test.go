@@ -234,6 +234,66 @@ func TestWriteCommittedBundleDurabilityOrder(t *testing.T) {
 	}
 }
 
+func TestWriteCommittedBundleFailsClosedOnArtifactCloseFailure(t *testing.T) {
+	wantOrder := []string{"policy", "audit", "marker"}
+	for _, failingArtifact := range wantOrder {
+		t.Run(failingArtifact, func(t *testing.T) {
+			paths := newTestPaths(t)
+			policy, audit := testBundlePayload(t)
+			var closeOrder []string
+			err := writeCommittedBundle(paths.policy, policy, paths.audit, audit, writeHooks{
+				closeFile: injectedCloseFailure(t, failingArtifact, &closeOrder),
+			})
+			if err == nil {
+				t.Fatalf("writer accepted %s close failure", failingArtifact)
+			}
+			if !reflect.DeepEqual(closeOrder, wantOrder) {
+				t.Fatalf("close order = %v, want %v", closeOrder, wantOrder)
+			}
+		})
+	}
+}
+
+func TestReadCommittedBundleReturnsZeroBytesOnArtifactCloseFailure(t *testing.T) {
+	wantOrder := []string{"policy", "audit", "marker"}
+	for _, failingArtifact := range wantOrder {
+		t.Run(failingArtifact, func(t *testing.T) {
+			paths := newTestPaths(t)
+			policy, audit := testBundlePayload(t)
+			if err := WriteCommittedBundle(paths.policy, policy, paths.audit, audit); err != nil {
+				t.Fatal(err)
+			}
+			var closeOrder []string
+			committed, err := readCommittedBundle(paths.policy, paths.audit, readHooks{
+				closeFile: injectedCloseFailure(t, failingArtifact, &closeOrder),
+			})
+			if err == nil {
+				t.Fatalf("reader accepted %s close failure", failingArtifact)
+			}
+			if !reflect.DeepEqual(committed, trustpolicy.CommittedBundle{}) {
+				t.Fatalf("reader exposed bytes after %s close failure: %#v", failingArtifact, committed)
+			}
+			if !reflect.DeepEqual(closeOrder, wantOrder) {
+				t.Fatalf("close order = %v, want %v", closeOrder, wantOrder)
+			}
+		})
+	}
+}
+
+func injectedCloseFailure(t *testing.T, failingArtifact string, order *[]string) func(string, *os.File) error {
+	t.Helper()
+	return func(artifact string, file *os.File) error {
+		*order = append(*order, artifact)
+		if err := file.Close(); err != nil {
+			t.Fatalf("close %s test handle: %v", artifact, err)
+		}
+		if artifact == failingArtifact {
+			return errors.New("injected close failure")
+		}
+		return nil
+	}
+}
+
 func TestWriteThenReadCommittedBundle(t *testing.T) {
 	paths := newTestPaths(t)
 	policy, audit := testBundlePayload(t)

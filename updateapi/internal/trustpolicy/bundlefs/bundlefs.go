@@ -64,6 +64,7 @@ const (
 type writeHooks struct {
 	checkpoint          func(writeCheckpoint) error
 	beforeDirectorySync func(directorySyncTarget) error
+	closeFile           func(string, *os.File) error
 }
 
 // WriteHooks is limited to deterministic crash/failure verification. A nil
@@ -107,6 +108,7 @@ const (
 
 type readHooks struct {
 	checkpoint func(readCheckpoint) error
+	closeFile  func(string, *os.File) error
 }
 
 func (hooks readHooks) reach(checkpoint readCheckpoint) error {
@@ -140,6 +142,11 @@ type retainedFile struct {
 	size     int64
 }
 
+type retainedArtifact struct {
+	role string
+	file *retainedFile
+}
+
 func (directory *retainedDirectory) close() {
 	if directory == nil {
 		return
@@ -152,10 +159,34 @@ func (directory *retainedDirectory) close() {
 	}
 }
 
-func (file *retainedFile) close() {
-	if file != nil && file.handle != nil {
-		_ = file.handle.Close()
+func (file *retainedFile) close() error {
+	if file == nil || file.handle == nil {
+		return nil
 	}
+	handle := file.handle
+	file.handle = nil
+	return handle.Close()
+}
+
+func closeBundleFiles(closeFile func(string, *os.File) error, files ...retainedArtifact) error {
+	var closeErrors []error
+	for _, retained := range files {
+		if retained.file == nil || retained.file.handle == nil {
+			continue
+		}
+		handle := retained.file.handle
+		retained.file.handle = nil
+		var err error
+		if closeFile != nil {
+			err = closeFile(retained.role, handle)
+		} else {
+			err = handle.Close()
+		}
+		if err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 // WriteCommittedBundle creates one dedicated bundle directory, writes and
@@ -281,6 +312,13 @@ func writeCommittedBundle(policyPath string, policy []byte, auditPath string, au
 	if validateWriterDirectories(parent, bundle) != nil || validateExactEntries(bundle, committedEntries) != nil {
 		return errBundleFilesystem
 	}
+	if err := closeBundleFiles(hooks.closeFile,
+		retainedArtifact{role: "policy", file: policyFile},
+		retainedArtifact{role: "audit", file: auditFile},
+		retainedArtifact{role: "marker", file: commitFile},
+	); err != nil {
+		return errBundleFilesystem
+	}
 	return nil
 }
 
@@ -372,6 +410,13 @@ func readCommittedBundle(policyPath, auditPath string, hooks readHooks) (trustpo
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
 	if validateReaderDirectories(parent, bundle) != nil || validateExactEntries(bundle, entries) != nil {
+		return trustpolicy.CommittedBundle{}, errBundleFilesystem
+	}
+	if err := closeBundleFiles(hooks.closeFile,
+		retainedArtifact{role: "policy", file: policyFile},
+		retainedArtifact{role: "audit", file: auditFile},
+		retainedArtifact{role: "marker", file: markerFile},
+	); err != nil {
 		return trustpolicy.CommittedBundle{}, errBundleFilesystem
 	}
 	return committed, nil
