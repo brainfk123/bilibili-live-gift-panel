@@ -30,6 +30,43 @@ jobs:
             throw 'This workflow can publish only the manually dispatched exact v0.4.11 bridge.'
           }
 
+      - name: Validate reviewed bridge tooling commit
+        shell: pwsh
+        env:
+          BRIDGE_TOOLING_COMMIT_SHA: ${{ vars.BRIDGE_TOOLING_COMMIT_SHA }}
+        run: |
+          if ($env:BRIDGE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Reviewed bridge tooling commit is invalid.' }
+
+      - name: Check out reviewed bridge tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ vars.BRIDGE_TOOLING_COMMIT_SHA }}
+          path: release-tools
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up reviewed bridge tooling Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: release-tools/goserver/go.mod
+          cache-dependency-path: release-tools/goserver/go.sum
+
+      - name: Build reviewed bridge security tools
+        shell: pwsh
+        run: |
+          go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
+          if ($LASTEXITCODE -ne 0) { throw 'Reviewed bridge artifact inspector build failed.' }
+          go -C release-tools/updateapi build -o "$env:RUNNER_TEMP/trustpolicy.exe" ./cmd/trustpolicy
+          if ($LASTEXITCODE -ne 0) { throw 'Reviewed trustpolicy verifier build failed.' }
+          Copy-Item -LiteralPath release-tools/scripts/sign-evsign.mjs -Destination "$env:RUNNER_TEMP/sign-evsign.mjs"
+          Copy-Item -LiteralPath release-tools/scripts/bridge-release-inputs.mjs -Destination "$env:RUNNER_TEMP/bridge-release-inputs.mjs"
+          Copy-Item -LiteralPath release-tools/scripts/bounded-github-asset.mjs -Destination "$env:RUNNER_TEMP/bounded-github-asset.mjs"
+          "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BRIDGE_READINESS_SCRIPT_PATH=$env:RUNNER_TEMP/bridge-release-inputs.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BOUNDED_GITHUB_ASSET_SCRIPT_PATH=$env:RUNNER_TEMP/bounded-github-asset.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRUSTPOLICY_INSPECTOR_PATH=$env:RUNNER_TEMP/trustpolicy.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Check out exact bridge tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -41,8 +78,10 @@ jobs:
         shell: pwsh
         env:
           BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
+          BRIDGE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}
         run: |
-          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          $tagObject = git rev-parse refs/tags/v0.4.11
           $tagCommit = git rev-parse refs/tags/v0.4.11^{commit}
           $headCommit = git rev-parse HEAD
           $remoteLines = @(git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{})
@@ -53,8 +92,11 @@ jobs:
             if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @('refs/tags/v0.4.11','refs/tags/v0.4.11^{}')) { throw 'reviewed bridge tag binding failed' }
             $remote[$parts[1]] = $parts[0]
           }
-          $remoteCommit = if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { $remote['refs/tags/v0.4.11^{}'] } else { $remote['refs/tags/v0.4.11'] }
-          if ($tagCommit -cne $headCommit -or $tagCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $remoteCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if (-not $remote.ContainsKey('refs/tags/v0.4.11') -or $remote['refs/tags/v0.4.11'] -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -or $tagObject -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) {
+            if ($remoteLines.Count -ne 2 -or $remote['refs/tags/v0.4.11^{}'] -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -ceq $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          } elseif ($remoteLines.Count -ne 1 -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if ($tagCommit -cne $headCommit -or $tagCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($packageVersion -cne '0.4.11') {
             throw 'The exact v0.4.11 tag does not contain package version 0.4.11.'
@@ -167,7 +209,16 @@ jobs:
           if ($release.tag_name -cne 'v0.4.12' -or $release.draft -or $release.prerelease -or -not $release.published_at -or [int64]$release.id -le 0) {
             throw 'Immutable v0.4.12 Release metadata is invalid.'
           }
-          [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at } |
+          $stableAssets = @($release.assets | Where-Object { $_.name -in @('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256') })
+          if ($stableAssets.Count -ne 2) { throw 'Immutable v0.4.12 security asset metadata is incomplete.' }
+          foreach ($asset in $stableAssets) {
+            if ([int64]$asset.size -le 0 -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.content_type -notin @('application/octet-stream','text/plain') -or [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') { throw 'Immutable v0.4.12 security asset metadata is invalid.' }
+          }
+          $checksumAsset = @($stableAssets | Where-Object { $_.name -ceq 'gift-panel-windows-x64.exe.sha256' })[0]
+          node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $checksumAsset.url --size $checksumAsset.size --sha256 ([string]$checksumAsset.digest).Substring(7) --content-type text/plain --max-bytes 16384 --output dist/bridge-readiness/stable-checksum.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Bounded v0.4.12 checksum download failed.' }
+          $selectedStableAssets = foreach ($asset in $stableAssets) { [ordered]@{ name=[string]$asset.name;size=[int64]$asset.size;digest=[string]$asset.digest;content_type=[string]$asset.content_type;url=[string]$asset.url } }
+          [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at; assets=@($selectedStableAssets) } |
             ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/stable-release.json
           [IO.File]::WriteAllBytes('dist/bridge-readiness/observation-evidence.json', [Convert]::FromBase64String($env:BRIDGE_OBSERVATION_EVIDENCE_B64))
 
@@ -186,15 +237,19 @@ jobs:
             $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$policyTag" -Headers $headers
           } catch { throw 'Immutable epoch-1 policy Release metadata is unavailable.' }
           $assets = @($release.assets)
-          if ($release.tag_name -cne $policyTag -or $release.draft -or $release.prerelease -or -not $release.published_at -or [int64]$release.id -le 0 -or $assets.Count -ne 2) {
+          if ($release.tag_name -cne $policyTag -or $release.draft -or $release.prerelease -or -not $release.published_at -or [int64]$release.id -le 0 -or $assets.Count -ne 3) {
             throw 'Immutable epoch-1 policy Release metadata is invalid.'
           }
-          foreach ($name in @('policy.json','audit.json')) {
+          foreach ($name in @('policy.json','audit.json','commit.json')) {
             if (@($assets | Where-Object { $_.name -ceq $name }).Count -ne 1) { throw 'Immutable epoch-1 policy asset closure is invalid.' }
           }
-          gh release download $policyTag --dir dist/bridge-readiness --pattern policy.json --pattern audit.json
-          if ($LASTEXITCODE -ne 0) { throw 'Immutable epoch-1 policy assets could not be downloaded.' }
-          $selectedAssets = foreach ($asset in $assets) { [ordered]@{ name = [string]$asset.name; size = [int64]$asset.size; digest = [string]$asset.digest } }
+          foreach ($asset in $assets) {
+            $cap = if ($asset.name -ceq 'policy.json') { 262144 } else { 65536 }
+            if ([int64]$asset.size -le 0 -or [int64]$asset.size -gt $cap -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.content_type -cne 'application/json' -or [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') { throw 'Immutable epoch-1 policy asset metadata is invalid.' }
+            node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $asset.url --size $asset.size --sha256 ([string]$asset.digest).Substring(7) --content-type application/json --max-bytes $cap --output "dist/bridge-readiness/$($asset.name)"
+            if ($LASTEXITCODE -ne 0) { throw 'Bounded epoch-1 policy asset download failed.' }
+          }
+          $selectedAssets = foreach ($asset in $assets) { [ordered]@{ name = [string]$asset.name; size = [int64]$asset.size; digest = [string]$asset.digest; content_type=[string]$asset.content_type; url=[string]$asset.url } }
           [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at; assets = @($selectedAssets) } |
             ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/policy-release.json
           [IO.File]::WriteAllBytes('dist/bridge-readiness/root-spki.der', [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
@@ -205,6 +260,8 @@ jobs:
           if ($downloadedHash -cne $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 -or -not [Linq.Enumerable]::SequenceEqual[byte]($downloadedPolicy, $bootstrapBytes)) {
             throw 'Bootstrap policy bytes do not match the immutable epoch-1 policy Release.'
           }
+          & $env:TRUSTPOLICY_INSPECTOR_PATH verify-bundle --policy dist/bridge-readiness/policy.json --audit dist/bridge-readiness/audit.json --reviewed-spki dist/bridge-readiness/root-spki.der --expected-spki-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --expected-previous-epoch 0 | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/verified-bundle.json
+          if ($LASTEXITCODE -ne 0) { throw 'Production publisher bundle verification failed.' }
           [IO.File]::WriteAllBytes('dist/bridge-readiness/trust-attestation.json', [Convert]::FromBase64String($env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64))
 
       - name: Verify reviewed bridge readiness
@@ -213,8 +270,11 @@ jobs:
           BRIDGE_OBSERVATION_EVIDENCE_SHA256: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_SHA256 }}
           BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 }}
         run: |
-          node scripts/bridge-release-inputs.mjs verify --stable-release dist/bridge-readiness/stable-release.json --observation-evidence dist/bridge-readiness/observation-evidence.json --observation-sha256 $env:BRIDGE_OBSERVATION_EVIDENCE_SHA256 --root-spki dist/bridge-readiness/root-spki.der --policy dist/bridge-readiness/policy.json --audit dist/bridge-readiness/audit.json --policy-release dist/bridge-readiness/policy-release.json --trust-attestation dist/bridge-readiness/trust-attestation.json --trust-attestation-sha256 $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness.json
+          node $env:BRIDGE_READINESS_SCRIPT_PATH verify --stable-release dist/bridge-readiness/stable-release.json --stable-checksum dist/bridge-readiness/stable-checksum.txt --observation-evidence dist/bridge-readiness/observation-evidence.json --observation-sha256 $env:BRIDGE_OBSERVATION_EVIDENCE_SHA256 --root-spki dist/bridge-readiness/root-spki.der --policy dist/bridge-readiness/policy.json --audit dist/bridge-readiness/audit.json --verified-bundle dist/bridge-readiness/verified-bundle.json --policy-release dist/bridge-readiness/policy-release.json --trust-attestation dist/bridge-readiness/trust-attestation.json --trust-attestation-sha256 $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness.json
           if ($LASTEXITCODE -ne 0) { throw 'Reviewed bridge readiness verification failed.' }
+          $readiness = Get-Content dist/bridge-readiness.json -Raw | ConvertFrom-Json
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-policy --root-spki dist/bridge-readiness/root-spki.der --policy dist/bridge-readiness/policy.json --epoch 1 --stable-artifact-sha256 $readiness.stableArtifactSha256 | Set-Content -NoNewline -Encoding utf8 dist/bridge-policy-authorization.json
+          if ($LASTEXITCODE -ne 0) { throw 'Production client policy authorization failed.' }
 
       - name: Install dependencies
         run: npm ci
@@ -245,7 +305,6 @@ jobs:
           if ($checkedManifest.version -cne '9.0' -or $checkedManifest.authenticode -ne $true -or [string]::IsNullOrWhiteSpace([string]$checkedManifest.signer_subject)) {
             throw 'Checked-in FFmpeg component manifest is incomplete.'
           }
-          $env:EVSIGN_EXPECTED_SUBJECT = [string]$checkedManifest.signer_subject
           $identity = node scripts/ffmpeg-component-assets.mjs identity | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $identity.schema -ne 2 -or $identity.fingerprint -cne $checkedManifest.component_fingerprint) {
             throw 'Fixed FFmpeg component identity does not match the checked-in reviewed manifest.'
@@ -279,7 +338,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg component attestation verification failed.' }
           }
           $componentManifest = Get-Content "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
-          $env:EVSIGN_EXPECTED_SUBJECT = [string]$componentManifest.signer_subject
           node scripts/ffmpeg-component-assets.mjs verify --input $componentDirectory
           if ($LASTEXITCODE -ne 0) { throw 'Fixed signed FFmpeg component verification failed.' }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$componentDirectory/manifest.json").Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
@@ -295,7 +353,7 @@ jobs:
           if ($componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Fixed FFmpeg version/hash/size/AuthentiCode verification failed before packaging.'
           }
-          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
           if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg structured Authenticode inspection failed before packaging.' }
           "BRIDGE_FFMPEG_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BRIDGE_FFMPEG_SIZE=$size" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -332,7 +390,7 @@ jobs:
               $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Fixed FFmpeg changed during bridge packaging.'
           }
-          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/bridge-ffmpeg-expanded/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
           if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg structured Authenticode inspection failed after packaging.' }
           Copy-Item -LiteralPath $ffmpegPath -Destination dist/ffmpeg-windows-x64.exe
           Copy-Item -LiteralPath goserver/ffmpeg/manifest.json -Destination dist/ffmpeg-component-manifest.json
@@ -343,7 +401,7 @@ jobs:
           EVSIGN_BRIDGE_CERTIFICATE: ${{ vars.EVSIGN_BRIDGE_CERTIFICATE }}
           EVSIGN_BRIDGE_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_BRIDGE_PUBLISHER_IDENTITY }}
         run: |
-          $profile = node scripts/sign-evsign.mjs --resolve-profile bridge | ConvertFrom-Json
+          $profile = node $env:EVSIGN_SCRIPT_PATH --resolve-profile bridge | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $profile.schema -ne 2 -or $profile.profile -cne 'bridge' -or $profile.certificateConfigured -ne $true) {
             throw 'The protected bridge signer profile is invalid.'
           }
@@ -357,7 +415,7 @@ jobs:
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_BRIDGE_PASSWORD }}
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
-          node scripts/sign-evsign.mjs --profile bridge dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
+          node $env:EVSIGN_SCRIPT_PATH --profile bridge dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
           if ($LASTEXITCODE -ne 0) { throw 'RushRush bridge outer signing failed.' }
 
       - name: Inspect final bound bridge artifact
@@ -371,7 +429,8 @@ jobs:
         run: |
           [IO.File]::WriteAllBytes('dist/bridge-root-spki.der', [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
           [IO.File]::WriteAllBytes('dist/bridge-bootstrap-policy.json', [Convert]::FromBase64String($env:BRIDGE_BOOTSTRAP_POLICY_B64))
-          go -C goserver run ./cmd/artifact-inspector verify-artifact --unsigned ../dist/gift-panel-windows-x64.unsigned.exe --signed ../dist/gift-panel-windows-x64.exe --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki ../dist/bridge-root-spki.der --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy ../dist/bridge-bootstrap-policy.json --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive ffmpeg/ffmpeg.zip --ffmpeg-manifest ffmpeg/manifest.json | Set-Content -NoNewline -Encoding utf8 ../dist/bridge-artifact-inspection.json
+          $readiness = Get-Content dist/bridge-readiness.json -Raw | ConvertFrom-Json
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.exe --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki dist/bridge-root-spki.der --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy dist/bridge-bootstrap-policy.json --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact-sha256 $readiness.stableArtifactSha256 --ffmpeg-archive goserver/ffmpeg/ffmpeg.zip --ffmpeg-manifest goserver/ffmpeg/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
           if ($LASTEXITCODE -ne 0) { throw 'Final bound bridge artifact inspection failed.' }
 
       - name: Prepare public bridge evidence
@@ -433,6 +492,7 @@ jobs:
             bootstrapPolicySha256 = [string]$inspection.policySha256
             stableReleaseId = [int64]$readiness.stableReleaseId
             stablePublishedAt = [string]$readiness.stablePublishedAt
+            stableArtifactSha256 = [string]$readiness.stableArtifactSha256
             observationEndedAt = [string]$readiness.observationEndedAt
             observationEvidenceSha256 = [string]$readiness.observationEvidenceSha256
             policyReleaseId = [int64]$readiness.policyReleaseId
@@ -505,8 +565,10 @@ jobs:
         shell: pwsh
         env:
           BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
+          BRIDGE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}
         run: |
-          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          $localObject = git rev-parse refs/tags/v0.4.11
           $localCommit = git rev-parse refs/tags/v0.4.11^{commit}
           $remoteLines = @(git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{})
           if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed bridge tag binding failed' }
@@ -516,8 +578,10 @@ jobs:
             if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @('refs/tags/v0.4.11','refs/tags/v0.4.11^{}')) { throw 'reviewed bridge tag binding failed' }
             $remote[$parts[1]] = $parts[0]
           }
-          $remoteCommit = if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { $remote['refs/tags/v0.4.11^{}'] } else { $remote['refs/tags/v0.4.11'] }
-          if ($localCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $remoteCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if (-not $remote.ContainsKey('refs/tags/v0.4.11') -or $remote['refs/tags/v0.4.11'] -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -or $localObject -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { if ($remoteLines.Count -ne 2 -or $remote['refs/tags/v0.4.11^{}'] -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -ceq $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' } }
+          elseif ($remoteLines.Count -ne 1 -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if ($localCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
 
       - name: Create immutable-shaped bridge draft
         shell: pwsh
@@ -564,8 +628,10 @@ jobs:
         shell: pwsh
         env:
           BRIDGE_REVIEWED_COMMIT_SHA: ${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}
+          BRIDGE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}
         run: |
-          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          if ($env:BRIDGE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'reviewed bridge tag binding failed' }
+          $localObject = git rev-parse refs/tags/v0.4.11
           $localCommit = git rev-parse refs/tags/v0.4.11^{commit}
           $remoteLines = @(git ls-remote origin refs/tags/v0.4.11 refs/tags/v0.4.11^{})
           if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed bridge tag binding failed' }
@@ -575,8 +641,10 @@ jobs:
             if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @('refs/tags/v0.4.11','refs/tags/v0.4.11^{}')) { throw 'reviewed bridge tag binding failed' }
             $remote[$parts[1]] = $parts[0]
           }
-          $remoteCommit = if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { $remote['refs/tags/v0.4.11^{}'] } else { $remote['refs/tags/v0.4.11'] }
-          if ($localCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $remoteCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if (-not $remote.ContainsKey('refs/tags/v0.4.11') -or $remote['refs/tags/v0.4.11'] -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -or $localObject -cne $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if ($remote.ContainsKey('refs/tags/v0.4.11^{}')) { if ($remoteLines.Count -ne 2 -or $remote['refs/tags/v0.4.11^{}'] -cne $env:BRIDGE_REVIEWED_COMMIT_SHA -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -ceq $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' } }
+          elseif ($remoteLines.Count -ne 1 -or $env:BRIDGE_REVIEWED_TAG_OBJECT_SHA -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
+          if ($localCommit -cne $env:BRIDGE_REVIEWED_COMMIT_SHA) { throw 'reviewed bridge tag binding failed' }
 
       - name: Publish bridge as non-latest
         shell: pwsh

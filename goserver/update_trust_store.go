@@ -81,7 +81,7 @@ func authorizeCurrentUpdateTrustPolicyAt(policy verifiedUpdateTrustPolicy, input
 	inputHash := strings.ToLower(strings.TrimSpace(input.SHA256))
 	certificate := normalizeUpdateCertificateIdentity(input.Certificate)
 	for _, rule := range policy.Rules {
-		if input.Channel != rule.AllowedChannel || !rule.allowsTag(input.Tag) ||
+		if input.Channel != rule.AllowedChannel || !publisherRuleAllowsTag(rule, input.Tag) ||
 			certificate.Country != rule.Country || certificate.Organization != rule.Organization || certificate.OrganizationID != rule.OrganizationID {
 			continue
 		}

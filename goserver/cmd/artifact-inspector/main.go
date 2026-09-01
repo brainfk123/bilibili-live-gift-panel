@@ -35,9 +35,65 @@ func run(args []string, output io.Writer) error {
 		return runPEDigest(args[1:], output)
 	case "verify-artifact":
 		return runVerifyArtifact(args[1:], output)
+	case "verify-static":
+		return runVerifyStatic(args[1:], output)
+	case "verify-policy":
+		return runVerifyPolicy(args[1:], output)
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func runVerifyPolicy(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("verify-policy", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	rootPath := flags.String("root-spki", "", "root")
+	policyPath := flags.String("policy", "", "policy")
+	epochValue := flags.String("epoch", "", "epoch")
+	stableSHA := flags.String("stable-artifact-sha256", "", "stable sha")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return errors.New("policy arguments invalid")
+	}
+	epoch, err := strconv.ParseUint(*epochValue, 10, 64)
+	if err != nil {
+		return err
+	}
+	root, err := os.ReadFile(*rootPath)
+	if err != nil {
+		return err
+	}
+	policy, err := os.ReadFile(*policyPath)
+	if err != nil {
+		return err
+	}
+	verified, err := artifactinspect.VerifyStablePolicy(root, policy, epoch, *stableSHA, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{"epoch": verified, "stableArtifactSha256": *stableSHA})
+}
+
+func runVerifyStatic(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("verify-static", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var options artifactinspect.VerifyStaticOptions
+	flags.StringVar(&options.UnsignedPath, "unsigned", "", "unsigned PE")
+	flags.StringVar(&options.SignedPath, "signed", "", "signed PE")
+	flags.StringVar(&options.Version, "version", "", "version")
+	flags.StringVar(&options.Commit, "commit", "", "commit")
+	flags.StringVar(&options.ExpectedIdentity.Country, "country", "", "country")
+	flags.StringVar(&options.ExpectedIdentity.Organization, "organization", "", "organization")
+	flags.StringVar(&options.ExpectedIdentity.OrganizationID, "organization-id", "", "organization ID")
+	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "FFmpeg archive")
+	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "FFmpeg manifest")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return errors.New("static artifact arguments are invalid")
+	}
+	evidence, err := artifactinspect.VerifyStaticArtifact(options)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(evidence)
 }
 
 func identityFlags(name string, args []string) (*flag.FlagSet, *string, *certidentity.Identity, error) {
@@ -121,6 +177,7 @@ func runVerifyArtifact(args []string, output io.Writer) error {
 	flags.StringVar(&options.ExpectedRootSHA256, "root-sha256", "", "root digest")
 	flags.StringVar(&options.PolicyPath, "policy", "", "policy")
 	flags.StringVar(&options.ExpectedPolicySHA256, "policy-sha256", "", "policy digest")
+	flags.StringVar(&options.StableArtifactSHA256, "stable-artifact-sha256", "", "exact stable convergence artifact digest")
 	policyEpoch := flags.String("policy-epoch", "", "policy epoch")
 	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "FFmpeg archive")
 	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "FFmpeg manifest")

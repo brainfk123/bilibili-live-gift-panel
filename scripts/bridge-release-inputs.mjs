@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -22,7 +22,7 @@ export function verifyBridgeReadiness(options) {
   const attestationHash = hash(options.trustAttestationBytes);
   if (!SHA256.test(options.expectedObservationSHA256) || observationHash !== options.expectedObservationSHA256 ||
       !SHA256.test(options.expectedTrustAttestationSHA256) || attestationHash !== options.expectedTrustAttestationSHA256) fail();
-  const stableRelease = parseExactJSON(options.stableReleaseBytes, ['id', 'tag_name', 'draft', 'prerelease', 'published_at']);
+  const stableRelease = parseExactJSON(options.stableReleaseBytes, ['id', 'tag_name', 'draft', 'prerelease', 'published_at', 'assets']);
   const observation = parseExactJSON(options.observationEvidenceBytes, ['schemaVersion', 'stableRelease', 'observation', 'reviewedAt']);
   const attestation = parseExactJSON(options.trustAttestationBytes, ['schemaVersion', 'rootSpkiSha256', 'policy', 'kms', 'policyRelease', 'reviewedAt']);
   const policyRelease = parseExactJSON(options.policyReleaseBytes, ['id', 'tag_name', 'draft', 'prerelease', 'published_at', 'assets']);
@@ -31,20 +31,28 @@ export function verifyBridgeReadiness(options) {
 
   if (!Number.isSafeInteger(stableRelease.id) || stableRelease.id <= 0 || stableRelease.tag_name !== 'v0.4.12' || stableRelease.draft !== false || stableRelease.prerelease !== false) fail();
   const publishedAt = exactTime(stableRelease.published_at);
-  exactObject(observation.stableRelease, ['id', 'tag', 'publishedAt']);
+  exactObject(observation.stableRelease, ['id', 'tag', 'publishedAt', 'executableSha256']);
   exactObject(observation.observation, ['endedAt', 'result']);
   const observationEnd = exactTime(observation.observation.endedAt);
   const observationReview = exactTime(observation.reviewedAt);
-  if (observation.schemaVersion !== 1 || observation.stableRelease.id !== stableRelease.id || observation.stableRelease.tag !== stableRelease.tag_name ||
+  if (!Array.isArray(stableRelease.assets) || stableRelease.assets.length !== 2) fail();
+  const stableAssets = new Map();
+  for (const asset of stableRelease.assets) { exactObject(asset,['name','size','digest','content_type','url']); if(stableAssets.has(asset.name))fail();stableAssets.set(asset.name,asset); }
+  const stableExecutable=stableAssets.get('gift-panel-windows-x64.exe'), stableChecksum=stableAssets.get('gift-panel-windows-x64.exe.sha256');
+  if(!stableExecutable||!stableChecksum||!/^sha256:[0-9a-f]{64}$/.test(stableExecutable.digest)||stableExecutable.content_type!=='application/octet-stream'||stableChecksum.content_type!=='text/plain'||stableChecksum.size!==options.stableChecksumBytes.length||stableChecksum.digest!==`sha256:${hash(options.stableChecksumBytes)}`)fail();
+  const stableArtifactSHA256=stableExecutable.digest.slice(7);
+  if(options.stableChecksumBytes.toString('ascii')!==`${stableArtifactSHA256}  gift-panel-windows-x64.exe`)fail();
+  if (observation.schemaVersion !== 1 || observation.stableRelease.id !== stableRelease.id || observation.stableRelease.tag !== stableRelease.tag_name || observation.stableRelease.executableSha256!==stableArtifactSHA256 ||
       observation.stableRelease.publishedAt !== stableRelease.published_at || observation.observation.result !== 'passed' ||
       observationEnd < publishedAt + SEVEN_DAYS || observationReview < observationEnd || now < publishedAt + SEVEN_DAYS || now < observationReview) fail();
 
   exactObject(attestation.policy, ['epoch', 'sha256']);
   exactObject(attestation.kms, ['keyId', 'auditSha256', 'requestId']);
-  exactObject(attestation.policyRelease, ['id', 'tag', 'publishedAt', 'policyAsset', 'auditAsset']);
+  exactObject(attestation.policyRelease, ['id', 'tag', 'publishedAt', 'policyAsset', 'auditAsset', 'commitAsset']);
   if (attestation.schemaVersion !== 1 || attestation.rootSpkiSha256 !== rootHash || attestation.policy.epoch !== 1 || attestation.policy.sha256 !== policyHash ||
-      !/^[A-Za-z0-9_-]{1,128}$/.test(attestation.kms.keyId) || attestation.kms.auditSha256 !== hash(options.auditBytes) ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(attestation.kms.keyId) || !/^[A-Za-z0-9_.:@/-]{1,256}$/.test(attestation.kms.requestId) || attestation.kms.auditSha256 !== hash(options.auditBytes) ||
       attestation.kms.requestId !== audit.requestId || audit.keyId !== attestation.kms.keyId || audit.epoch !== 1 || audit.policySha256 !== policyHash) fail();
+  if(!/^[A-Za-z0-9_.:@/-]{1,256}$/.test(audit.requestId)||!/^[A-Za-z0-9_.\[\]-]{1,100}$/.test(audit.ciActor))fail();
   const trustReviewedAt = exactTime(attestation.reviewedAt);
   const auditTime = exactTime(audit.utc);
 
@@ -52,12 +60,12 @@ export function verifyBridgeReadiness(options) {
   const policyPublishedAt = exactTime(policyRelease.published_at);
   if (trustReviewedAt < policyPublishedAt || trustReviewedAt < auditTime || now < trustReviewedAt) fail();
   if (attestation.policyRelease.id !== policyRelease.id || attestation.policyRelease.tag !== policyRelease.tag_name ||
-      attestation.policyRelease.publishedAt !== policyRelease.published_at || attestation.policyRelease.policyAsset !== 'policy.json' || attestation.policyRelease.auditAsset !== 'audit.json') fail();
+      attestation.policyRelease.publishedAt !== policyRelease.published_at || attestation.policyRelease.policyAsset !== 'policy.json' || attestation.policyRelease.auditAsset !== 'audit.json' || attestation.policyRelease.commitAsset!=='commit.json') fail();
   const releaseAssets = new Map();
-  if (!Array.isArray(policyRelease.assets) || policyRelease.assets.length !== 2) fail();
+  if (!Array.isArray(policyRelease.assets) || policyRelease.assets.length !== 3) fail();
   for (const asset of policyRelease.assets) {
-    exactObject(asset, ['name', 'size', 'digest']);
-    if (!['policy.json', 'audit.json'].includes(asset.name) || releaseAssets.has(asset.name) || !Number.isSafeInteger(asset.size) || asset.size <= 0 || !/^sha256:[0-9a-f]{64}$/.test(asset.digest)) fail();
+    exactObject(asset, ['name', 'size', 'digest','content_type','url']);
+    if (!['policy.json', 'audit.json','commit.json'].includes(asset.name) || releaseAssets.has(asset.name) || !Number.isSafeInteger(asset.size) || asset.size <= 0 || !/^sha256:[0-9a-f]{64}$/.test(asset.digest)||asset.content_type!=='application/json') fail();
     releaseAssets.set(asset.name, asset);
   }
   const policyAsset = releaseAssets.get('policy.json');
@@ -65,11 +73,13 @@ export function verifyBridgeReadiness(options) {
   if (policyAsset.size !== options.policyBytes.length || policyAsset.digest !== `sha256:${policyHash}` ||
       auditAsset.size !== options.auditBytes.length || auditAsset.digest !== `sha256:${hash(options.auditBytes)}`) fail();
 
-  verifyPolicy(options.policyBytes, options.rootSPKI);
+  verifyMachineBundle(options.verifiedBundleBytes, options.policyBytes, options.auditBytes, rootHash, releaseAssets.get('commit.json'));
+
   return {
     schemaVersion: 1,
     stableReleaseId: stableRelease.id,
     stablePublishedAt: stableRelease.published_at,
+    stableArtifactSha256: stableArtifactSHA256,
     observationEndedAt: observation.observation.endedAt,
     observationEvidenceSha256: observationHash,
     policyReleaseId: policyRelease.id,
@@ -82,36 +92,15 @@ export function verifyBridgeReadiness(options) {
   };
 }
 
-function verifyPolicy(policyBytes, rootSPKI) {
-  const document = parseExactJSON(policyBytes, ['signed', 'signatures']);
-  exactObject(document.signed, ['epoch', 'expiresAt', 'publishers']);
-  if (document.signed.epoch !== 1 || !Array.isArray(document.signed.publishers) || !Array.isArray(document.signatures) || document.signatures.length !== 1) fail();
-  const signature = document.signatures[0];
-  exactObject(signature, ['algorithm', 'signature']);
-  if (signature.algorithm !== 'ecdsa-p256-sha256') fail();
-  const stable = document.signed.publishers.filter((publisher) => {
-    exactPublisher(publisher);
-    return publisher.role === 'primary' && publisher.country === 'CN' && publisher.organization === 'NaisNet Technology Co., Ltd.' &&
-      publisher.organizationId === '91210103MA7CJ3C094' && publisher.allowedChannel === 'stable' &&
-      Array.isArray(publisher.allowedTags) && publisher.allowedTags.filter((tag) => tag === 'v0.4.12').length === 1;
-  });
-  if (stable.length !== 1) fail();
-  let key;
-  try { key = createPublicKey({ key: rootSPKI, format: 'der', type: 'spki' }); } catch { fail(); }
-  const jwk = key.export({ format: 'jwk' });
-  if (key.asymmetricKeyType !== 'ec' || jwk.crv !== 'P-256') fail();
-  let signatureBytes;
-  try { signatureBytes = Buffer.from(signature.signature, 'base64'); } catch { fail(); }
-  if (signatureBytes.length === 0 || signatureBytes.toString('base64') !== signature.signature || !verify('sha256', Buffer.from(JSON.stringify(document.signed)), key, signatureBytes)) fail();
+function verifyMachineBundle(bytes, policyBytes, auditBytes, rootHash, commitAsset) {
+  const bundle=parseExactJSON(bytes,['schemaVersion','verification','commit','policy','audit']);
+  exactObject(bundle.verification,['epoch','expectedPreviousEpoch','spkiSha256']);exactObject(bundle.commit,['schemaVersion','policy','audit']);
+  for(const name of ['policy','audit']){exactObject(bundle.commit[name],['name','length','sha256']);exactObject(bundle[name],['name','length','sha256','bytesBase64']);}
+  if(bundle.schemaVersion!==2||bundle.verification.epoch!==1||bundle.verification.expectedPreviousEpoch!==0||bundle.verification.spkiSha256!==rootHash||bundle.commit.schemaVersion!==1)fail();
+  for(const [name,actual] of [['policy',policyBytes],['audit',auditBytes]]){const artifact=bundle[name],committed=bundle.commit[name];if(artifact.name!==`${name}.json`||artifact.length!==actual.length||artifact.sha256!==hash(actual)||artifact.bytesBase64!==actual.toString('base64')||JSON.stringify(committed)!==JSON.stringify({name:`${name}.json`,length:actual.length,sha256:hash(actual)}))fail();}
+  const commitBytes=Buffer.from(JSON.stringify(bundle.commit));if(commitAsset.size!==commitBytes.length||commitAsset.digest!==`sha256:${hash(commitBytes)}`)fail();
 }
 
-function exactPublisher(publisher) {
-  const required = ['id', 'role', 'country', 'organization', 'organizationId', 'allowedChannel', 'allowedTags'];
-  const keys = Object.keys(publisher ?? {});
-  if (!publisher || typeof publisher !== 'object' || Array.isArray(publisher) || required.some((key) => !Object.hasOwn(publisher, key)) ||
-      keys.some((key) => !required.includes(key) && key !== 'manifestSha256') || keys.length < required.length || keys.length > required.length + 1 ||
-      (Object.hasOwn(publisher, 'manifestSha256') && !SHA256.test(publisher.manifestSha256))) fail();
-}
 
 function parseExactJSON(bytes, keys) {
   let value;
@@ -143,11 +132,13 @@ async function main() {
   const summary = verifyBridgeReadiness({
     now: new Date(),
     stableReleaseBytes: await readFile(argument('--stable-release')),
+    stableChecksumBytes: await readFile(argument('--stable-checksum')),
     observationEvidenceBytes: await readFile(argument('--observation-evidence')),
     expectedObservationSHA256: argument('--observation-sha256'),
     rootSPKI: await readFile(argument('--root-spki')),
     policyBytes: await readFile(argument('--policy')),
     auditBytes: await readFile(argument('--audit')),
+    verifiedBundleBytes: await readFile(argument('--verified-bundle')),
     policyReleaseBytes: await readFile(argument('--policy-release')),
     trustAttestationBytes: await readFile(argument('--trust-attestation')),
     expectedTrustAttestationSHA256: argument('--trust-attestation-sha256'),

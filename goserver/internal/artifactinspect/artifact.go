@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/certidentity"
+	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
 var (
@@ -31,6 +31,7 @@ type VerifyArtifactOptions struct {
 	RootSPKIPath, ExpectedRootSHA256      string
 	PolicyPath, ExpectedPolicySHA256      string
 	ExpectedPolicyEpoch                   uint64
+	StableArtifactSHA256                  string
 	FFmpegArchivePath, FFmpegManifestPath string
 	Now                                   time.Time
 	InspectAuthenticode                   func(string) (certidentity.Identity, error)
@@ -51,6 +52,85 @@ type ArtifactEvidence struct {
 	FFmpegIdentity  certidentity.Identity `json:"ffmpegIdentity"`
 }
 
+type VerifyStaticOptions struct {
+	UnsignedPath, SignedPath              string
+	Version, Commit                       string
+	ExpectedIdentity                      certidentity.Identity
+	FFmpegArchivePath, FFmpegManifestPath string
+	InspectAuthenticode                   func(string) (certidentity.Identity, error)
+}
+
+func VerifyStaticArtifact(options VerifyStaticOptions) (ArtifactEvidence, error) {
+	unsigned, err := os.ReadFile(options.UnsignedPath)
+	if err != nil {
+		return ArtifactEvidence{}, errors.New("unsigned PE is unavailable")
+	}
+	signed, err := os.ReadFile(options.SignedPath)
+	if err != nil {
+		return ArtifactEvidence{}, errors.New("signed PE is unavailable")
+	}
+	unsignedDigest, err := AuthenticodeContentSHA256(unsigned)
+	if err != nil {
+		return ArtifactEvidence{}, err
+	}
+	signedDigest, err := AuthenticodeContentSHA256(signed)
+	if err != nil || signedDigest != unsignedDigest {
+		return ArtifactEvidence{}, errors.New("signed artifact does not match unsigned PE content")
+	}
+	versionOK, _ := CoveredContains(signed, []byte(options.Version))
+	commitOK, _ := CoveredContains(signed, []byte(options.Commit))
+	if !versionOK || !commitOK {
+		return ArtifactEvidence{}, errors.New("static artifact version binding is invalid")
+	}
+	archive, err := os.ReadFile(options.FFmpegArchivePath)
+	if err != nil {
+		return ArtifactEvidence{}, err
+	}
+	manifestBytes, err := os.ReadFile(options.FFmpegManifestPath)
+	if err != nil {
+		return ArtifactEvidence{}, err
+	}
+	archiveOK, _ := CoveredContains(signed, archive)
+	manifestOK, _ := CoveredContains(signed, manifestBytes)
+	if !archiveOK || !manifestOK {
+		return ArtifactEvidence{}, errors.New("static artifact embedded FFmpeg binding is invalid")
+	}
+	var manifest struct {
+		Version, SHA256 string
+		Size            int64
+		Authenticode    bool
+	}
+	if json.Unmarshal(manifestBytes, &manifest) != nil || manifest.Version != "9.0" || !manifest.Authenticode {
+		return ArtifactEvidence{}, errors.New("static FFmpeg manifest is invalid")
+	}
+	ffmpeg, err := extractSingleFFmpeg(archive, manifest.Size)
+	if err != nil || sha256HexBytes(ffmpeg) != manifest.SHA256 {
+		return ArtifactEvidence{}, errors.New("static FFmpeg bytes are invalid")
+	}
+	inspect := options.InspectAuthenticode
+	if inspect == nil {
+		inspect = InspectAuthenticodeFile
+	}
+	outer, err := inspect(options.SignedPath)
+	if err != nil || outer != options.ExpectedIdentity {
+		return ArtifactEvidence{}, errors.New("static outer identity is invalid")
+	}
+	root, err := os.MkdirTemp("", "gift-panel-static-inspector-")
+	if err != nil {
+		return ArtifactEvidence{}, err
+	}
+	defer os.RemoveAll(root)
+	ffmpegPath := filepath.Join(root, "ffmpeg.exe")
+	if os.WriteFile(ffmpegPath, ffmpeg, 0o600) != nil {
+		return ArtifactEvidence{}, errors.New("static FFmpeg inspection failed")
+	}
+	inner, err := inspect(ffmpegPath)
+	if err != nil || inner != naisNetIdentity {
+		return ArtifactEvidence{}, errors.New("static FFmpeg identity is invalid")
+	}
+	return ArtifactEvidence{Version: options.Version, Commit: options.Commit, PEContentSHA256: signedDigest, OuterIdentity: outer, FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: inner}, nil
+}
+
 func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error) {
 	unsigned, err := os.ReadFile(options.UnsignedPath)
 	if err != nil {
@@ -68,8 +148,9 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if err != nil || signedDigest != unsignedDigest {
 		return ArtifactEvidence{}, errors.New("signed artifact does not match unsigned PE content")
 	}
-	if options.Tag != "v"+options.Version || options.Version == "" || !isLowerHex(options.Commit, 40) ||
-		!bytes.Contains(signed, []byte(options.Version)) || !bytes.Contains(signed, []byte(options.Commit)) {
+	versionCovered, versionErr := CoveredContains(signed, []byte(options.Version))
+	commitCovered, commitErr := CoveredContains(signed, []byte(options.Commit))
+	if options.Tag != "v"+options.Version || options.Version == "" || !isLowerHex(options.Commit, 40) || versionErr != nil || commitErr != nil || !versionCovered || !commitCovered {
 		return ArtifactEvidence{}, errors.New("signed artifact version, tag, or commit binding is invalid")
 	}
 
@@ -81,10 +162,12 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if err != nil || sha256HexBytes(policy) != options.ExpectedPolicySHA256 {
 		return ArtifactEvidence{}, errors.New("reviewed trust policy is invalid")
 	}
-	if !bytes.Contains(signed, []byte(base64.StdEncoding.EncodeToString(rootDER))) || !bytes.Contains(signed, []byte(base64.StdEncoding.EncodeToString(policy))) {
+	rootCovered, rootCoveredErr := CoveredContains(signed, []byte(base64.StdEncoding.EncodeToString(rootDER)))
+	policyCovered, policyCoveredErr := CoveredContains(signed, []byte(base64.StdEncoding.EncodeToString(policy)))
+	if rootCoveredErr != nil || policyCoveredErr != nil || !rootCovered || !policyCovered {
 		return ArtifactEvidence{}, errors.New("signed artifact embedded trust bytes do not match reviewed inputs")
 	}
-	policyEpoch, err := verifyStablePolicy(rootDER, policy, options.ExpectedPolicyEpoch, options.Now)
+	policyEpoch, err := VerifyStablePolicy(rootDER, policy, options.ExpectedPolicyEpoch, options.StableArtifactSHA256, options.Now)
 	if err != nil {
 		return ArtifactEvidence{}, err
 	}
@@ -97,7 +180,9 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("reviewed FFmpeg manifest is unavailable")
 	}
-	if !bytes.Contains(signed, archive) || !bytes.Contains(signed, manifestBytes) {
+	archiveCovered, archiveCoveredErr := CoveredContains(signed, archive)
+	manifestCovered, manifestCoveredErr := CoveredContains(signed, manifestBytes)
+	if archiveCoveredErr != nil || manifestCoveredErr != nil || !archiveCovered || !manifestCovered {
 		return ArtifactEvidence{}, errors.New("signed artifact embedded FFmpeg does not match reviewed inputs")
 	}
 	var manifest struct {
@@ -167,65 +252,20 @@ func extractSingleFFmpeg(archive []byte, expectedSize int64) ([]byte, error) {
 	return contents, nil
 }
 
-type signedPolicyDocument struct {
-	Signed     json.RawMessage                         `json:"signed"`
-	Signatures []struct{ Algorithm, Signature string } `json:"signatures"`
-}
-type signedPolicy struct {
-	Epoch      uint64 `json:"epoch"`
-	ExpiresAt  string `json:"expiresAt"`
-	Publishers []struct {
-		Role, Country, Organization, OrganizationID, AllowedChannel string
-		AllowedTags                                                 []string `json:"allowedTags"`
-	} `json:"publishers"`
-}
-
-func verifyStablePolicy(rootDER, policyBytes []byte, expectedEpoch uint64, now time.Time) (uint64, error) {
+func VerifyStablePolicy(rootDER, policyBytes []byte, expectedEpoch uint64, stableSHA256 string, now time.Time) (uint64, error) {
 	parsedRoot, err := x509.ParsePKIXPublicKey(rootDER)
 	root, ok := parsedRoot.(*ecdsa.PublicKey)
-	if err != nil || !ok || root.Curve != elliptic.P256() {
+	if err != nil || !ok {
 		return 0, errors.New("reviewed trust root is not P-256")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(policyBytes))
-	decoder.DisallowUnknownFields()
-	var document signedPolicyDocument
-	if err := decoder.Decode(&document); err != nil || len(document.Signed) == 0 || len(document.Signatures) != 1 || document.Signatures[0].Algorithm != "ecdsa-p256-sha256" {
-		return 0, errors.New("reviewed trust policy envelope is invalid")
-	}
-	var signed signedPolicy
-	if err := json.Unmarshal(document.Signed, &signed); err != nil || signed.Epoch != expectedEpoch {
+	verified, err := updatepolicy.ParseAndVerify(policyBytes, root, now)
+	if err != nil || verified.Epoch != expectedEpoch {
 		return 0, errors.New("reviewed trust policy epoch is invalid")
 	}
-	expiresAt, err := time.Parse(time.RFC3339, signed.ExpiresAt)
-	if err != nil || !expiresAt.After(now.UTC()) {
-		return 0, errors.New("reviewed trust policy is expired")
+	if err := verified.AuthorizeExactManifest(updatepolicy.ArtifactIdentity{Tag: "v0.4.12", Channel: updatepolicy.ChannelStable, SHA256: stableSHA256, Certificate: naisNetIdentity}); err != nil {
+		return 0, errors.New("reviewed trust policy manifest authorization is invalid")
 	}
-	signature, err := base64.StdEncoding.Strict().DecodeString(document.Signatures[0].Signature)
-	digest := sha256.Sum256(document.Signed)
-	if err != nil || !ecdsa.VerifyASN1(root, digest[:], signature) {
-		return 0, errors.New("reviewed trust policy signature is invalid")
-	}
-	stable := 0
-	for _, publisher := range signed.Publishers {
-		if publisher.Role == "primary" && publisher.Country == naisNetIdentity.Country && publisher.Organization == naisNetIdentity.Organization &&
-			publisher.OrganizationID == naisNetIdentity.OrganizationID && publisher.AllowedChannel == "stable" && containsExact(publisher.AllowedTags, "v0.4.12") {
-			stable++
-		}
-	}
-	if stable != 1 {
-		return 0, errors.New("reviewed trust policy does not authorize exact NaisNet stable v0.4.12")
-	}
-	return signed.Epoch, nil
-}
-
-func containsExact(values []string, want string) bool {
-	count := 0
-	for _, value := range values {
-		if value == want {
-			count++
-		}
-	}
-	return count == 1
+	return verified.Epoch, nil
 }
 func sha256HexBytes(contents []byte) string {
 	digest := sha256.Sum256(contents)

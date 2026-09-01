@@ -3,9 +3,14 @@ package artifactinspect
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +19,7 @@ import (
 	"time"
 
 	"bilibili-live-gift-panel/internal/certidentity"
+	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
 func TestVerifyBoundArtifactAcceptsOnlyTheBuiltSignedEnrollmentClosure(t *testing.T) {
@@ -85,22 +91,41 @@ func TestVerifyBoundArtifactRejectsReplacedEmbeddedFFmpegAndTrustBytes(t *testin
 	}
 }
 
+func TestVerifyBoundArtifactRejectsUnscopedStableConvergencePolicy(t *testing.T) {
+	fixture := boundArtifactFixtureWithScope(t, false)
+	if _, err := VerifyBoundArtifact(fixture.options); err == nil || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("unscoped convergence policy error = %v", err)
+	}
+}
+
+func TestVerifyStaticArtifactBindsStableOuterAndRejectsArbitrarySignerOutputBytes(t *testing.T) {
+	fixture := boundArtifactFixture(t)
+	options := VerifyStaticOptions{UnsignedPath: fixture.options.UnsignedPath, SignedPath: fixture.options.SignedPath, Version: "0.4.11", Commit: strings.Repeat("a", 40), ExpectedIdentity: naisNetIdentity, FFmpegArchivePath: fixture.options.FFmpegArchivePath, FFmpegManifestPath: fixture.options.FFmpegManifestPath, InspectAuthenticode: func(string) (certidentity.Identity, error) { return naisNetIdentity, nil }}
+	if _, err := VerifyStaticArtifact(options); err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := os.ReadFile(options.SignedPath)
+	contents[600] ^= 0xff
+	_ = os.WriteFile(options.SignedPath, contents, 0o600)
+	if _, err := VerifyStaticArtifact(options); err == nil {
+		t.Fatal("arbitrary signed response bytes accepted")
+	}
+}
+
 type boundArtifactTestFixture struct {
 	root    string
 	options VerifyArtifactOptions
 }
 
 func boundArtifactFixture(t testing.TB) boundArtifactTestFixture {
+	return boundArtifactFixtureWithScope(t, true)
+}
+
+func boundArtifactFixtureWithScope(t testing.TB, scoped bool) boundArtifactTestFixture {
 	t.Helper()
 	root := t.TempDir()
-	rootSPKI, err := os.ReadFile(filepath.Join("..", "..", "testdata", "update-trust", "root-epoch-1-spki.der"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := os.ReadFile(filepath.Join("..", "..", "testdata", "update-trust", "policy-epoch-1.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	stableHash := strings.Repeat("1", 64)
+	rootSPKI, policy := scopedPolicyFixture(t, stableHash, scoped)
 	ffmpeg := []byte("synthetic-naisnet-ffmpeg")
 	archive, manifest := testFFmpegArchive(t, ffmpeg)
 	version := "0.4.11"
@@ -124,6 +149,7 @@ func boundArtifactFixture(t testing.TB) boundArtifactTestFixture {
 		PolicyPath:           writeFixture(t, root, "policy.json", policy),
 		ExpectedPolicySHA256: sha256Hex(policy),
 		ExpectedPolicyEpoch:  1,
+		StableArtifactSHA256: strings.Repeat("1", 64),
 		FFmpegArchivePath:    writeFixture(t, root, "ffmpeg.zip", archive),
 		FFmpegManifestPath:   writeFixture(t, root, "manifest.json", manifest),
 		Now:                  time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
@@ -136,14 +162,58 @@ func boundArtifactFixture(t testing.TB) boundArtifactTestFixture {
 	}}
 }
 
+func scopedPolicyFixture(t testing.TB, stableHash string, scoped bool) ([]byte, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := updatepolicy.PublisherRule{ID: "naisnet-primary", Role: "primary", Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094", AllowedChannel: updatepolicy.ChannelStable, AllowedTags: []string{"v0.4.12"}}
+	if scoped {
+		rule.ManifestSHA256 = stableHash
+	}
+	signed := updatepolicy.Signed{Epoch: 1, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []updatepolicy.PublisherRule{rule}}
+	canonical, err := updatepolicy.CanonicalSigned(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(canonical)
+	signature, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := json.Marshal(updatepolicy.Document{Signed: signed, Signatures: []updatepolicy.Signature{{Algorithm: "ecdsa-p256-sha256", Signature: base64.StdEncoding.EncodeToString(signature)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root, policy
+}
+
 func syntheticPEWithPayload(t testing.TB, payload []byte) []byte {
 	t.Helper()
 	size := 1024 + len(payload)
+	for size%8 != 0 {
+		size++
+	}
 	binary := make([]byte, size)
 	binary[0], binary[1] = 'M', 'Z'
 	putUint32(binary[0x3c:0x40], 0x80)
 	copy(binary[0x80:0x84], []byte{'P', 'E', 0, 0})
+	binary[0x80+6], binary[0x80+7] = 1, 0
+	binary[0x80+20], binary[0x80+21] = 0xf0, 0
 	binary[0x98], binary[0x99] = 0x0b, 0x02
+	putUint32(binary[0x98+60:0x98+64], 0x200)
+	putUint32(binary[0x98+108:0x98+112], 16)
+	section := 0x98 + 0xf0
+	copy(binary[section:section+8], []byte(".text\x00\x00\x00"))
+	putUint32(binary[section+8:section+12], uint32(len(binary)-0x200))
+	putUint32(binary[section+12:section+16], 0x1000)
+	putUint32(binary[section+16:section+20], uint32(len(binary)-0x200))
+	putUint32(binary[section+20:section+24], 0x200)
 	copy(binary[512:], payload)
 	return binary
 }

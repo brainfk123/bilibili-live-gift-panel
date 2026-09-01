@@ -5,7 +5,7 @@ import { verifyBridgeReadiness } from '../scripts/bridge-release-inputs.mjs';
 
 const sha256 = (value: Buffer) => createHash('sha256').update(value).digest('hex');
 
-function readinessFixture(manifestScoped = false) {
+function readinessFixture(manifestScoped = true) {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const rootSPKI = publicKey.export({ format: 'der', type: 'spki' });
   const signed = {
@@ -15,15 +15,21 @@ function readinessFixture(manifestScoped = false) {
       id: 'naisnet-primary', role: 'primary', country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094', allowedChannel: 'stable', allowedTags: ['v0.4.12'],
     }],
   };
-  if (manifestScoped) Object.assign(signed.publishers[0], { manifestSha256: 'a'.repeat(64) });
+  const stableArtifactSHA256 = 'a'.repeat(64);
+  if (manifestScoped) Object.assign(signed.publishers[0], { manifestSha256: stableArtifactSHA256 });
   const signedBytes = Buffer.from(JSON.stringify(signed));
   const signature = sign('sha256', signedBytes, privateKey).toString('base64');
   const policyBytes = Buffer.from(JSON.stringify({ signed, signatures: [{ algorithm: 'ecdsa-p256-sha256', signature }] }));
   const auditBytes = Buffer.from(JSON.stringify({ keyId: 'kms-production-key', epoch: 1, policySha256: sha256(policyBytes), requestId: 'kms-request-1', utc: '2026-08-01T00:00:00Z', ciActor: 'release-reviewer' }));
-  const stableRelease = { id: 412, tag_name: 'v0.4.12', draft: false, prerelease: false, published_at: '2026-08-01T00:00:00Z' };
+  const commitBytes = Buffer.from(JSON.stringify({ schemaVersion:1, policy:{name:'policy.json',length:policyBytes.length,sha256:sha256(policyBytes)}, audit:{name:'audit.json',length:auditBytes.length,sha256:sha256(auditBytes)} }));
+  const checksumBytes = Buffer.from(`${stableArtifactSHA256}  gift-panel-windows-x64.exe`);
+  const stableRelease = { id: 412, tag_name: 'v0.4.12', draft: false, prerelease: false, published_at: '2026-08-01T00:00:00Z', assets: [
+    { name:'gift-panel-windows-x64.exe',size:1234,digest:`sha256:${stableArtifactSHA256}`,content_type:'application/octet-stream',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/4101' },
+    { name:'gift-panel-windows-x64.exe.sha256',size:checksumBytes.length,digest:`sha256:${sha256(checksumBytes)}`,content_type:'text/plain',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/4102' },
+  ] };
   const observation = {
     schemaVersion: 1,
-    stableRelease: { id: 412, tag: 'v0.4.12', publishedAt: '2026-08-01T00:00:00Z' },
+    stableRelease: { id: 412, tag: 'v0.4.12', publishedAt: '2026-08-01T00:00:00Z', executableSha256: stableArtifactSHA256 },
     observation: { endedAt: '2026-08-08T00:00:00Z', result: 'passed' },
     reviewedAt: '2026-08-08T01:00:00Z',
   };
@@ -34,8 +40,9 @@ function readinessFixture(manifestScoped = false) {
     prerelease: false,
     published_at: '2026-08-01T00:00:00Z',
     assets: [
-      { name: 'policy.json', size: policyBytes.length, digest: `sha256:${sha256(policyBytes)}` },
-      { name: 'audit.json', size: auditBytes.length, digest: `sha256:${sha256(auditBytes)}` },
+      { name: 'policy.json', size: policyBytes.length, digest: `sha256:${sha256(policyBytes)}`,content_type:'application/json',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/5001' },
+      { name: 'audit.json', size: auditBytes.length, digest: `sha256:${sha256(auditBytes)}`,content_type:'application/json',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/5002' },
+      { name: 'commit.json', size: commitBytes.length, digest: `sha256:${sha256(commitBytes)}`,content_type:'application/json',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/5003' },
     ],
   };
   const attestation = {
@@ -43,17 +50,20 @@ function readinessFixture(manifestScoped = false) {
     rootSpkiSha256: sha256(rootSPKI),
     policy: { epoch: 1, sha256: sha256(policyBytes) },
     kms: { keyId: 'kms-production-key', auditSha256: sha256(auditBytes), requestId: 'kms-request-1' },
-    policyRelease: { id: 501, tag: 'publisher-policy-epoch-00000001', publishedAt: '2026-08-01T00:00:00Z', policyAsset: 'policy.json', auditAsset: 'audit.json' },
+    policyRelease: { id: 501, tag: 'publisher-policy-epoch-00000001', publishedAt: '2026-08-01T00:00:00Z', policyAsset: 'policy.json', auditAsset: 'audit.json', commitAsset:'commit.json' },
     reviewedAt: '2026-08-08T01:00:00Z',
   };
   const observationBytes = Buffer.from(JSON.stringify(observation));
   const attestationBytes = Buffer.from(JSON.stringify(attestation));
+  const verifiedBundleBytes=Buffer.from(JSON.stringify({schemaVersion:2,verification:{epoch:1,expectedPreviousEpoch:0,spkiSha256:sha256(rootSPKI)},commit:JSON.parse(commitBytes.toString()),policy:{name:'policy.json',length:policyBytes.length,sha256:sha256(policyBytes),bytesBase64:policyBytes.toString('base64')},audit:{name:'audit.json',length:auditBytes.length,sha256:sha256(auditBytes),bytesBase64:auditBytes.toString('base64')}}));
   return {
     now: new Date('2026-08-08T02:00:00Z'),
     stableReleaseBytes: Buffer.from(JSON.stringify(stableRelease)),
+    stableChecksumBytes: checksumBytes,
     observationEvidenceBytes: observationBytes,
     expectedObservationSHA256: sha256(observationBytes),
     rootSPKI: Buffer.from(rootSPKI), policyBytes, auditBytes,
+    verifiedBundleBytes,
     policyReleaseBytes: Buffer.from(JSON.stringify(policyRelease)),
     trustAttestationBytes: attestationBytes,
     expectedTrustAttestationSHA256: sha256(attestationBytes),
@@ -69,11 +79,8 @@ describe('bridge readiness reviewed evidence', () => {
       policyReleaseId: 501,
       policyEpoch: 1,
       kmsKeyId: 'kms-production-key',
+      stableArtifactSha256: 'a'.repeat(64),
     });
-  });
-
-  it('accepts an epoch-1 stable rule scoped to one reviewed manifest hash', () => {
-    expect(verifyBridgeReadiness(readinessFixture(true)).policyEpoch).toBe(1);
   });
 
   it.each([

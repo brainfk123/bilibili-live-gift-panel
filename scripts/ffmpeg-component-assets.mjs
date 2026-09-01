@@ -173,7 +173,7 @@ export async function installComponentAssets({ projectRoot = root, inputDirector
 function verifyPayloadDirectory(directory, expectedSigner) {
   execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), '--payload-only', '--payload-directory', directory, '--build-config', join(directory, 'ffmpeg-build-config.txt')], {
     cwd: root,
-    env: { ...process.env, APP_VERSION: 'component', EVSIGN_EXPECTED_SUBJECT: expectedSigner },
+    env: { ...process.env, APP_VERSION: 'component' },
     stdio: 'inherit',
     windowsHide: true,
   });
@@ -217,9 +217,13 @@ function stringArgument(name) {
 
 async function main() {
   const command = process.argv[2];
-  const expectedSigner = process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '';
+  const signerManifestDirectory = command === 'verify' || command === 'install'
+    ? argument('--input')
+    : join(root, 'goserver', 'ffmpeg');
+  const signerManifest = JSON.parse(await readFile(join(signerManifestDirectory, 'manifest.json'), 'utf8'));
+  const expectedSigner = String(signerManifest.signer_subject || '');
+  if (signerManifest.authenticode === true && !expectedSigner) throw new Error('Reviewed FFmpeg component signer metadata is missing.');
   if (command === 'identity') {
-    if (!expectedSigner) throw new Error('EVSIGN_EXPECTED_SUBJECT is required to resolve a signed FFmpeg component identity.');
     const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root), expectedSigner);
     process.stdout.write(`${JSON.stringify({ schema: 2, fingerprint: identity.fingerprint, tag: identity.tag })}\n`);
     return;

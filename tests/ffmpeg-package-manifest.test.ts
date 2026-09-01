@@ -16,7 +16,7 @@ describe('FFmpeg package manifest', () => {
       archive,
       componentGate: gate,
       authenticode: true,
-      signerSubject: 'CN=Release Test',
+      signerSubject: 'C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094',
       sourceReleaseCommit: '1'.repeat(40),
     });
 
@@ -36,7 +36,7 @@ describe('FFmpeg package manifest', () => {
       archive_sha256: createHash('sha256').update(archive).digest('hex'),
       component_gate_sha256: createHash('sha256').update(gate).digest('hex'),
       authenticode: true,
-      signer_subject: 'CN=Release Test',
+      signer_subject: 'C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094',
       source_release_commit: '1'.repeat(40),
     });
   });
@@ -56,6 +56,10 @@ describe('FFmpeg package manifest', () => {
       signer_subject: '',
       source_release_commit: '0'.repeat(40),
     });
+  });
+
+  it('rejects a formatted display Subject in signed component metadata', () => {
+    expect(() => buildPackageManifest({ identity:{descriptor,descriptorSha256:descriptorHash,fingerprint:descriptorHash},binary,archive,componentGate:gate,authenticode:true,signerSubject:'CN=Display Subject',sourceReleaseCommit:'1'.repeat(40) })).toThrow(/structured signer identity/);
   });
 
   it('rejects inconsistent signed and development metadata', () => {

@@ -45,7 +45,7 @@ async function main() {
     const executable = join(temporaryRoot, 'ffmpeg.exe');
     await writeFile(executable, binary, { flag: 'wx' });
     await chmod(executable, 0o700);
-    if (manifest.authenticode) verifyAuthenticode(executable, manifest.signer_subject);
+    if (manifest.authenticode) verifyAuthenticode(executable);
     verifyRuntimeSurface(executable, policy.configureFlags, expectedBuildConfig);
     if (!payloadOnly) runGoVerification(executable);
     console.log(`verified FFmpeg ${manifest.version}: binary ${manifest.size} bytes, ZIP ${archive.length} bytes, SHA-256 ${manifest.sha256}, authenticode=${manifest.authenticode}`);
@@ -146,7 +146,6 @@ function validateManifest(value, archive, identity) {
   assert(typeof value.source_release_commit === 'string' && /^[0-9a-f]{40}$/.test(value.source_release_commit), 'Manifest source release commit is invalid.');
   if (value.authenticode) {
     assert(value.signer_subject.length > 0 && value.source_release_commit !== '0'.repeat(40), 'Signed manifest metadata is invalid.');
-    assert(value.signer_subject === process.env.EVSIGN_EXPECTED_SUBJECT?.trim(), 'Manifest signer subject does not match EVSIGN_EXPECTED_SUBJECT.');
   } else {
     assert(value.signer_subject === '' && value.source_release_commit === '0'.repeat(40), 'Unsigned development manifest metadata is invalid.');
   }
@@ -226,12 +225,10 @@ function runGoVerification(executable) {
   }
 }
 
-function verifyAuthenticode(path, expectedSubject) {
-  const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "& { param([string]$path) Import-Module (Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security'); $signature = Get-AuthenticodeSignature -LiteralPath $path; @{ status = $signature.Status.ToString(); subject = if ($null -eq $signature.SignerCertificate) { '' } else { $signature.SignerCertificate.Subject } } | ConvertTo-Json -Compress }", path], { encoding: 'utf8', windowsHide: true }).trim();
-  let signature;
-  try { signature = JSON.parse(output); } catch { throw new Error('FFmpeg Authenticode verification returned malformed output.'); }
-  assert(signature.status === 'Valid', `FFmpeg Authenticode signature status is ${signature.status || 'missing'}, expected Valid.`);
-  assert(signature.subject === expectedSubject, 'FFmpeg Authenticode signer subject does not match manifest.');
+function verifyAuthenticode(path) {
+  const inspector = process.env.AUTHENTICODE_INSPECTOR_PATH?.trim();
+  assert(inspector, 'AUTHENTICODE_INSPECTOR_PATH is required for signed FFmpeg verification.');
+  execFileSync(inspector, ['authenticode', '--file', path, '--country', 'CN', '--organization', 'NaisNet Technology Co., Ltd.', '--organization-id', '91210103MA7CJ3C094'], { stdio: 'ignore', windowsHide: true });
 }
 
 function readArgument(name) {

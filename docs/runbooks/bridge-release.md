@@ -58,6 +58,10 @@ Required reviewed environment variables:
 - `BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256`
 - `BRIDGE_REVIEWED_COMMIT_SHA`, the independently reviewed lowercase 40-hex
   commit peeled from immutable `refs/tags/v0.4.11`
+- `BRIDGE_REVIEWED_TAG_OBJECT_SHA`, the exact raw tag-object SHA (equal to the
+  commit only for a reviewed lightweight tag)
+- `BRIDGE_TOOLING_COMMIT_SHA`, the protected reviewed commit used to prebuild
+  the inspector, readiness verifier, bounded downloader, and EVSign frontend
 - `BRIDGE_OBSERVATION_EVIDENCE_B64` and
   `BRIDGE_OBSERVATION_EVIDENCE_SHA256`
 - `BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64` and
@@ -73,10 +77,13 @@ test fixtures, placeholder digests, or locally generated production claims.
 Protect `v0.4.11` with the repository tag ruleset: creation requires the
 release-maintainer path, update and deletion are forbidden, and bypass is not
 available to the bridge workflow. Record the ruleset ID and reviewed peeled
-commit in the approval evidence. The workflow checks local and remote peeled
-tag commits after checkout, immediately before draft creation, and immediately
-before `draft=false`; any movement, noncommit target, duplicate/ambiguous ref,
-or mismatch with `BRIDGE_REVIEWED_COMMIT_SHA` stops publication.
+commit and raw tag-object SHA in the approval evidence. The workflow checks
+local and remote raw and peeled refs after checkout, immediately before draft
+creation, and immediately before `draft=false`. An annotated tag must have one
+raw object equal to `BRIDGE_REVIEWED_TAG_OBJECT_SHA` and one peeled commit equal
+to `BRIDGE_REVIEWED_COMMIT_SHA`; a lightweight tag must have one raw ref equal
+to both values and no peeled line. A peeled-only ref, rewrite to a new tag
+object on the same commit, ambiguity, or any movement stops publication.
 
 ## Gate A: later GitHub bridge publication
 
@@ -86,10 +93,13 @@ Before requesting approval, record read-only evidence for:
 - absence of an existing GitHub Release for `v0.4.11`;
 - the actual immutable GitHub `v0.4.12` Release ID, tag, and `published_at`;
 - a reviewed observation-evidence artifact whose digest binds that Release ID,
-  tag, `published_at`, seven-day end, passing result, and review time;
+  tag, `published_at`, exact v0.4.12 executable SHA-256, seven-day end, passing
+  result, and review time; the hash must also match Release asset metadata and
+  the bounded-download checksum sidecar;
 - daily bounded updater and policy result counts for the full observation;
 - the immutable `publisher-policy-epoch-00000001` Release and exact
-  `policy.json`/`audit.json` bytes;
+  `policy.json`/`audit.json`/`commit.json` bytes, with API metadata
+  size/digest/content-type validation before bounded streaming download;
 - a reviewed production-trust attestation binding root SPKI SHA-256, exact
   epoch-1 policy bytes/hash/epoch, KMS key ID/request ID/audit digest, immutable
   policy Release ID/tag/time/assets, and review time;
@@ -126,6 +136,11 @@ Acceptance evidence must include:
 - matching Authenticode PE-content digest between preserved unsigned bytes and
   the signed output, plus final extraction/reverification of embedded trust and
   FFmpeg from the bound signed artifact;
+- Task9 `trustpolicy verify-bundle` machine output binding the committed policy
+  and audit, including nonempty KMS request ID and CI actor;
+- the shared production client policy verifier authorizing the exact input
+  `{tag:v0.4.12, channel:stable, sha256:<actual Release EXE>, NaisNet identity}`;
+  the epoch-1 stable rule must carry that exact `manifestSha256`.
 - proof that stable and legacy pointers did not change.
 
 GitHub acceptance completes Gate A only. Keep legacy routing inactive.

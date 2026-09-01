@@ -28,7 +28,7 @@ function temporaryRoot() {
 }
 
 describe('FFmpeg component assets', () => {
-  it('refuses to resolve a publishable component identity without an expected signer', () => {
+  it('resolves the reviewed checked-in component without a Subject environment variable', () => {
     const projectRoot = fileURLToPath(new URL('..', import.meta.url));
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/ffmpeg-component-assets.mjs', import.meta.url)), 'identity'], {
       cwd: projectRoot,
@@ -36,8 +36,9 @@ describe('FFmpeg component assets', () => {
       env: { ...process.env, EVSIGN_EXPECTED_SUBJECT: '' },
     });
 
-    expect(result.status).not.toBe(0);
-    expect(`${result.stdout}${result.stderr}`).toContain('EVSIGN_EXPECTED_SUBJECT');
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ schema: 2 });
+    expect(`${result.stdout}${result.stderr}`).not.toContain('EVSIGN_EXPECTED_SUBJECT');
   });
 
   it('rejects mismatched signed metadata before preparing publishable component assets', async () => {

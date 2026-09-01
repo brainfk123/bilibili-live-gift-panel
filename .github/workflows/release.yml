@@ -37,6 +37,36 @@ jobs:
           $standaloneFFmpeg = $releaseVersion -ge [Version]'0.4.10'
           "RELEASE_STANDALONE_FFMPEG=$($standaloneFFmpeg.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Validate reviewed release tooling commit
+        shell: pwsh
+        env:
+          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+        run: |
+          if ($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Reviewed release tooling commit is invalid.' }
+
+      - name: Check out reviewed release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+          path: release-tools
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up reviewed tooling Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: release-tools/goserver/go.mod
+          cache-dependency-path: release-tools/goserver/go.sum
+
+      - name: Build reviewed release security tools
+        shell: pwsh
+        run: |
+          go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
+          if ($LASTEXITCODE -ne 0) { throw 'Reviewed artifact inspector build failed.' }
+          Copy-Item -LiteralPath release-tools/scripts/sign-evsign.mjs -Destination "$env:RUNNER_TEMP/sign-evsign.mjs"
+          "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Check out release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -122,7 +152,7 @@ jobs:
           EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
           EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
         run: |
-          $profileJSON = node scripts/sign-evsign.mjs --resolve-profile stable
+          $profileJSON = node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable
           if ($LASTEXITCODE -ne 0) { throw "EVSign signer profile resolution failed" }
           $profile = $profileJSON | ConvertFrom-Json
           if ($profile.schema -ne 2 -or $profile.profile -cne 'stable' -or $profile.certificateConfigured -ne $true) {
@@ -175,10 +205,6 @@ jobs:
         if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
         shell: pwsh
         run: |
-          $componentSignerSubject = [string](Get-Content goserver/ffmpeg/manifest.json -Raw | ConvertFrom-Json).signer_subject
-          if ([string]::IsNullOrWhiteSpace($componentSignerSubject)) { throw 'Reviewed FFmpeg component signer metadata is missing.' }
-          $env:EVSIGN_EXPECTED_SUBJECT = $componentSignerSubject
-          "EVSIGN_EXPECTED_SUBJECT=$componentSignerSubject" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $identityJSON = node scripts/ffmpeg-component-assets.mjs identity
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
           $identity = $identityJSON | ConvertFrom-Json
@@ -280,11 +306,11 @@ jobs:
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
         run: |
-          node scripts/sign-evsign.mjs --profile stable dist/ffmpeg/ffmpeg.exe
+          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/ffmpeg/ffmpeg.exe
           if ($LASTEXITCODE -ne 0) {
             throw "FFmpeg signing failed with exit code $LASTEXITCODE"
           }
-          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/ffmpeg/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
           if ($LASTEXITCODE -ne 0) { throw 'Inner FFmpeg structured Authenticode inspection failed.' }
           Write-Host 'Verified inner FFmpeg Authenticode signature.'
 
@@ -415,7 +441,7 @@ jobs:
           if ($componentManifest.authenticode -ne $true -or $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
             throw 'Standalone FFmpeg does not match the verified component manifest.'
           }
-          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
           if ($LASTEXITCODE -ne 0) { throw 'Standalone FFmpeg structured Authenticode inspection failed.' }
           "$hash  ffmpeg-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/ffmpeg-windows-x64.exe.sha256
 
@@ -442,10 +468,11 @@ jobs:
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
         run: |
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
-          node scripts/sign-evsign.mjs --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
+          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.exe
           if ($LASTEXITCODE -ne 0) { throw 'Stable outer signing failed.' }
-          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
-          if ($LASTEXITCODE -ne 0) { throw 'Stable outer structured Authenticode inspection failed.' }
+          $version = $env:RELEASE_TAG.Substring(1)
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.exe --version $version --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive goserver/ffmpeg/ffmpeg.zip --ffmpeg-manifest goserver/ffmpeg/manifest.json
+          if ($LASTEXITCODE -ne 0) { throw 'Stable outer bound artifact inspection failed.' }
           Write-Host 'Verified outer application Authenticode signature.'
 
       - name: Verify deterministic gift clip exports from signed package chain
@@ -598,7 +625,7 @@ jobs:
             }
           }
           if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
-            go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+            & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
             if ($LASTEXITCODE -ne 0) { throw 'Published standalone FFmpeg structured Authenticode inspection failed. Manual recovery required.' }
             $ffmpegChecksum = Get-Content -LiteralPath dist/ffmpeg-windows-x64.exe.sha256 -Raw
             if ($ffmpegChecksum -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+ffmpeg-windows-x64\.exe\s*$') {
@@ -617,7 +644,7 @@ jobs:
               throw "Published standalone FFmpeg does not match the verified signed component manifest. Manual recovery required."
             }
           }
-          go -C goserver run ./cmd/artifact-inspector authenticode --file ../dist/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
           if ($LASTEXITCODE -ne 0) { throw 'Published EXE structured Authenticode inspection failed. Manual recovery required.' }
           $checksumText = Get-Content -LiteralPath dist/gift-panel-windows-x64.exe.sha256 -Raw
           if ($checksumText -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+gift-panel-windows-x64\.exe\s*$') {

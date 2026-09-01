@@ -6,11 +6,7 @@ import (
 	"bilibili-live-gift-panel/internal/certidentity"
 )
 
-type updateCertificateIdentity struct {
-	Country        string
-	Organization   string
-	OrganizationID string
-}
+type updateCertificateIdentity = certidentity.Identity
 
 type inspectedUpdateCertificate struct {
 	LegalIdentity updateCertificateIdentity

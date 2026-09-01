@@ -12,6 +12,7 @@ const warningSize = 30_000_000;
 const maximumSize = 40_000_000;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const outputDirectory = join(root, 'goserver', 'ffmpeg');
+const naisNetStructuredSigner = 'C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094';
 const componentGatePath = join(root, 'dist', 'ffmpeg-component-gate.txt');
 const ownerLivenessCache = new Map();
 
@@ -42,7 +43,7 @@ async function main() {
   }
   if (authenticode) await verifyAuthenticode(binary);
   componentGate = bindBuildRecordToBinary(componentGate, binary, authenticode);
-  const signerSubject = authenticode ? process.env.EVSIGN_EXPECTED_SUBJECT?.trim() || '' : '';
+  const signerSubject = authenticode ? naisNetStructuredSigner : '';
   const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root), signerSubject);
 
   const sha256 = createHash('sha256').update(binary).digest('hex');
@@ -65,7 +66,7 @@ export function buildPackageManifest({ identity, binary, archive, componentGate,
   }
   if (!/^[0-9a-f]{40}$/.test(sourceReleaseCommit)) throw new Error('FFmpeg source release commit is invalid.');
   if (authenticode) {
-    if (typeof signerSubject !== 'string' || signerSubject.length === 0 || /[\r\n]/.test(signerSubject)) throw new Error('FFmpeg signer subject is invalid.');
+    if (signerSubject !== naisNetStructuredSigner) throw new Error('FFmpeg structured signer identity is invalid.');
     if (/^0{40}$/.test(sourceReleaseCommit)) throw new Error('Signed FFmpeg source release commit is invalid.');
   } else if (signerSubject !== '' || sourceReleaseCommit !== '0'.repeat(40)) {
     throw new Error('Unsigned development FFmpeg metadata is invalid.');
@@ -151,11 +152,10 @@ async function verifyAuthenticode(contents) {
   let status;
   try {
     await writeFile(path, contents, { flag: 'wx' });
-    status = execFileSync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      "& { param([string]$path) Import-Module (Join-Path $env:WINDIR 'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security'); (Get-AuthenticodeSignature -LiteralPath $path).Status.ToString() }",
-      path,
-    ], { encoding: 'utf8', windowsHide: true }).trim();
+    const inspector = process.env.AUTHENTICODE_INSPECTOR_PATH?.trim();
+    if (!inspector) throw new Error('AUTHENTICODE_INSPECTOR_PATH is required.');
+    execFileSync(inspector, ['authenticode','--file',path,'--country','CN','--organization','NaisNet Technology Co., Ltd.','--organization-id','91210103MA7CJ3C094'], { stdio:'ignore', windowsHide:true });
+    status = 'Valid';
   } catch (error) {
     throw new Error(`Could not verify FFmpeg Authenticode signature: ${error.message}`);
   } finally {
