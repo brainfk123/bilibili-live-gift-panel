@@ -56,6 +56,12 @@ jobs:
           IFS=. read -r major minor patch <<<"$version"
           enrollment=false
           if (( major > 0 || (major == 0 && (minor > 4 || (minor == 4 && patch >= 12))) )); then enrollment=true; fi
+          if [[ "$enrollment" != true ]]; then
+            case "$RELEASE_TAG" in
+              v0.4.7|v0.4.9|v0.4.10) ;;
+              *) echo 'unsupported historical stable tag' >&2; exit 1 ;;
+            esac
+          fi
           encoded_tag="$(node -p 'encodeURIComponent(process.argv[1])' "$RELEASE_TAG")"
           status="$(curl --silent --show-error --output release.json --write-out '%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
@@ -109,33 +115,54 @@ jobs:
       RELEASE_TAG: ${{ needs.classify.outputs.tag }}
       RELEASE_VERSION: ${{ needs.classify.outputs.version }}
     steps:
+      - name: Validate reviewed tooling SHA for historical verification
+        shell: pwsh
+        env:
+          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+        run: |
+          if($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$'){throw 'Reviewed historical tooling SHA is invalid.'}
       - name: Check out reviewed verification tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
-          path: release-tools
+          path: tooling
           fetch-depth: 1
           persist-credentials: false
       - name: Set up credential-free historical verifier
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: release-tools/goserver/go.mod
-          cache-dependency-path: release-tools/goserver/go.sum
+          go-version-file: tooling/goserver/go.mod
+          cache-dependency-path: tooling/goserver/go.sum
       - name: Build credential-free historical verifier
         shell: pwsh
         run: |
-          go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
+          go -C tooling/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
           if ($LASTEXITCODE -ne 0) { throw 'Historical verifier build failed.' }
           "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/release-tools" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/tooling" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE/source" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Check out exact historical tag as data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: refs/tags/${{ needs.classify.outputs.tag }}
+          path: source
           fetch-depth: 1
           persist-credentials: false
+      - name: Resolve exact historical signer identity
+        working-directory: source
+        shell: pwsh
+        run: |
+          switch -CaseSensitive ($env:RELEASE_TAG) {
+            'v0.4.7' { $country='CN';$organization='RushRush Network Technology Ltd';$organizationId='91450900MADM3GLG5P' }
+            'v0.4.9' { $country='CN';$organization='NaisNet Technology Co., Ltd.';$organizationId='91210103MA7CJ3C094' }
+            'v0.4.10' { $country='CN';$organization='NaisNet Technology Co., Ltd.';$organizationId='91210103MA7CJ3C094' }
+            default { throw 'unsupported historical stable tag' }
+          }
+          "HISTORICAL_SIGNER_COUNTRY=$country"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "HISTORICAL_SIGNER_ORGANIZATION=$organization"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "HISTORICAL_SIGNER_ORGANIZATION_ID=$organizationId"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Download existing historical Release assets
+        working-directory: source
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -148,6 +175,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Historical standalone FFmpeg download failed.' }
           }
       - name: Verify standalone FFmpeg repair component
+        working-directory: source
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,9 +199,10 @@ jobs:
           node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input dist/historical-component --sealed-output dist/historical-ffmpeg-sealed --manifest-output dist/historical-component-manifest.json
           if($LASTEXITCODE -ne 0){throw 'Fixed historical FFmpeg sealing failed.'}
       - name: Verify historical Release without mutation
+        working-directory: source
         shell: pwsh
         run: |
-          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/historical/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/historical/gift-panel-windows-x64.exe --country $env:HISTORICAL_SIGNER_COUNTRY --organization $env:HISTORICAL_SIGNER_ORGANIZATION --organization-id $env:HISTORICAL_SIGNER_ORGANIZATION_ID
           if ($LASTEXITCODE -ne 0) { throw 'Historical EXE Authenticode verification failed.' }
           $exeHash = (Get-FileHash -Algorithm SHA256 dist/historical/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
           if ((Get-Content dist/historical/gift-panel-windows-x64.exe.sha256 -Raw) -cne "$exeHash  gift-panel-windows-x64.exe") { throw 'Historical EXE sidecar mismatch.' }
@@ -225,36 +254,44 @@ jobs:
       RELEASE_TAG: ${{ needs.classify.outputs.tag }}
       RELEASE_VERSION: ${{ needs.classify.outputs.version }}
     steps:
+      - name: Validate reviewed tooling SHA for candidate preparation
+        shell: pwsh
+        env:
+          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+        run: |
+          if($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$'){throw 'Reviewed candidate tooling SHA is invalid.'}
       - name: Check out reviewed candidate tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
-          path: release-tools
+          path: tooling
           fetch-depth: 1
           persist-credentials: false
       - name: Set up reviewed candidate tooling
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: release-tools/goserver/go.mod
-          cache-dependency-path: release-tools/goserver/go.sum
+          go-version-file: tooling/goserver/go.mod
+          cache-dependency-path: tooling/goserver/go.sum
       - name: Build credential-scoped candidate tools
         shell: pwsh
         run: |
-          go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
+          go -C tooling/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
           if ($LASTEXITCODE -ne 0) { throw 'Candidate inspector build failed.' }
-          Copy-Item release-tools/scripts/sign-evsign.mjs "$env:RUNNER_TEMP/sign-evsign.mjs"
-          Copy-Item release-tools/scripts/verify-enrollment-build.mjs "$env:RUNNER_TEMP/verify-enrollment-build.mjs"
+          Copy-Item tooling/scripts/sign-evsign.mjs "$env:RUNNER_TEMP/sign-evsign.mjs"
+          Copy-Item tooling/scripts/verify-enrollment-build.mjs "$env:RUNNER_TEMP/verify-enrollment-build.mjs"
           "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/release-tools" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/tooling" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE/source" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Check out exact candidate tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: refs/tags/${{ needs.classify.outputs.tag }}
+          path: source
           fetch-depth: 0
           persist-credentials: false
       - name: Validate prepare request and bootstrap trust
+        working-directory: source
         shell: pwsh
         env:
           STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
@@ -289,7 +326,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: source/package-lock.json
       - name: Resolve closed stable signer
+        working-directory: source
         shell: pwsh
         env:
           EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
@@ -298,6 +337,7 @@ jobs:
           $profile = node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $profile.profile -cne 'stable' -or $profile.identity.country -cne 'CN' -or $profile.identity.organization -cne 'NaisNet Technology Co., Ltd.' -or $profile.identity.organizationId -cne '91210103MA7CJ3C094') { throw 'Stable signer profile is invalid.' }
       - name: Install and test candidate source
+        working-directory: source
         run: |
           npm ci
           npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
@@ -306,6 +346,7 @@ jobs:
           npm run prepare:go-assets
           go -C goserver test ./...
       - name: Download reviewed signed FFmpeg closure
+        working-directory: source
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -325,7 +366,8 @@ jobs:
           foreach ($asset in Get-ChildItem dist/ffmpeg-component -File) { gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY; if ($LASTEXITCODE -ne 0) { throw 'FFmpeg component attestation failed.' } }
           node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input dist/ffmpeg-component --sealed-output dist/release-ffmpeg-sealed
           if ((Get-FileHash dist/release-ffmpeg-sealed/manifest.json -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256) { throw 'Reviewed FFmpeg manifest digest mismatch.' }
-      - name: Build and sign stable candidate
+      - name: Build stable candidate executable
+        working-directory: source
         shell: pwsh
         env:
           APP_VERSION: ${{ needs.classify.outputs.tag }}
@@ -335,16 +377,86 @@ jobs:
           APP_UPDATE_TRUST_REQUIRED: '1'
           APP_UPDATE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
           APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
+        run: |
+          npm run build:exe
+      - name: Sign stable candidate executable
+        working-directory: source
+        shell: pwsh
+        env:
           EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
           EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
           EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
           EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
         run: |
-          npm run build:exe
           Copy-Item dist/gift-panel.exe dist/gift-panel-windows-x64.unsigned.exe
           node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
           if ($LASTEXITCODE -ne 0) { throw 'Stable candidate signing failed.' }
+      - name: Build canonical candidate changelog
+        working-directory: source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $maximum=262144
+          function Read-Changelog([string]$path){
+            if(-not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item $path).Length -le 0 -or (Get-Item $path).Length -gt $maximum){throw 'changelog input is missing or exceeds 262144 bytes'}
+            $raw=Get-Content $path -Raw
+            try{$json=[System.Text.Json.JsonDocument]::Parse($raw)}catch{throw 'changelog schema is invalid'}
+            try{
+              $root=$json.RootElement;$names=@($root.EnumerateObject()|ForEach-Object{$_.Name});[int64]$schema=0
+              if($root.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or $names.Count -ne 2 -or @($names|Where-Object{$_ -ceq 'schemaVersion'}).Count -ne 1 -or @($names|Where-Object{$_ -ceq 'releases'}).Count -ne 1 -or $root.GetProperty('schemaVersion').ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $root.GetProperty('schemaVersion').TryGetInt64([ref]$schema) -or $schema -ne 1 -or $root.GetProperty('releases').ValueKind -ne [System.Text.Json.JsonValueKind]::Array){throw 'changelog schema is invalid'}
+              $entries=$root.GetProperty('releases');if($entries.GetArrayLength() -le 0 -or $entries.GetArrayLength() -gt 512){throw 'changelog schema is invalid'}
+              $expectedReleaseNames=@('date','highlights','summary','title','version','visuals');$expectedHighlightNames=@('description','label','title');$sourceSeen=@{};$sourcePrior=$null
+              foreach($entry in $entries.EnumerateArray()){
+                if($entry.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object $expectedReleaseNames @($entry.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object))){throw 'changelog schema is invalid'}
+                foreach($field in @('version','date','title','summary')){$value=$entry.GetProperty($field);if($value.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or [string]::IsNullOrWhiteSpace($value.GetString()) -or $value.GetString() -cne $value.GetString().Trim()){throw 'changelog schema is invalid'}}
+                $version=$entry.GetProperty('version').GetString();if($version -cnotmatch '^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'){throw 'changelog version is invalid'}
+                if($sourceSeen.ContainsKey($version)){throw 'duplicate changelog version'};$sourceSeen[$version]=$true;$parsed=[Version]$version;if($null -ne $sourcePrior -and $parsed -ge $sourcePrior){throw 'changelog version order is invalid'};$sourcePrior=$parsed
+                if($entry.GetProperty('date').GetString() -cnotmatch '^\d{4}-\d{2}-\d{2}$' -or $entry.GetProperty('highlights').ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $entry.GetProperty('highlights').GetArrayLength() -gt 64 -or $entry.GetProperty('visuals').ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $entry.GetProperty('visuals').GetArrayLength() -gt 8){throw 'changelog schema is invalid'}
+                foreach($highlight in $entry.GetProperty('highlights').EnumerateArray()){
+                  if($highlight.ValueKind -ne [System.Text.Json.JsonValueKind]::Object -or (Compare-Object $expectedHighlightNames @($highlight.EnumerateObject()|ForEach-Object{$_.Name}|Sort-Object))){throw 'changelog schema is invalid'}
+                  foreach($field in $expectedHighlightNames){$value=$highlight.GetProperty($field);if($value.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or [string]::IsNullOrWhiteSpace($value.GetString()) -or $value.GetString() -cne $value.GetString().Trim()){throw 'changelog schema is invalid'}}
+                }
+                foreach($visual in $entry.GetProperty('visuals').EnumerateArray()){if($visual.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $visual.GetString() -cnotin @('scene','broadcast','training')){throw 'changelog schema is invalid'}}
+              }
+            }finally{$json.Dispose()}
+            $document=$raw|ConvertFrom-Json
+            return @($document.releases)
+          }
+          $current=Read-Changelog 'gift-panel-changelog.json'
+          $previous=@();$previousTag=git tag --sort=-version:refname|Where-Object{$_ -and $_ -cne $env:RELEASE_TAG}|Select-Object -First 1
+          if($previousTag){
+            New-Item -ItemType Directory -Path dist/changelog-history -ErrorAction Stop|Out-Null
+            try{
+              $encoded=[Uri]::EscapeDataString($previousTag);$headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+              $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encoded" -Headers $headers
+              $assets=@($release.assets|Where-Object{$_.name -ceq 'gift-panel-changelog.json'})
+              if($assets.Count -ne 1 -or [int64]$assets[0].size -le 0 -or [int64]$assets[0].size -gt $maximum){throw 'previous hosted changelog metadata is invalid'}
+              gh release download $previousTag --dir dist/changelog-history --pattern gift-panel-changelog.json
+              if($LASTEXITCODE -ne 0){throw 'previous hosted changelog download failed'}
+              $previous=Read-Changelog 'dist/changelog-history/gift-panel-changelog.json'
+            }catch{
+              $previousJSON=git show "${previousTag}:gift-panel-changelog.json" 2>$null
+              if($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($previousJSON)){throw 'reviewed previous hosted/tag history is unavailable'}
+              $previousPath='dist/changelog-history/tag-gift-panel-changelog.json';$previousJSON|Set-Content -NoNewline -Encoding utf8 $previousPath
+              $previous=Read-Changelog $previousPath
+            }
+          }
+          $seed=@();if(Test-Path -LiteralPath '.github/changelog-history.json'){$seed=Read-Changelog '.github/changelog-history.json'}
+          $seen=@{};$merged=@()
+          foreach($release in @($current)+@($previous)+@($seed)){
+            $version=[string]$release.version
+            if($version -cnotmatch '^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$'){throw 'changelog version is invalid'}
+            if($seen.ContainsKey($version)){continue}
+            $seen[$version]=$true;$merged+=$release
+          }
+          $merged=@($merged|Sort-Object {[Version]$_.version} -Descending)
+          $outputSeen=@{};$prior=$null
+          foreach($release in $merged){$version=[string]$release.version;if($outputSeen.ContainsKey($version)){throw 'duplicate changelog version'};$outputSeen[$version]=$true;$parsed=[Version]$version;if($null -ne $prior -and $parsed -ge $prior){throw 'changelog version order is invalid'};$prior=$parsed}
+          [ordered]@{schemaVersion=1;releases=$merged}|ConvertTo-Json -Depth 12|Set-Content -NoNewline -Encoding utf8 dist/canonical-gift-panel-changelog.json
+          if((Get-Item dist/canonical-gift-panel-changelog.json).Length -gt $maximum){throw 'canonical changelog exceeds 262144 bytes'}
       - name: Prepare signed stable candidate
+        working-directory: source
         id: candidate
         shell: pwsh
         env:
@@ -363,7 +475,7 @@ jobs:
           if ($candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256" -or $candidateEvidence.signedFileSha256 -cne $inspection.signedFileSha256) { throw 'Candidate evidence cross-binding failed.' }
           "$($inspection.signedFileSha256)  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/gift-panel-windows-x64.exe.sha256
           [ordered]@{ tag_name=$env:RELEASE_TAG; draft=$false; prerelease=$false; assets=@([ordered]@{ name='gift-panel-windows-x64.exe'; browser_download_url="https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"; size=[int64]$inspection.signedFileSize; digest="sha256:$($inspection.signedFileSha256)" }) } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/gift-panel-update.json
-          Copy-Item gift-panel-changelog.json dist/stable-candidate/gift-panel-changelog.json
+          Copy-Item dist/canonical-gift-panel-changelog.json dist/stable-candidate/gift-panel-changelog.json
           Copy-Item dist/release-ffmpeg-sealed/ffmpeg.zip dist/stable-candidate/ffmpeg.zip
           Copy-Item dist/release-ffmpeg-sealed/manifest.json dist/stable-candidate/manifest.json
           Expand-Archive dist/release-ffmpeg-sealed/ffmpeg.zip -DestinationPath dist/stable-candidate/standalone
@@ -393,7 +505,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.candidate.outputs.artifact-name }}
-          path: dist/stable-candidate
+          path: source/dist/stable-candidate
           compression-level: 0
           if-no-files-found: error
           retention-days: 30
@@ -401,8 +513,9 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ steps.candidate.outputs.artifact-name }}
-          path: dist/candidate-readback
+          path: source/dist/candidate-readback
       - name: Verify uploaded candidate is bit-identical
+        working-directory: source
         shell: pwsh
         run: |
           if ('${{ steps.upload.outputs.artifact-id }}' -cnotmatch '^[1-9][0-9]*$' -or '${{ steps.upload.outputs.artifact-digest }}' -cnotmatch '^[0-9a-f]{64}$') { throw 'Actions candidate artifact identity is invalid.' }
@@ -419,6 +532,7 @@ jobs:
     runs-on: windows-latest
     environment: stable-publish
     permissions:
+      actions: read
       contents: write
       id-token: write
       attestations: write
@@ -430,8 +544,12 @@ jobs:
         shell: pwsh
         env:
           STABLE_CANDIDATE_RUN_ID: ${{ vars.STABLE_CANDIDATE_RUN_ID }}
+          STABLE_CANDIDATE_WORKFLOW_ID: ${{ vars.STABLE_CANDIDATE_WORKFLOW_ID }}
+          STABLE_CANDIDATE_RUN_ATTEMPT: ${{ vars.STABLE_CANDIDATE_RUN_ATTEMPT }}
           STABLE_CANDIDATE_ARTIFACT_ID: ${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}
           STABLE_CANDIDATE_ARTIFACT_DIGEST: ${{ vars.STABLE_CANDIDATE_ARTIFACT_DIGEST }}
+          STABLE_CANDIDATE_ARTIFACT_CREATED_AT: ${{ vars.STABLE_CANDIDATE_ARTIFACT_CREATED_AT }}
+          STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT: ${{ vars.STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT }}
           STABLE_CANDIDATE_SHA256: ${{ vars.STABLE_CANDIDATE_SHA256 }}
           STABLE_CANDIDATE_SIZE: ${{ vars.STABLE_CANDIDATE_SIZE }}
           STABLE_CANDIDATE_TAG: ${{ vars.STABLE_CANDIDATE_TAG }}
@@ -449,10 +567,14 @@ jobs:
           STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
           STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Reviewed candidate publication input is missing or malformed.' }
+          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') { throw 'Reviewed candidate publication input is missing or malformed.' }
           "STABLE_CANDIDATE_RUN_ID=$env:STABLE_CANDIDATE_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_WORKFLOW_ID=$env:STABLE_CANDIDATE_WORKFLOW_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_RUN_ATTEMPT=$env:STABLE_CANDIDATE_RUN_ATTEMPT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_ARTIFACT_ID=$env:STABLE_CANDIDATE_ARTIFACT_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_ARTIFACT_DIGEST=$env:STABLE_CANDIDATE_ARTIFACT_DIGEST" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_ARTIFACT_CREATED_AT=$env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT=$env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_SHA256=$env:STABLE_CANDIDATE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_SIZE=$env:STABLE_CANDIDATE_SIZE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_COMMIT_SHA=$env:STABLE_CANDIDATE_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -460,15 +582,20 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Verify exact Actions artifact metadata
+      - name: Verify exact candidate run and artifact provenance
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+          $run=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:STABLE_CANDIDATE_RUN_ID" -Headers $headers
+          if([string]$run.id -cne $env:STABLE_CANDIDATE_RUN_ID -or [string]$run.repository.full_name -cne $env:GITHUB_REPOSITORY -or [string]$run.head_repository.full_name -cne $env:GITHUB_REPOSITORY -or [string]$run.path -cne '.github/workflows/release.yml' -or [string]$run.workflow_id -cne $env:STABLE_CANDIDATE_WORKFLOW_ID -or [string]$run.event -cne 'push' -or [string]$run.status -cne 'completed' -or [string]$run.conclusion -cne 'success' -or [string]$run.head_sha -cne $env:STABLE_CANDIDATE_COMMIT_SHA -or [string]$run.head_branch -cne $env:RELEASE_TAG -or [string]$run.run_attempt -cne $env:STABLE_CANDIDATE_RUN_ATTEMPT -or @($run.pull_requests).Count -ne 0){throw 'Reviewed candidate workflow run provenance mismatch.'}
           $artifact=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:STABLE_CANDIDATE_ARTIFACT_ID" -Headers $headers
           $expectedName="stable-candidate-$env:RELEASE_TAG-$env:STABLE_CANDIDATE_SHA256"
-          if ([string]$artifact.id -cne $env:STABLE_CANDIDATE_ARTIFACT_ID -or [string]$artifact.workflow_run.id -cne $env:STABLE_CANDIDATE_RUN_ID -or [string]$artifact.name -cne $expectedName -or $artifact.expired -ne $false -or [string]$artifact.digest -cne "sha256:$env:STABLE_CANDIDATE_ARTIFACT_DIGEST") { throw 'Reviewed Actions candidate artifact metadata mismatch.' }
+          try{$created=[DateTimeOffset]$artifact.created_at;$expires=[DateTimeOffset]$artifact.expires_at}catch{throw 'Reviewed Actions candidate artifact timestamps are invalid.'}
+          $createdRFC3339=$created.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ');$expiresRFC3339=$expires.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+          if ([string]$artifact.id -cne $env:STABLE_CANDIDATE_ARTIFACT_ID -or [string]$artifact.workflow_run.id -cne $env:STABLE_CANDIDATE_RUN_ID -or [string]$artifact.name -cne $expectedName -or $artifact.expired -ne $false -or [string]$artifact.digest -cne "sha256:$env:STABLE_CANDIDATE_ARTIFACT_DIGEST" -or $createdRFC3339 -cne $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -or $expiresRFC3339 -cne $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT) { throw 'Reviewed Actions candidate artifact metadata mismatch.' }
+          if([DateTimeOffset]::UtcNow -ge $expires){throw 'Reviewed Actions candidate artifact is expired.'}
       - name: Download exact reviewed stable candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -477,6 +604,25 @@ jobs:
           github-token: ${{ github.token }}
           path: candidate
           merge-multiple: true
+      - name: Validate extracted candidate tree
+        shell: pwsh
+        run: |
+          $rootItem=Get-Item -LiteralPath candidate -Force
+          if(-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'candidate root is a reparse point'}
+          $root=$rootItem.FullName;$allowedDirectories=@('sealed','tools');$seenDirectories=@{};$files=@();$queue=[Collections.Generic.Queue[IO.DirectoryInfo]]::new();$queue.Enqueue($rootItem)
+          while($queue.Count -gt 0){
+            $directory=$queue.Dequeue();$children=@(Get-ChildItem -LiteralPath $directory.FullName -Force)
+            if($directory.FullName -cne $root -and $children.Count -eq 0){throw 'empty candidate directory'}
+            foreach($child in $children){
+              if($child.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'candidate extraction contains ReparsePoint'}
+              $relative=$child.FullName.Substring($root.Length+1).Replace('\','/')
+              if($child.PSIsContainer){if($relative -notin $allowedDirectories){throw 'unexpected candidate directory'};$seenDirectories[$relative]=$true;$queue.Enqueue($child)}
+              elseif($child -is [IO.FileInfo]){$files+=$relative}else{throw 'unexpected candidate entry type'}
+            }
+          }
+          foreach($directory in $allowedDirectories){if(-not $seenDirectories.ContainsKey($directory)){throw 'missing candidate directory'}}
+          $allowedFiles=@("sealed/$env:STABLE_CANDIDATE_SHA256.exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
+          if(Compare-Object $allowedFiles @($files|Sort-Object)){throw 'unexpected candidate file'}
       - name: Revalidate reviewed stable candidate
         shell: pwsh
         env:
@@ -580,11 +726,32 @@ jobs:
         run: |
           gh release edit $env:RELEASE_TAG --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw 'Stable publication failed.' }
-      - name: Verify published stable latest closure
+      - name: Verify final published stable closure
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'};$tag=[Uri]::EscapeDataString($env:RELEASE_TAG)
-          $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers;$latest=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
-          if($release.draft -or $release.prerelease -or $latest.id -ne $release.id -or $latest.tag_name -cne $env:RELEASE_TAG){throw 'Published stable is not exact latest.'}
+          $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers
+          if($release.draft -or $release.prerelease -or -not $release.published_at){throw 'Published stable state is invalid.'}
+          $required=@('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','stable-release-evidence.json','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256')
+          $names=@($release.assets|ForEach-Object{[string]$_.name})
+          if($names.Count -ne $required.Count){throw 'The exact published asset closure changed after draft readback.'}
+          New-Item -ItemType Directory -Path published-readback -ErrorAction Stop|Out-Null
+          foreach($name in $required){
+            if(@($names|Where-Object{$_ -ceq $name}).Count -ne 1){throw 'The exact published asset closure changed after draft readback.'}
+            gh release download $env:RELEASE_TAG --dir published-readback --pattern $name
+            if($LASTEXITCODE -ne 0){throw 'The exact published asset closure changed after draft readback.'}
+            $source=if($name -ceq 'gift-panel-windows-x64.exe'){'candidate/sealed/gift-panel-windows-x64.exe'}else{"candidate/$name"}
+            $hash=(Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant();$size=(Get-Item $source).Length;$asset=@($release.assets|Where-Object{$_.name -ceq $name})[0]
+            if((Get-FileHash "published-readback/$name" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash -or (Get-Item "published-readback/$name").Length -ne $size -or [string]$asset.digest -cne "sha256:$hash" -or [int64]$asset.size -ne $size){throw 'The exact published asset closure changed after draft readback.'}
+          }
+          $latest=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
+          if($latest.id -ne $release.id -or $latest.tag_name -cne $env:RELEASE_TAG -or $latest.draft -or $latest.prerelease -or -not $latest.published_at){throw 'Published stable is not exact latest.'}
+          $latestNames=@($latest.assets|ForEach-Object{[string]$_.name})
+          if($latestNames.Count -ne $required.Count){throw 'The latest asset closure changed after published readback.'}
+          foreach($name in $required){
+            if(@($latestNames|Where-Object{$_ -ceq $name}).Count -ne 1){throw 'The latest asset closure changed after published readback.'}
+            $releaseAsset=@($release.assets|Where-Object{$_.name -ceq $name})[0];$latestAsset=@($latest.assets|Where-Object{$_.name -ceq $name})[0]
+            if([string]$latestAsset.id -cne [string]$releaseAsset.id -or [string]$latestAsset.digest -cne [string]$releaseAsset.digest -or [int64]$latestAsset.size -ne [int64]$releaseAsset.size){throw 'The latest asset closure changed after published readback.'}
+          }

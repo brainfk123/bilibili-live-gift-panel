@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isScalar, parseDocument } from 'yaml';
+import { parseDocument } from 'yaml';
 
 interface ReleaseStep {
   env?: Record<string, string>;
@@ -38,8 +38,6 @@ interface BridgeReleaseWorkflow {
   concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
   jobs?: Record<string, WorkflowJob>;
 }
-
-const auditedSetupMSYS2Commit = '66cd2cce69caa17b53920067426061ca1de3a884';
 
 function releaseWorkflow() {
   const source = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
@@ -89,16 +87,6 @@ function semanticCommands(job: WorkflowJob | undefined): string[] {
     }
     return commands;
   });
-}
-
-function releaseStepRuns(step: ReleaseStep, environment: Record<string, string>): boolean {
-  if (!step.if) return true;
-  const substituted = step.if.replace(/env\.([A-Z][A-Z0-9_]*)/g, (_match, name: string) =>
-    JSON.stringify(environment[name] ?? ''));
-  if (!/^[\s()'"A-Za-z0-9._:/=!-]+(?:&&|\|\||[\s()'"A-Za-z0-9._:/=!-]+)*$/.test(substituted)) {
-    throw new Error(`unsupported workflow condition: ${step.if}`);
-  }
-  return Boolean(Function(`"use strict"; return (${substituted});`)());
 }
 
 function stepIndex(steps: ReleaseStep[], name: string): number {
@@ -269,8 +257,169 @@ describe('release workflow supply-chain contract', () => {
 	  expect(jobs['historical-verify']?.environment).toBeUndefined();
 	  expect(jobs['prepare-candidate']?.permissions).toEqual({ contents: 'read' });
 	  expect(jobs['prepare-candidate']?.environment).toBe('stable-prepare');
-	  expect(jobs['publish-candidate']?.permissions).toEqual({ contents: 'write', 'id-token': 'write', attestations: 'write' });
+	  expect(jobs['publish-candidate']?.permissions).toEqual({ actions: 'read', contents: 'write', 'id-token': 'write', attestations: 'write' });
 	  expect(jobs['publish-candidate']?.environment).toBe('stable-publish');
+	});
+
+	it('binds candidate retrieval to the successful reviewed push run and exact artifact lifetime', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const validate=steps[stepIndex(steps,'Validate reviewed publish inputs')];
+	  const metadata=steps[stepIndex(steps,'Verify exact candidate run and artifact provenance')];
+	  const download=steps[stepIndex(steps,'Download exact reviewed stable candidate')];
+	  expect(validate?.env).toMatchObject({
+		STABLE_CANDIDATE_WORKFLOW_ID:'${{ vars.STABLE_CANDIDATE_WORKFLOW_ID }}',
+		STABLE_CANDIDATE_RUN_ATTEMPT:'${{ vars.STABLE_CANDIDATE_RUN_ATTEMPT }}',
+		STABLE_CANDIDATE_ARTIFACT_CREATED_AT:'${{ vars.STABLE_CANDIDATE_ARTIFACT_CREATED_AT }}',
+		STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT:'${{ vars.STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT }}',
+	  });
+	  const run=metadata?.run??'';
+	  for(const binding of ['/actions/runs/','repository.full_name','head_repository.full_name','.github/workflows/release.yml','workflow_id','event','push','status','completed','conclusion','success','head_sha','run_attempt','pull_requests','created_at','expires_at']) expect(run).toContain(binding);
+	  expect(download?.with).toMatchObject({'artifact-ids':'${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}','run-id':'${{ vars.STABLE_CANDIDATE_RUN_ID }}','github-token':'${{ github.token }}'});
+	});
+
+	it('executes candidate provenance validation and rejects 403, wrong run state, reruns, forks, or moved artifacts', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const step=jobSteps(jobs['publish-candidate'])[stepIndex(jobSteps(jobs['publish-candidate']),'Verify exact candidate run and artifact provenance')];
+	  const baseRun={id:123,repository:{full_name:'example/repository'},head_repository:{full_name:'example/repository'},path:'.github/workflows/release.yml',workflow_id:55,event:'push',status:'completed',conclusion:'success',head_sha:'a'.repeat(40),head_branch:'v0.4.12',run_attempt:1,pull_requests:[]};
+	  const baseArtifact={id:456,workflow_run:{id:123},name:`stable-candidate-v0.4.12-${'b'.repeat(64)}`,expired:false,digest:`sha256:${'c'.repeat(64)}`,created_at:'2026-09-01T00:00:00Z',expires_at:'2030-09-01T00:00:00Z'};
+	  const execute=(run:unknown,artifact:unknown,forbidden=false)=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{encoding:'utf8',env:{...process.env,RUN_JSON:JSON.stringify(run),ARTIFACT_JSON:JSON.stringify(artifact),GITHUB_REPOSITORY:'example/repository',GH_TOKEN:'test',STABLE_CANDIDATE_RUN_ID:'123',STABLE_CANDIDATE_WORKFLOW_ID:'55',STABLE_CANDIDATE_RUN_ATTEMPT:'1',STABLE_CANDIDATE_ARTIFACT_ID:'456',STABLE_CANDIDATE_ARTIFACT_DIGEST:'c'.repeat(64),STABLE_CANDIDATE_ARTIFACT_CREATED_AT:'2026-09-01T00:00:00Z',STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT:'2030-09-01T00:00:00Z',STABLE_CANDIDATE_SHA256:'b'.repeat(64),STABLE_CANDIDATE_COMMIT_SHA:'a'.repeat(40),RELEASE_TAG:'v0.4.12'},input:`$ErrorActionPreference='Stop'\nfunction Invoke-RestMethod { param([Parameter(Position=0)][string]$Uri,[hashtable]$Headers) if(${forbidden?'$true':'$false'}){throw '403 Forbidden'}; if($Uri -match '/actions/runs/'){return $env:RUN_JSON|ConvertFrom-Json};return $env:ARTIFACT_JSON|ConvertFrom-Json }\n${step?.run??''}`});
+	  const valid=execute(baseRun,baseArtifact);expect(valid.status,valid.stderr).toBe(0);
+	  const rejected=(result:ReturnType<typeof execute>)=>result.status!==0||/403 Forbidden|provenance mismatch|artifact metadata mismatch|artifact is expired/.test(result.stderr);
+	  const forbidden=execute(baseRun,baseArtifact,true);expect(rejected(forbidden),forbidden.stderr).toBe(true);
+	  for(const [name,mutate] of [
+		['in progress',(run:any)=>{run.status='in_progress';}],['failed',(run:any)=>{run.conclusion='failure';}],['rerun',(run:any)=>{run.run_attempt=2;}],['workflow',(run:any)=>{run.workflow_id=99;}],['fork',(run:any)=>{run.head_repository.full_name='fork/repository';}],['head',(run:any)=>{run.head_sha='0'.repeat(40);}],
+	  ] as const){const run=structuredClone(baseRun);mutate(run);const result=execute(run,baseArtifact);expect(rejected(result),`${name}: ${result.stderr}`).toBe(true);}
+	  for(const mutate of [(artifact:any)=>{artifact.workflow_run.id=999;},(artifact:any)=>{artifact.digest=`sha256:${'0'.repeat(64)}`;},(artifact:any)=>{artifact.expires_at='2029-09-01T00:00:00Z';}]){const artifact=structuredClone(baseArtifact);mutate(artifact);const result=execute(baseRun,artifact);expect(rejected(result),result.stderr).toBe(true);}
+	});
+
+	it('uses separate persistent tooling and target checkout roots that survive source cleanup', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  for(const name of ['historical-verify','prepare-candidate']){
+		const steps=jobSteps(jobs[name]);
+		const checkouts=steps.filter((step)=>step.uses?.startsWith('actions/checkout'));
+		expect(checkouts.map((step)=>step.with?.path)).toEqual(['tooling','source']);
+		expect(steps[0]?.name).toContain('Validate reviewed tooling SHA');
+		expect(semanticCommands(jobs[name]).join('\n')).toContain('RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/tooling');
+	  }
+	  const root=mkdtempSync(join(tmpdir(),'checkout-root-isolation-'));
+	  try{mkdirSync(join(root,'tooling'),{recursive:true});mkdirSync(join(root,'source'),{recursive:true});writeFileSync(join(root,'tooling','marker'),'reviewed');rmSync(join(root,'source'),{recursive:true,force:true});mkdirSync(join(root,'source'));expect(readFileSync(join(root,'tooling','marker'),'utf8')).toBe('reviewed');}finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('keeps target build and test environments free of every EVSign secret or selector', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['prepare-candidate']);
+	  const build=steps[stepIndex(steps,'Build stable candidate executable')];
+	  const sign=steps[stepIndex(steps,'Sign stable candidate executable')];
+	  for(const key of Object.keys(build?.env??{})) expect(key).not.toMatch(/^EVSIGN_/);
+	  expect(build?.run).toContain('npm run build:exe');
+	  expect(build?.run).not.toContain('sign-evsign');
+	  expect(sign?.env).toMatchObject({EVSIGN_CERTIFICATE:'${{ vars.EVSIGN_CERTIFICATE }}',EVSIGN_PUBLISHER_IDENTITY:'${{ vars.EVSIGN_PUBLISHER_IDENTITY }}',EVSIGN_KEY:'${{ secrets.EVSIGN_KEY }}',EVSIGN_PASSWORD:'${{ secrets.EVSIGN_PASSWORD }}'});
+	  expect(sign?.run).toContain('$env:EVSIGN_SCRIPT_PATH --profile stable');
+	  expect(sign?.run).not.toMatch(/npm|go\s+-C/);
+	  const root=mkdtempSync(join(tmpdir(),'candidate-env-isolation-'));try{
+		const dumper=join(root,'dump-env.mjs');writeFileSync(dumper,"process.stdout.write(JSON.stringify(Object.keys(process.env).filter((name)=>name.startsWith('EVSIGN_')).sort()))");
+		const run=(environment:Record<string,string>)=>spawnSync(process.execPath,[dumper],{encoding:'utf8',env:environment});
+		const buildDump=run(Object.fromEntries(Object.keys(build?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(buildDump.stdout)).toEqual([]);
+		const signDump=run(Object.fromEntries(Object.keys(sign?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(signDump.stdout)).toEqual(['EVSIGN_CERTIFICATE','EVSIGN_KEY','EVSIGN_PASSWORD','EVSIGN_PUBLISHER_IDENTITY']);
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('re-verifies every published asset after latest mutation and detects concurrent closure changes', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const final=steps[stepIndex(steps,'Verify final published stable closure')];
+	  const run=final?.run??'';
+	  expect(run).toContain('published-readback');
+	  expect(run).toContain('gh release download');
+	  expect(run).toContain('[string]$asset.digest');
+	  expect(run).toContain('[int64]$asset.size');
+	  expect(run).toContain('/releases/latest');
+	  expect(run).toContain('exact published asset closure changed');
+	  expect(run.indexOf('/releases/latest')).toBeGreaterThan(run.indexOf('foreach($name in $required)'));
+	  expect(run).toContain('latest asset closure');
+	});
+
+	it('executes final published closure verification and rejects post-draft removal or replacement', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;const steps=jobSteps(jobs['publish-candidate']);const step=steps[stepIndex(steps,'Verify final published stable closure')];
+	  const root=mkdtempSync(join(tmpdir(),'published-stable-closure-'));try{
+		const names=['gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','stable-release-evidence.json','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256'];mkdirSync(join(root,'candidate','sealed'),{recursive:true});
+		for(const name of names){const path=name==='gift-panel-windows-x64.exe'?join(root,'candidate','sealed',name):join(root,'candidate',name);writeFileSync(path,Buffer.from(`asset:${name}`));}
+		const assets=names.map((name)=>{const path=name==='gift-panel-windows-x64.exe'?join(root,'candidate','sealed',name):join(root,'candidate',name);const bytes=readFileSync(path);return{name,size:bytes.length,digest:`sha256:${createHash('sha256').update(bytes).digest('hex')}`};});
+		const release={id:77,tag_name:'v0.4.12',draft:false,prerelease:false,published_at:'2026-09-01T00:00:00Z',assets};const latest=structuredClone(release);
+		const execute=(candidateRelease:unknown,candidateLatest:unknown=latest)=>{rmSync(join(root,'published-readback'),{recursive:true,force:true});return spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,RELEASE_JSON:JSON.stringify(candidateRelease),LATEST_JSON:JSON.stringify(candidateLatest),RELEASE_TAG:'v0.4.12',GITHUB_REPOSITORY:'example/repository',GH_TOKEN:'test'},input:`$ErrorActionPreference='Stop'\nfunction Invoke-RestMethod { param([Parameter(Position=0)][string]$Uri,[hashtable]$Headers) if($Uri -like '*/releases/latest'){return $env:LATEST_JSON|ConvertFrom-Json};return $env:RELEASE_JSON|ConvertFrom-Json }\nfunction gh { $name=$args[$args.Count-1];$source=if($name -ceq 'gift-panel-windows-x64.exe'){'candidate/sealed/gift-panel-windows-x64.exe'}else{"candidate/$name"};Copy-Item -LiteralPath $source -Destination "published-readback/$name";$global:LASTEXITCODE=0 }\n${step?.run??''}`});};
+		const valid=execute(release);expect(valid.status,`${valid.stdout}${valid.stderr}`).toBe(0);
+		const removed=structuredClone(release);removed.assets.pop();const removedResult=execute(removed);expect(removedResult.status!==0||`${removedResult.stdout}${removedResult.stderr}`.includes('exact published asset closure changed')).toBe(true);
+		const replaced=structuredClone(release);replaced.assets[0]!.digest=`sha256:${'0'.repeat(64)}`;const replacedResult=execute(replaced);expect(replacedResult.status!==0||`${replacedResult.stdout}${replacedResult.stderr}`.includes('exact published asset closure changed')).toBe(true);
+		const latestRemoved=structuredClone(latest);latestRemoved.assets.pop();const latestResult=execute(release,latestRemoved);expect(latestResult.status!==0||`${latestResult.stdout}${latestResult.stderr}`.includes('latest asset closure'),`${latestResult.stdout}${latestResult.stderr}`).toBe(true);
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('uses a closed supported historical tag to structured signer identity map', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const classify=semanticCommands(jobs.classify).join('\n');
+	  const historical=jobSteps(jobs['historical-verify']);
+	  const identity=historical[stepIndex(historical,'Resolve exact historical signer identity')];
+	  expect(classify).toContain("v0.4.7|v0.4.9|v0.4.10");
+	  expect(classify).toContain('unsupported historical stable tag');
+	  expect(identity?.run).toContain("'v0.4.7'");
+	  expect(identity?.run).toContain('RushRush Network Technology Ltd');
+	  expect(identity?.run).toContain("'v0.4.9'");
+	  expect(identity?.run).toContain("'v0.4.10'");
+	  expect(identity?.run).toContain('NaisNet Technology Co., Ltd.');
+	  expect(semanticCommands(jobs['historical-verify']).join('\n')).toContain('--organization $env:HISTORICAL_SIGNER_ORGANIZATION');
+	});
+
+	it('restores canonical bounded changelog history merge before candidate upload', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['prepare-candidate']);
+	  const merge=steps[stepIndex(steps,'Build canonical candidate changelog')];
+	  const run=merge?.run??'';
+	  expect(run).toContain('gift-panel-changelog.json');
+	  expect(run).toContain('.github/changelog-history.json');
+	  expect(run).toContain('git show');
+	  expect(run).toContain('gh release download');
+	  expect(run).toContain('262144');
+	  expect(run).toContain('duplicate changelog version');
+	  expect(run).toContain('changelog version order');
+	});
+
+	it('executes canonical changelog merge with hosted history, seed deduplication, and descending order', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;const steps=jobSteps(jobs['prepare-candidate']);const step=steps[stepIndex(steps,'Build canonical candidate changelog')];
+	  const root=mkdtempSync(join(tmpdir(),'canonical-changelog-'));try{
+		mkdirSync(join(root,'.github'),{recursive:true});mkdirSync(join(root,'dist'));const previous=join(root,'previous.json');
+		const entry=(version:string)=>({version,date:'2026-09-01',title:`Release ${version}`,summary:`Summary ${version}`,highlights:[],visuals:[]});
+		writeFileSync(join(root,'gift-panel-changelog.json'),JSON.stringify({schemaVersion:1,releases:[entry('0.4.12')]}));
+		writeFileSync(previous,JSON.stringify({schemaVersion:1,releases:[entry('0.4.10'),entry('0.4.9')]}));
+		writeFileSync(join(root,'.github','changelog-history.json'),JSON.stringify({schemaVersion:1,releases:[entry('0.4.9'),entry('0.4.7')]}));
+		const execute=()=>{rmSync(join(root,'dist','changelog-history'),{recursive:true,force:true});return spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,PREVIOUS_PATH:previous,PREVIOUS_SIZE:String(readFileSync(previous).length),RELEASE_TAG:'v0.4.12',GITHUB_REPOSITORY:'example/repository',GH_TOKEN:'test'},input:`$ErrorActionPreference='Stop'\ntrap { Write-Error $_; exit 1 }\nfunction git { if($args[0] -eq 'tag'){'v0.4.10';$global:LASTEXITCODE=0;return};throw 'unexpected git call' }\nfunction Invoke-RestMethod { [pscustomobject]@{assets=@([pscustomobject]@{name='gift-panel-changelog.json';size=[int64]$env:PREVIOUS_SIZE})} }\nfunction gh { Copy-Item $env:PREVIOUS_PATH dist/changelog-history/gift-panel-changelog.json;$global:LASTEXITCODE=0 }\n${step?.run??''}\n`});};
+		const result=execute();
+		expect(result.status,`${result.stdout}${result.stderr}`).toBe(0);const output=join(root,'dist','canonical-gift-panel-changelog.json');expect(existsSync(output),`${result.stdout}${result.stderr}`).toBe(true);const merged=JSON.parse(readFileSync(output,'utf8'));expect(merged.releases.map((release:{version:string})=>release.version)).toEqual(['0.4.12','0.4.10','0.4.9','0.4.7']);
+		writeFileSync(join(root,'gift-panel-changelog.json'),JSON.stringify({schemaVersion:1,releases:[entry('0.4.12'),entry('0.4.12')]}));const duplicate=execute();expect(duplicate.status,`${duplicate.stdout}${duplicate.stderr}`).not.toBe(0);
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('validates extracted candidate directories before executing downloaded tools', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const extraction=steps[stepIndex(steps,'Validate extracted candidate tree')];
+	  expect(stepIndex(steps,'Validate extracted candidate tree')).toBeLessThan(stepIndex(steps,'Revalidate reviewed stable candidate'));
+	  const run=extraction?.run??'';
+	  expect(run).toContain('ReparsePoint');
+	  expect(run).toContain('unexpected candidate directory');
+	  expect(run).toContain('empty candidate directory');
+	  expect(run).toContain("@('sealed','tools')");
+	  const root=mkdtempSync(join(tmpdir(),'candidate-extraction-'));try{
+		const candidate=join(root,'candidate');mkdirSync(join(candidate,'sealed'),{recursive:true});mkdirSync(join(candidate,'tools'));
+		const hash='b'.repeat(64);const files=[`sealed/${hash}.exe`,'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256'];
+		for(const relative of files)writeFileSync(join(candidate,relative),Buffer.from(relative));
+		const execute=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,STABLE_CANDIDATE_SHA256:hash},input:`$ErrorActionPreference='Stop'\n${run}`});
+		const valid=execute();expect(valid.status,valid.stderr).toBe(0);
+		for(const file of ['artifact-inspector.exe','artifact-inspector.exe.sha256','verify-enrollment-build.mjs','verify-enrollment-build.mjs.sha256'])rmSync(join(candidate,'tools',file));
+		const empty=execute();expect(empty.status!==0||`${empty.stdout}${empty.stderr}`.includes('empty candidate directory'),`${empty.stdout}${empty.stderr}`).toBe(true);
+		for(const file of ['artifact-inspector.exe','artifact-inspector.exe.sha256','verify-enrollment-build.mjs','verify-enrollment-build.mjs.sha256'])writeFileSync(join(candidate,'tools',file),file);
+		const outside=join(root,'outside');mkdirSync(outside);let linked=false;try{symlinkSync(outside,join(candidate,'junction'),process.platform==='win32'?'junction':'dir');linked=true;}catch{/* junction creation is host-policy dependent */}if(linked){const reparse=execute();expect(reparse.status!==0||`${reparse.stdout}${reparse.stderr}`.includes('ReparsePoint'),`${reparse.stdout}${reparse.stderr}`).toBe(true);}
+	  }finally{rmSync(root,{recursive:true,force:true});}
 	});
 
 	it('prepares and reads back a content-addressed candidate without Release, KMS, or publication authority', () => {

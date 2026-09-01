@@ -24,6 +24,10 @@ EXE, sealed FFmpeg closure, sidecars, candidate evidence, and digest-pinned
 credential-free verification tools. It downloads that Actions artifact again
 and requires every file to be byte-identical. Preparation cannot create or edit
 a GitHub Release, attest Release assets, call KMS, or mutate COS/pointers.
+Reviewed tooling and target source use independent `tooling/` and `source/`
+checkout roots, so target cleanup cannot erase the tool root. Target
+npm/Go/tests/build steps receive no EVSign selector, key, password, or
+certificate variable; only the narrow reviewed signing step receives them.
 
 Task 9 then signs a strictly higher authorization policy for that already
 sealed candidate SHA-256. A separate manual **candidate publication** approval
@@ -33,12 +37,21 @@ inputs, and final authorization policy. Publication downloads that artifact;
 it never rebuilds, reruns EVSign/RFC3161, executes target code, or receives
 signer credentials. Any mismatch fails before a draft exists.
 
+The publication token has only `actions: read` plus the Release and attestation
+writes it needs. Before cross-run download, the exact successful push run must
+match repository/head repository, reviewed workflow ID/path, tag, commit, run
+attempt, completed/success state, and non-fork provenance. Artifact
+ID/name/digest/creation/expiry must bind to that run and the reviewed inputs.
+
 Publication revalidates the candidate and final-hash policy, then uses the
 retained Go helper to create `gift-panel-windows-x64.exe` as a same-file hard
 link to the content-addressed sealed EXE. The expected basename is uploaded
 directly, without GitHub CLI label rewriting. The workflow reads back the exact
 draft names/digests/bytes, rechecks the tag, publishes `latest=true`, and
 confirms `/releases/latest`.
+After publication it queries the Release again, requires the exact asset
+names/digests/sizes, downloads and byte-verifies every asset again, and only
+then accepts the matching `/releases/latest` result.
 
 The public root key ID is never operator supplied. Evidence derives it
 canonically as `sha256:<reviewed-spki-sha256>`. A separately audited provider
@@ -48,7 +61,7 @@ The stable workflow has no RushRush bridge credential, KMS signing operation,
 legacy-pointer mutation, or COS credential. Policy signing and publication are
 separate protected actions.
 
-## Existing Release repair
+## Existing Release verification
 
 An already published, complete pre-`v0.4.12` GitHub Release is detected from
 verified GitHub Release state, not from an operator bypass flag. That historical
@@ -58,6 +71,16 @@ fixed sealed FFmpeg closure where applicable. It cannot upload, edit, attest,
 rebuild, resign, or replace anything. An absent pre-`v0.4.12` Release is a hard
 failure, not permission to recreate history. Existing `v0.4.12` or later
 enrollment Releases remain immutable and require a separate audited recovery.
+Supported historical identities are closed: `v0.4.7` is exact structured
+RushRush; `v0.4.9` and `v0.4.10` are exact structured NaisNet. No other
+pre-enrollment tag inherits a signer rule.
+
+Candidate extraction rejects reparse points, symlinks/junctions, unexpected
+or empty directories, and files outside the exact closed set before downloaded
+tools execute. Candidate changelog generation restores the bounded canonical
+merge of tag-local release data, reviewed prior hosted/tag history, and
+`.github/changelog-history.json`, with strict schema, descending versions, and
+no duplicate version.
 
 ## Action-time approvals
 
