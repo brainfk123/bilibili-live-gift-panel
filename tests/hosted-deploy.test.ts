@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
+import { resolveValidatedBashBinary } from './bash-test-runtime';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const deploymentFiles = [
@@ -322,7 +323,7 @@ fi
 }
 
 function runBash(script: string, environment: NodeJS.ProcessEnv, args: string[] = []) {
-  const command = existsSync('C:\\Program Files\\Git\\bin\\bash.exe') ? 'C:\\Program Files\\Git\\bin\\bash.exe' : 'bash';
+  const command = resolveValidatedBashBinary(process.platform, { ...process.env, ...environment });
   return spawnSync(command, [bashPath(resolve(projectRoot, script)), ...args], {
     cwd: projectRoot,
     env: environment,
@@ -1784,7 +1785,7 @@ exit 4
       chmodSync(join(fake.bin, 'hosted-health-date'), 0o755);
 
       const environment: NodeJS.ProcessEnv = {
-        PATH: `${bashPath(fake.bin)}${process.env.PATH ? `:${process.env.PATH.replaceAll('\\', '/')}` : ''}`,
+        PATH: `${bashPath(fake.bin)}:/usr/bin:/bin`,
         FAKE_CALLS: bashPath(fake.calls),
         HOSTED_CURL_BIN: bashPath(join(fake.bin, 'hosted-curl')),
         HOSTED_DF_BIN: bashPath(join(fake.bin, 'hosted-df')),

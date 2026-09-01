@@ -6,3 +6,4 @@ export const WINDOWS_LEVELS: readonly WindowsLevel[];
 export function parseNameStatusZ(output: string): Change[];
 export function readGitChanges(baseSHA: string, headSHA: string, cwd?: string): Change[];
 export function classifyChanges(changes: Change[]): ScopeDecision;
+export function formatGitHubSummary(decision: ScopeDecision): string;
