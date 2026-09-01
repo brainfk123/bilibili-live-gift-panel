@@ -21,6 +21,8 @@ export const REQUIRED_COMPONENT_ASSETS = Object.freeze([
 
 const CHECKSUM_ASSET = 'SHA256SUMS.txt';
 const root = process.env.RELEASE_TARGET_ROOT ? resolve(process.env.RELEASE_TARGET_ROOT) : resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const moduleToolRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const defaultToolRoot = process.env.RELEASE_TOOL_ROOT ? resolve(process.env.RELEASE_TOOL_ROOT) : moduleToolRoot;
 
 export function buildChecksumManifest(files) {
   if (!(files instanceof Map)) throw new Error('FFmpeg component files must be a Map.');
@@ -133,9 +135,17 @@ export async function prepareComponentAssets({ projectRoot = root, outputDirecto
   return identity;
 }
 
-export async function verifyComponentAssets({ projectRoot = root, inputDirectory, expectedSigner, verifyPayload = verifyPayloadDirectory }) {
+export async function verifyComponentAssets({
+  projectRoot = root,
+  toolRoot = defaultToolRoot,
+  inputDirectory,
+  expectedSigner,
+  verifyPayload,
+  loadPolicy = loadFFmpegPolicy,
+  sourceSignatureSHA256 = FFMPEG_SOURCE_SIGNATURE_SHA256,
+}) {
   await verifyChecksumManifest(inputDirectory);
-  const policy = await loadFFmpegPolicy(projectRoot);
+  const policy = await loadPolicy(projectRoot);
   const identity = ffmpegComponentIdentity(policy, expectedSigner);
   let manifest;
   try { manifest = JSON.parse(await readFile(join(inputDirectory, 'manifest.json'), 'utf8')); }
@@ -144,7 +154,7 @@ export async function verifyComponentAssets({ projectRoot = root, inputDirectory
   verifyPinnedSourceAssets(
     await readFile(join(inputDirectory, 'ffmpeg-9.0.tar.xz')),
     await readFile(join(inputDirectory, 'ffmpeg-9.0.tar.xz.asc')),
-    { sourceSha256: policy.sourceSha256, sourceSignatureSha256: FFMPEG_SOURCE_SIGNATURE_SHA256 },
+    { sourceSha256: policy.sourceSha256, sourceSignatureSha256: sourceSignatureSHA256 },
   );
   for (const [asset, local] of [
     ['toolchain-lock.json', join(projectRoot, 'third_party', 'ffmpeg', 'toolchain-lock.json')],
@@ -156,13 +166,15 @@ export async function verifyComponentAssets({ projectRoot = root, inputDirectory
   if (!(await readFile(join(inputDirectory, 'ffmpeg-component-gate.txt'))).equals(Buffer.from(manifest.component_gate, 'utf8'))) {
     throw new Error('FFmpeg component gate asset differs from manifest.');
   }
-  await verifyPayload(inputDirectory, expectedSigner);
+  const payloadVerifier = verifyPayload ?? ((directory, signer) => verifyPayloadDirectory(directory, signer, { projectRoot, toolRoot }));
+  await payloadVerifier(inputDirectory, expectedSigner);
   return identity;
 }
 
-export async function installComponentAssets({ projectRoot = root, inputDirectory, expectedSigner }) {
-  const identity = await verifyComponentAssets({ projectRoot, inputDirectory, expectedSigner });
-  await publishPairTransactionally(
+export async function installComponentAssets(options) {
+  const { projectRoot = root, inputDirectory, publishPair = publishPairTransactionally } = options;
+  const identity = await verifyComponentAssets(options);
+  await publishPair(
     join(projectRoot, 'goserver', 'ffmpeg'),
     await readFile(join(inputDirectory, 'ffmpeg.zip')),
     await readFile(join(inputDirectory, 'manifest.json')),
@@ -170,9 +182,9 @@ export async function installComponentAssets({ projectRoot = root, inputDirector
   return identity;
 }
 
-function verifyPayloadDirectory(directory, expectedSigner) {
-  execFileSync(process.execPath, [join(root, 'scripts', 'verify-ffmpeg.mjs'), '--payload-only', '--payload-directory', directory, '--build-config', join(directory, 'ffmpeg-build-config.txt')], {
-    cwd: root,
+function verifyPayloadDirectory(directory, expectedSigner, { projectRoot, toolRoot }) {
+  execFileSync(process.execPath, [join(toolRoot, 'scripts', 'verify-ffmpeg.mjs'), '--payload-only', '--payload-directory', directory, '--build-config', join(directory, 'ffmpeg-build-config.txt')], {
+    cwd: projectRoot,
     env: { ...process.env, APP_VERSION: 'component' },
     stdio: 'inherit',
     windowsHide: true,
@@ -217,22 +229,27 @@ function stringArgument(name) {
 
 async function main() {
   const command = process.argv[2];
-  const signerManifestDirectory = command === 'verify' || command === 'install'
-    ? argument('--input')
-    : join(root, 'goserver', 'ffmpeg');
-  const signerManifest = JSON.parse(await readFile(join(signerManifestDirectory, 'manifest.json'), 'utf8'));
-  const expectedSigner = String(signerManifest.signer_subject || '');
-  if (signerManifest.authenticode === true && !expectedSigner) throw new Error('Reviewed FFmpeg component signer metadata is missing.');
+  const toolRoot = process.argv.includes('--tool-root') ? argument('--tool-root') : defaultToolRoot;
+  if (toolRoot !== moduleToolRoot) throw new Error('Reviewed FFmpeg tool root does not match the executing tool checkout.');
+  let expectedSigner = '';
+  if (command !== 'verify-metadata') {
+    const signerManifestDirectory = command === 'verify' || command === 'install'
+      ? argument('--input')
+      : join(root, 'goserver', 'ffmpeg');
+    const signerManifest = JSON.parse(await readFile(join(signerManifestDirectory, 'manifest.json'), 'utf8'));
+    expectedSigner = String(signerManifest.signer_subject || '');
+    if (signerManifest.authenticode === true && !expectedSigner) throw new Error('Reviewed FFmpeg component signer metadata is missing.');
+  }
   if (command === 'identity') {
     const identity = ffmpegComponentIdentity(await loadFFmpegPolicy(root), expectedSigner);
     process.stdout.write(`${JSON.stringify({ schema: 2, fingerprint: identity.fingerprint, tag: identity.tag })}\n`);
     return;
   }
   if (command === 'prepare') await prepareComponentAssets({ outputDirectory: argument('--output'), expectedSigner });
-  else if (command === 'verify') await verifyComponentAssets({ inputDirectory: argument('--input'), expectedSigner });
-  else if (command === 'install') await installComponentAssets({ inputDirectory: argument('--input'), expectedSigner });
+  else if (command === 'verify') await verifyComponentAssets({ toolRoot, inputDirectory: argument('--input'), expectedSigner });
+  else if (command === 'install') await installComponentAssets({ toolRoot, inputDirectory: argument('--input'), expectedSigner });
   else if (command === 'verify-metadata') await verifyGitHubReleaseMetadata(JSON.parse(await readFile(argument('--metadata'), 'utf8')), argument('--input'), stringArgument('--tag'));
-  else throw new Error('Usage: node scripts/ffmpeg-component-assets.mjs identity|prepare --output <dir>|verify|install --input <dir>|verify-metadata --metadata <json> --input <dir> --tag <tag>');
+  else throw new Error('Usage: node scripts/ffmpeg-component-assets.mjs <mode> --tool-root <reviewed-root> [mode arguments]');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

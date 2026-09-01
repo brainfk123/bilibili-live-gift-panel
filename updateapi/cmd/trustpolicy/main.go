@@ -21,6 +21,7 @@ const (
 	maxCandidateBytes            = 256 << 10
 	maxPublisherEpoch            = 99_999_999
 	maxReviewedSPKIBytes         = 4 << 10
+	maxImportedCommitBytes       = 4 << 10
 	verifyBundleSchemaVersion    = 2
 	maxVerifyBundleEnvelopeBytes = 512 << 10
 )
@@ -56,6 +57,9 @@ func run(ctx context.Context, args []string, lookup environmentLookup, factory s
 	}
 	if args[0] == "verify-bundle" {
 		return runVerifyBundle(args[1:], output, bundlefs.ReadCommittedBundle)
+	}
+	if args[0] == "import-bundle" {
+		return runImportBundle(args[1:], output)
 	}
 	if args[0] == "validate-candidate" {
 		return runValidateCandidate(args[1:], output, now)

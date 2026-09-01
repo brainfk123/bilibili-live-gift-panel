@@ -13,6 +13,7 @@ import (
 
 	"bilibili-live-gift-panel/internal/artifactinspect"
 	"bilibili-live-gift-panel/internal/certidentity"
+	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
 func main() {
@@ -45,32 +46,7 @@ func run(args []string, output io.Writer) error {
 }
 
 func runVerifyPolicy(args []string, output io.Writer) error {
-	flags := flag.NewFlagSet("verify-policy", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	rootPath := flags.String("root-spki", "", "root")
-	policyPath := flags.String("policy", "", "policy")
-	epochValue := flags.String("epoch", "", "epoch")
-	stableSHA := flags.String("stable-artifact-sha256", "", "stable sha")
-	if flags.Parse(args) != nil || flags.NArg() != 0 {
-		return errors.New("policy arguments invalid")
-	}
-	epoch, err := strconv.ParseUint(*epochValue, 10, 64)
-	if err != nil {
-		return err
-	}
-	root, err := os.ReadFile(*rootPath)
-	if err != nil {
-		return err
-	}
-	policy, err := os.ReadFile(*policyPath)
-	if err != nil {
-		return err
-	}
-	verified, err := artifactinspect.VerifyStablePolicy(root, policy, epoch, *stableSHA, time.Now().UTC())
-	if err != nil {
-		return err
-	}
-	return json.NewEncoder(output).Encode(map[string]any{"epoch": verified, "stableArtifactSha256": *stableSHA})
+	return runVerifyPolicyWithInspector(args, output, artifactinspect.InspectAuthenticodeFile, time.Now)
 }
 
 func runVerifyStatic(args []string, output io.Writer) error {
@@ -177,7 +153,9 @@ func runVerifyArtifact(args []string, output io.Writer) error {
 	flags.StringVar(&options.ExpectedRootSHA256, "root-sha256", "", "root digest")
 	flags.StringVar(&options.PolicyPath, "policy", "", "policy")
 	flags.StringVar(&options.ExpectedPolicySHA256, "policy-sha256", "", "policy digest")
-	flags.StringVar(&options.StableArtifactSHA256, "stable-artifact-sha256", "", "exact stable convergence artifact digest")
+	flags.StringVar(&options.StableArtifactPath, "stable-artifact", "", "exact stable convergence artifact")
+	flags.StringVar(&options.StableTag, "stable-tag", "", "exact stable tag")
+	stableChannel := flags.String("stable-channel", "", "exact stable channel")
 	policyEpoch := flags.String("policy-epoch", "", "policy epoch")
 	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "FFmpeg archive")
 	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "FFmpeg manifest")
@@ -189,6 +167,10 @@ func runVerifyArtifact(args []string, output io.Writer) error {
 		return errors.New("artifact policy epoch is invalid")
 	}
 	options.ExpectedPolicyEpoch = epoch
+	options.StableChannel = updatepolicy.Channel(*stableChannel)
+	if options.StableChannel != updatepolicy.ChannelStable || options.StableArtifactPath == "" || options.StableTag == "" {
+		return errors.New("stable artifact arguments are invalid")
+	}
 	options.Now = time.Now().UTC()
 	evidence, err := artifactinspect.VerifyBoundArtifact(options)
 	if err != nil {

@@ -48,7 +48,7 @@ func TestAuthorizeAtIsSingleCurrentPolicyMutationBoundary(t *testing.T) {
 	identity := certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
 	hash := strings.Repeat("a", 64)
 	policy := Verified{Epoch: 1, ExpiresAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), Rules: []PublisherRule{{ID: "naisnet-primary", Role: "primary", Country: identity.Country, Organization: identity.Organization, OrganizationID: identity.OrganizationID, AllowedChannel: ChannelStable, AllowedTags: []string{"v0.4.12"}, ManifestSHA256: hash}}}
-	base := ArtifactIdentity{Tag: "v0.4.12", Channel: ChannelStable, SHA256: hash, Certificate: identity}
+	base := ArtifactIdentity{Tag: "v0.4.12", Channel: ChannelStable, SHA256: hash, Certificate: identity, RequireManifestSHA256: true}
 	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	if err := policy.AuthorizeAt(base, now); err != nil {
 		t.Fatal(err)
@@ -62,6 +62,12 @@ func TestAuthorizeAtIsSingleCurrentPolicyMutationBoundary(t *testing.T) {
 				t.Fatal("mutation authorized")
 			}
 		})
+	}
+	unscoped := policy
+	unscoped.Rules = append([]PublisherRule(nil), policy.Rules...)
+	unscoped.Rules[0].ManifestSHA256 = ""
+	if err := unscoped.AuthorizeAt(base, now); err == nil {
+		t.Fatal("exact-manifest request matched an unscoped rule")
 	}
 }
 

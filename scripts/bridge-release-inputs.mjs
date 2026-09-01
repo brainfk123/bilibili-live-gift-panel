@@ -39,7 +39,7 @@ export function verifyBridgeReadiness(options) {
   const stableAssets = new Map();
   for (const asset of stableRelease.assets) { exactObject(asset,['name','size','digest','content_type','url']); if(stableAssets.has(asset.name))fail();stableAssets.set(asset.name,asset); }
   const stableExecutable=stableAssets.get('gift-panel-windows-x64.exe'), stableChecksum=stableAssets.get('gift-panel-windows-x64.exe.sha256');
-  if(!stableExecutable||!stableChecksum||!/^sha256:[0-9a-f]{64}$/.test(stableExecutable.digest)||stableExecutable.content_type!=='application/octet-stream'||stableChecksum.content_type!=='text/plain'||stableChecksum.size!==options.stableChecksumBytes.length||stableChecksum.digest!==`sha256:${hash(options.stableChecksumBytes)}`)fail();
+  if(!stableExecutable||!stableChecksum||!Buffer.isBuffer(options.stableArtifactBytes)||stableExecutable.size!==options.stableArtifactBytes.length||stableExecutable.digest!==`sha256:${hash(options.stableArtifactBytes)}`||stableExecutable.content_type!=='application/octet-stream'||stableChecksum.content_type!=='text/plain'||stableChecksum.size!==options.stableChecksumBytes.length||stableChecksum.digest!==`sha256:${hash(options.stableChecksumBytes)}`)fail();
   const stableArtifactSHA256=stableExecutable.digest.slice(7);
   if(options.stableChecksumBytes.toString('ascii')!==`${stableArtifactSHA256}  gift-panel-windows-x64.exe`)fail();
   if (observation.schemaVersion !== 1 || observation.stableRelease.id !== stableRelease.id || observation.stableRelease.tag !== stableRelease.tag_name || observation.stableRelease.executableSha256!==stableArtifactSHA256 ||
@@ -132,6 +132,7 @@ async function main() {
   const summary = verifyBridgeReadiness({
     now: new Date(),
     stableReleaseBytes: await readFile(argument('--stable-release')),
+    stableArtifactBytes: await readFile(argument('--stable-artifact')),
     stableChecksumBytes: await readFile(argument('--stable-checksum')),
     observationEvidenceBytes: await readFile(argument('--observation-evidence')),
     expectedObservationSHA256: argument('--observation-sha256'),

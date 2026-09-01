@@ -187,6 +187,8 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
   try {
     const dist = join(temporaryRoot, 'dist');
     mkdirSync(dist);
+    const readinessRoot = join(temporaryRoot, 'bridge-readiness');
+    mkdirSync(readinessRoot);
     const executable = Buffer.from('rushrush-signed-executable');
     const ffmpeg = Buffer.from('naisnet-signed-ffmpeg');
     const componentManifest = Buffer.from('{"version":"9.0"}');
@@ -202,7 +204,7 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
       ffmpegVersion: '9.0', ffmpegSha256: ffmpegHash, ffmpegSize: ffmpeg.length,
       ffmpegIdentity: { country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094' },
     }));
-    writeFileSync(join(dist, 'bridge-readiness.json'), JSON.stringify({
+    writeFileSync(join(readinessRoot, 'readiness.json'), JSON.stringify({
       schemaVersion: 1, stableReleaseId: 412, stablePublishedAt: '2026-08-01T00:00:00Z', stableArtifactSha256:'1'.repeat(64), observationEndedAt: '2026-08-08T00:00:00Z', observationEvidenceSha256: 'e'.repeat(64),
       policyReleaseId: 501, policyEpoch: 1, policySha256: 'c'.repeat(64), rootSpkiSha256: 'b'.repeat(64), kmsKeyId: 'kms-production-key', kmsRequestId: 'kms-request-1', trustAttestationSha256: 'f'.repeat(64),
     }));
@@ -224,6 +226,7 @@ function runBridgeEvidencePreparation(expectedFFmpegHash?: string) {
         BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: manifestHash,
         BRIDGE_FFMPEG_SHA256: expectedFFmpegHash ?? ffmpegHash,
         BRIDGE_FFMPEG_SIZE: String(ffmpeg.length),
+        BRIDGE_READINESS_ROOT: readinessRoot,
       },
       input: `$ErrorActionPreference = 'Stop'\n${evidence}\n`,
       timeout: 30_000,
@@ -398,7 +401,7 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[setup]?.id).toBe('msys2');
     expect(steps[build]?.run).toContain('${{ steps.msys2.outputs.msys2-location }}');
     expect(steps[build]?.run).toContain('npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain');
-    expect(steps[build]?.run).toContain('RELEASE_TOOLING_ROOT/scripts/verify-ffmpeg.mjs');
+    expect(steps[build]?.run).toContain('RELEASE_TOOL_ROOT/scripts/verify-ffmpeg.mjs');
     expect(steps[e2e]?.run).toContain('scripts/gift-clip-test-tools.mjs');
     expect(steps[e2e]?.run).toContain('npm run verify:gift-clip-export');
   });
@@ -428,8 +431,10 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[identity]?.run).toContain('$identity.schema -ne 2');
     expect(steps[identity]?.run).toContain('ffmpeg-component-v2-$($identity.fingerprint)');
     expect(steps[packageComponent]?.env).toBeUndefined();
-    expect(steps[install]?.run).toContain('RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(steps[install]?.run).toContain('install --input');
+    expect(steps[install]?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
+    expect(steps[install]?.run).toContain('install --tool-root');
+    expect(steps[install]?.run).toContain('--input $componentDirectory');
+    expect(steps[install]?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(steps[install]?.run).toContain('verify-metadata');
     expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');
     expect(steps[downloadPublished]?.run).toContain('ffmpeg-component-release.json');
@@ -440,6 +445,10 @@ describe('release workflow supply-chain contract', () => {
     expect(steps[publish]?.run).toContain('--latest=false');
     expect(steps[publish]?.run).toContain('Another publisher created the FFmpeg component');
     expect(steps[publish]?.run).toContain('Invoke-RestMethod');
+
+    for (const step of steps.filter((candidate) => candidate.run?.includes('ffmpeg-component-assets.mjs'))) {
+      expect(step.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
+    }
   });
 
   it('publishes a separately downloadable signed FFmpeg from v0.4.10 without changing the updater manifest', () => {
@@ -891,7 +900,7 @@ describe('publisher rotation workflow contract', () => {
 describe('exact RushRush bridge release workflow contract', () => {
   it('uses reviewed prebuilt security tools and bounded policy downloads',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const tools=stepIndex(steps,'Build reviewed bridge security tools');const target=stepIndex(steps,'Check out exact bridge tag');const trust=stepIndex(steps,'Fetch immutable production trust binding');expect(tools).toBeLessThan(target);expect(steps[tools]?.run).toContain('bounded-github-asset.mjs');expect(steps[trust]?.run).toContain('BOUNDED_GITHUB_ASSET_SCRIPT_PATH');expect(steps[trust]?.run).not.toContain('gh release download');expect(steps[trust]?.run).toContain('verify-bundle');});
 
-  it('isolates the exact Task9 bundle under a private parent while allowing readiness siblings',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const trust=steps[stepIndex(steps,'Fetch immutable production trust binding')]?.run??'';expect(trust).toContain('private-bundle/bundle');expect(trust).toContain('icacls');expect(trust).toContain("@('audit.json','commit.json','policy.json')");expect(trust).toContain('Unexpected private bundle entry');expect(trust).toContain('--policy dist/bridge-readiness/private-bundle/bundle/policy.json');expect(trust).toContain('--audit dist/bridge-readiness/private-bundle/bundle/audit.json');expect(trust).not.toContain('--policy dist/bridge-readiness/policy.json');});
+  it('imports the exact immutable Task9 bundle before verification without pre-creating or weakening its DACL',()=>{const steps=jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-release']);const trust=steps[stepIndex(steps,'Fetch immutable production trust binding')]?.run??'';const imported=trust.indexOf(' import-bundle ');const verified=trust.indexOf(' verify-bundle ');expect(imported).toBeGreaterThanOrEqual(0);expect(verified).toBeGreaterThan(imported);expect(trust).toContain('$bundleParent = "$env:BRIDGE_READINESS_ROOT/private-bundle"');expect(trust).toContain('--commit-source "$downloadDirectory/commit.json"');expect(trust).toContain('--policy "$bundleDirectory/policy.json"');expect(trust).toContain('--audit "$bundleDirectory/audit.json"');expect(trust).not.toMatch(/New-Item[^\n]+private-bundle|icacls/);});
   it('is manual, fixed to v0.4.11, isolated, and minimally permissioned', () => {
     const workflow = bridgeReleaseWorkflow();
     expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
@@ -989,15 +998,36 @@ describe('exact RushRush bridge release workflow contract', () => {
     expect(readiness).toBeLessThan(build);
     expect(steps[stable]?.run).toContain('/releases/tags/v0.4.12');
     expect(steps[stable]?.run).toContain('stable-release.json');
+    expect(steps[stable]?.run).toContain('--max-bytes 134217728');
+    expect(steps[stable]?.run).toContain('--output "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"');
     expect(steps[trust]?.run).toContain('publisher-policy-epoch-00000001');
     expect(steps[trust]?.run).toContain('BOUNDED_GITHUB_ASSET_SCRIPT_PATH');
     expect(steps[trust]?.run).toContain('verify-bundle');
     expect(steps[readiness]?.run).toContain('node $env:BRIDGE_READINESS_SCRIPT_PATH verify');
     expect(steps[readiness]?.run).toContain('--observation-evidence');
     expect(steps[readiness]?.run).toContain('--trust-attestation');
-    expect(steps[readiness]?.run).toContain('bridge-readiness.json');
+    expect(steps[readiness]?.run).toContain('--stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"');
+    expect(steps[readiness]?.run).toContain('--verified-bundle "$env:BRIDGE_READINESS_ROOT/verified-bundle.json"');
+    expect(steps[readiness]?.run).toContain('stableIdentity.organization');
+    expect(steps[readiness]?.run).toContain('$env:BRIDGE_READINESS_ROOT/readiness.json');
     expect(bridgeReleaseWorkflow().source).not.toContain('BRIDGE_STABLE_PUBLISHED_AT');
     expect(bridgeReleaseWorkflow().source).not.toContain('BRIDGE_STABLE_OBSERVATION_APPROVED_AT');
+  });
+
+  it('keeps the verified private readiness closure outside Vite-cleared dist through final inspection', () => {
+    const workflow = bridgeReleaseWorkflow();
+    const steps = jobSteps(workflow.jobs?.['bridge-release']);
+    const tools = steps[stepIndex(steps, 'Build reviewed bridge security tools')];
+    const readiness = stepIndex(steps, 'Verify reviewed bridge readiness');
+    const buildFrontend = stepIndex(steps, 'Build frontend');
+    const finalInspection = stepIndex(steps, 'Inspect final bound bridge artifact');
+    expect(readiness).toBeLessThan(buildFrontend);
+    expect(buildFrontend).toBeLessThan(finalInspection);
+    expect(tools?.run).toContain('BRIDGE_READINESS_ROOT=$env:RUNNER_TEMP/bridge-readiness');
+    expect(workflow.source).not.toContain('dist/bridge-readiness');
+    for (const name of ['Fetch immutable v0.4.12 observation binding', 'Fetch immutable production trust binding', 'Verify reviewed bridge readiness', 'Inspect final bound bridge artifact']) {
+      expect(steps[stepIndex(steps, name)]?.run).toContain('$env:BRIDGE_READINESS_ROOT');
+    }
   });
 
   it('uses the closed bridge signer and structured RushRush outer identity only', () => {
@@ -1029,12 +1059,15 @@ describe('exact RushRush bridge release workflow contract', () => {
     const inspect = steps[stepIndex(steps, 'Resolve fixed signed FFmpeg component')];
     const verifyBefore = steps[stepIndex(steps, 'Verify NaisNet FFmpeg component before packaging')];
     const verifyAfter = steps[stepIndex(steps, 'Verify NaisNet FFmpeg after packaging')];
-    expect(inspect?.run).toContain('RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(inspect?.run).toContain('identity | ConvertFrom-Json');
+    expect(inspect?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
+    expect(inspect?.run).toContain('identity --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json');
+    expect(inspect?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(inspect?.run).toContain('FFMPEG_COMPONENT_EXISTS');
-    expect(verifyBefore?.run).toContain('RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs');
-    expect(verifyBefore?.run).toContain('verify-metadata --metadata');
-    expect(verifyBefore?.run).toContain('verify --input');
+    expect(verifyBefore?.run).toContain('RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs');
+    expect(verifyBefore?.run).toContain('verify-metadata --tool-root');
+    expect(verifyBefore?.run).toContain('--metadata dist/bridge-ffmpeg-component-release.json');
+    expect(verifyBefore?.run).toContain('verify --tool-root');
+    expect(verifyBefore?.run).toContain('--tool-root $env:RELEASE_TOOL_ROOT');
     expect(verifyBefore?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH authenticode');
     expect(verifyBefore?.run).toContain('--organization-id 91210103MA7CJ3C094');
     expect(verifyAfter?.run).toContain('$componentManifest.sha256');
@@ -1054,9 +1087,12 @@ describe('exact RushRush bridge release workflow contract', () => {
     expect(steps[sign]?.run).toContain('gift-panel-windows-x64.unsigned.exe');
     expect(steps[sign]?.run).not.toContain('Get-AuthenticodeSignature');
     expect(steps[inspect]?.run).toContain('$env:AUTHENTICODE_INSPECTOR_PATH verify-artifact');
-    for (const binding of ['--unsigned', '--signed', '--version', '--tag', '--commit', '--root-spki', '--root-sha256', '--policy', '--policy-sha256', '--policy-epoch', '--ffmpeg-archive', '--ffmpeg-manifest']) {
+    for (const binding of ['--unsigned', '--signed', '--version', '--tag', '--commit', '--root-spki', '--root-sha256', '--policy', '--policy-sha256', '--policy-epoch', '--stable-artifact', '--stable-tag', '--stable-channel', '--ffmpeg-archive', '--ffmpeg-manifest']) {
       expect(steps[inspect]?.run).toContain(binding);
     }
+    expect(steps[inspect]?.run).toContain('--policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json"');
+    expect(steps[inspect]?.run).toContain('--stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"');
+    expect(steps[inspect]?.run).not.toContain('dist/bridge-bootstrap-policy.json');
     expect(steps[inspect]?.run).toContain('bridge-artifact-inspection.json');
   });
 

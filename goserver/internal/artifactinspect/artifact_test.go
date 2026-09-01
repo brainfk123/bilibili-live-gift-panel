@@ -112,6 +112,55 @@ func TestVerifyStaticArtifactBindsStableOuterAndRejectsArbitrarySignerOutputByte
 	}
 }
 
+func TestVerifyStablePolicyUsesActualSignerAndTheSharedAuthorizationMatcher(t *testing.T) {
+	hash := strings.Repeat("1", 64)
+	root, policy := scopedPolicyFixture(t, hash, true)
+	actual := updatepolicy.ArtifactIdentity{
+		Tag: "v0.4.12", Channel: updatepolicy.ChannelStable, SHA256: hash,
+		Certificate: certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+	}
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if epoch, err := VerifyStablePolicy(root, policy, 1, actual, now); err != nil || epoch != 1 {
+		t.Fatalf("actual stable artifact was not authorized: epoch=%d error=%v", epoch, err)
+	}
+	mutations := map[string]func(*updatepolicy.ArtifactIdentity){
+		"organization": func(value *updatepolicy.ArtifactIdentity) { value.Certificate.Organization = "Wrong Organization" },
+		"hash":         func(value *updatepolicy.ArtifactIdentity) { value.SHA256 = strings.Repeat("2", 64) },
+		"channel":      func(value *updatepolicy.ArtifactIdentity) { value.Channel = updatepolicy.ChannelLegacyRushRush },
+		"tag":          func(value *updatepolicy.ArtifactIdentity) { value.Tag = "v0.4.13" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			candidate := actual
+			mutate(&candidate)
+			if _, err := VerifyStablePolicy(root, policy, 1, candidate, now); err == nil {
+				t.Fatal("mutated actual artifact was authorized")
+			}
+		})
+	}
+}
+
+func TestVerifyStableArtifactPolicyRejectsMutationDuringAuthenticodeInspection(t *testing.T) {
+	stable := []byte("actual immutable stable artifact")
+	hash := sha256Hex(stable)
+	root, policy := scopedPolicyFixture(t, hash, true)
+	artifactPath := writeFixture(t, t.TempDir(), "stable.exe", stable)
+	identity := certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
+	_, err := VerifyStableArtifactPolicy(StablePolicyOptions{
+		RootDER: root, PolicyBytes: policy, ExpectedEpoch: 1, ArtifactPath: artifactPath,
+		Tag: "v0.4.12", Channel: updatepolicy.ChannelStable, Now: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		InspectAuthenticode: func(path string) (certidentity.Identity, error) {
+			if err := os.WriteFile(path, []byte("substituted during inspection"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return identity, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("stable artifact mutation during Authenticode inspection was accepted")
+	}
+}
+
 type boundArtifactTestFixture struct {
 	root    string
 	options VerifyArtifactOptions
@@ -124,7 +173,8 @@ func boundArtifactFixture(t testing.TB) boundArtifactTestFixture {
 func boundArtifactFixtureWithScope(t testing.TB, scoped bool) boundArtifactTestFixture {
 	t.Helper()
 	root := t.TempDir()
-	stableHash := strings.Repeat("1", 64)
+	stableArtifact := []byte("actual immutable stable artifact fixture")
+	stableHash := sha256Hex(stableArtifact)
 	rootSPKI, policy := scopedPolicyFixture(t, stableHash, scoped)
 	ffmpeg := []byte("synthetic-naisnet-ffmpeg")
 	archive, manifest := testFFmpegArchive(t, ffmpeg)
@@ -149,7 +199,9 @@ func boundArtifactFixtureWithScope(t testing.TB, scoped bool) boundArtifactTestF
 		PolicyPath:           writeFixture(t, root, "policy.json", policy),
 		ExpectedPolicySHA256: sha256Hex(policy),
 		ExpectedPolicyEpoch:  1,
-		StableArtifactSHA256: strings.Repeat("1", 64),
+		StableArtifactPath:   writeFixture(t, root, "stable.exe", stableArtifact),
+		StableTag:            "v0.4.12",
+		StableChannel:        updatepolicy.ChannelStable,
 		FFmpegArchivePath:    writeFixture(t, root, "ffmpeg.zip", archive),
 		FFmpegManifestPath:   writeFixture(t, root, "manifest.json", manifest),
 		Now:                  time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),

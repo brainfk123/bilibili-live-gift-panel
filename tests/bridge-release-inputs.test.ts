@@ -1,5 +1,9 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { verifyBridgeReadiness } from '../scripts/bridge-release-inputs.mjs';
 
@@ -15,7 +19,8 @@ function readinessFixture(manifestScoped = true) {
       id: 'naisnet-primary', role: 'primary', country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094', allowedChannel: 'stable', allowedTags: ['v0.4.12'],
     }],
   };
-  const stableArtifactSHA256 = 'a'.repeat(64);
+  const stableArtifactBytes = Buffer.from('actual immutable v0.4.12 executable fixture');
+  const stableArtifactSHA256 = sha256(stableArtifactBytes);
   if (manifestScoped) Object.assign(signed.publishers[0], { manifestSha256: stableArtifactSHA256 });
   const signedBytes = Buffer.from(JSON.stringify(signed));
   const signature = sign('sha256', signedBytes, privateKey).toString('base64');
@@ -24,7 +29,7 @@ function readinessFixture(manifestScoped = true) {
   const commitBytes = Buffer.from(JSON.stringify({ schemaVersion:1, policy:{name:'policy.json',length:policyBytes.length,sha256:sha256(policyBytes)}, audit:{name:'audit.json',length:auditBytes.length,sha256:sha256(auditBytes)} }));
   const checksumBytes = Buffer.from(`${stableArtifactSHA256}  gift-panel-windows-x64.exe`);
   const stableRelease = { id: 412, tag_name: 'v0.4.12', draft: false, prerelease: false, published_at: '2026-08-01T00:00:00Z', assets: [
-    { name:'gift-panel-windows-x64.exe',size:1234,digest:`sha256:${stableArtifactSHA256}`,content_type:'application/octet-stream',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/4101' },
+    { name:'gift-panel-windows-x64.exe',size:stableArtifactBytes.length,digest:`sha256:${stableArtifactSHA256}`,content_type:'application/octet-stream',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/4101' },
     { name:'gift-panel-windows-x64.exe.sha256',size:checksumBytes.length,digest:`sha256:${sha256(checksumBytes)}`,content_type:'text/plain',url:'https://api.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/4102' },
   ] };
   const observation = {
@@ -58,12 +63,12 @@ function readinessFixture(manifestScoped = true) {
   const verifiedBundleBytes=Buffer.from(JSON.stringify({schemaVersion:2,verification:{epoch:1,expectedPreviousEpoch:0,spkiSha256:sha256(rootSPKI)},commit:JSON.parse(commitBytes.toString()),policy:{name:'policy.json',length:policyBytes.length,sha256:sha256(policyBytes),bytesBase64:policyBytes.toString('base64')},audit:{name:'audit.json',length:auditBytes.length,sha256:sha256(auditBytes),bytesBase64:auditBytes.toString('base64')}}));
   return {
     now: new Date('2026-08-08T02:00:00Z'),
-    stableReleaseBytes: Buffer.from(JSON.stringify(stableRelease)),
+    stableReleaseBytes: Buffer.from(JSON.stringify(stableRelease)), stableArtifactBytes,
     stableChecksumBytes: checksumBytes,
     observationEvidenceBytes: observationBytes,
     expectedObservationSHA256: sha256(observationBytes),
     rootSPKI: Buffer.from(rootSPKI), policyBytes, auditBytes,
-    verifiedBundleBytes,
+    verifiedBundleBytes, commitBytes,
     policyReleaseBytes: Buffer.from(JSON.stringify(policyRelease)),
     trustAttestationBytes: attestationBytes,
     expectedTrustAttestationSHA256: sha256(attestationBytes),
@@ -79,7 +84,7 @@ describe('bridge readiness reviewed evidence', () => {
       policyReleaseId: 501,
       policyEpoch: 1,
       kmsKeyId: 'kms-production-key',
-      stableArtifactSha256: 'a'.repeat(64),
+      stableArtifactSha256: sha256(Buffer.from('actual immutable v0.4.12 executable fixture')),
     });
   });
 
@@ -92,6 +97,7 @@ describe('bridge readiness reviewed evidence', () => {
     }],
     ['current time before seven days', (fixture: ReturnType<typeof readinessFixture>) => { fixture.now = new Date('2026-08-07T23:59:59Z'); }],
     ['changed policy bytes', (fixture: ReturnType<typeof readinessFixture>) => { fixture.policyBytes = Buffer.from('changed-policy'); }],
+    ['changed stable executable bytes', (fixture: ReturnType<typeof readinessFixture>) => { fixture.stableArtifactBytes = Buffer.from('substituted stable executable'); }],
     ['changed KMS audit', (fixture: ReturnType<typeof readinessFixture>) => { fixture.auditBytes = Buffer.from('changed-audit'); }],
     ['different immutable policy Release', (fixture: ReturnType<typeof readinessFixture>) => {
       const release = JSON.parse(fixture.policyReleaseBytes.toString()); release.id = 777; fixture.policyReleaseBytes = Buffer.from(JSON.stringify(release));
@@ -109,5 +115,49 @@ describe('bridge readiness reviewed evidence', () => {
     fixture.rootSPKI = readFileSync(new URL('../goserver/testdata/update-trust/root-epoch-1-spki.der', import.meta.url));
     fixture.policyBytes = readFileSync(new URL('../goserver/testdata/update-trust/policy-epoch-1.json', import.meta.url));
     expect(() => verifyBridgeReadiness(fixture)).toThrow(/test fixture/);
+  });
+
+  it('executes the workflow filesystem layout with the exact private bundle paths', () => {
+    const fixture = readinessFixture();
+    const root = mkdtempSync(join(tmpdir(), 'bridge-readiness-layout-'));
+    try {
+      const readiness = join(root, 'bridge-readiness');
+      const bundle = join(readiness, 'private-bundle', 'bundle');
+      mkdirSync(bundle, { recursive: true });
+      const writes = new Map<string, Buffer>([
+        [join(readiness, 'stable-release.json'), fixture.stableReleaseBytes],
+        [join(readiness, 'stable-artifact.exe'), fixture.stableArtifactBytes],
+        [join(readiness, 'stable-checksum.txt'), fixture.stableChecksumBytes],
+        [join(readiness, 'observation-evidence.json'), fixture.observationEvidenceBytes],
+        [join(readiness, 'root-spki.der'), fixture.rootSPKI],
+        [join(bundle, 'policy.json'), fixture.policyBytes],
+        [join(bundle, 'audit.json'), fixture.auditBytes],
+        [join(bundle, 'commit.json'), fixture.commitBytes],
+        [join(readiness, 'verified-bundle.json'), fixture.verifiedBundleBytes],
+        [join(readiness, 'policy-release.json'), fixture.policyReleaseBytes],
+        [join(readiness, 'trust-attestation.json'), fixture.trustAttestationBytes],
+      ]);
+      for (const [path, bytes] of writes) writeFileSync(path, bytes);
+      const result = spawnSync(process.execPath, [
+        fileURLToPath(new URL('../scripts/bridge-release-inputs.mjs', import.meta.url)),
+        'verify',
+        '--stable-release', join(readiness, 'stable-release.json'),
+        '--stable-artifact', join(readiness, 'stable-artifact.exe'),
+        '--stable-checksum', join(readiness, 'stable-checksum.txt'),
+        '--observation-evidence', join(readiness, 'observation-evidence.json'),
+        '--observation-sha256', fixture.expectedObservationSHA256,
+        '--root-spki', join(readiness, 'root-spki.der'),
+        '--policy', join(bundle, 'policy.json'),
+        '--audit', join(bundle, 'audit.json'),
+        '--verified-bundle', join(readiness, 'verified-bundle.json'),
+        '--policy-release', join(readiness, 'policy-release.json'),
+        '--trust-attestation', join(readiness, 'trust-attestation.json'),
+        '--trust-attestation-sha256', fixture.expectedTrustAttestationSHA256,
+      ], { cwd: root, encoding: 'utf8' });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ stableArtifactSha256: sha256(fixture.stableArtifactBytes) });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

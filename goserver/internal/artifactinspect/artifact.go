@@ -31,7 +31,8 @@ type VerifyArtifactOptions struct {
 	RootSPKIPath, ExpectedRootSHA256      string
 	PolicyPath, ExpectedPolicySHA256      string
 	ExpectedPolicyEpoch                   uint64
-	StableArtifactSHA256                  string
+	StableArtifactPath, StableTag         string
+	StableChannel                         updatepolicy.Channel
 	FFmpegArchivePath, FFmpegManifestPath string
 	Now                                   time.Time
 	InspectAuthenticode                   func(string) (certidentity.Identity, error)
@@ -58,6 +59,24 @@ type VerifyStaticOptions struct {
 	ExpectedIdentity                      certidentity.Identity
 	FFmpegArchivePath, FFmpegManifestPath string
 	InspectAuthenticode                   func(string) (certidentity.Identity, error)
+}
+
+type StablePolicyOptions struct {
+	RootDER, PolicyBytes []byte
+	ExpectedEpoch        uint64
+	ArtifactPath, Tag    string
+	Channel              updatepolicy.Channel
+	Now                  time.Time
+	InspectAuthenticode  func(string) (certidentity.Identity, error)
+}
+
+type StablePolicyEvidence struct {
+	PolicyEpoch          uint64                `json:"policyEpoch"`
+	PolicySHA256         string                `json:"policySha256"`
+	StableTag            string                `json:"stableTag"`
+	StableChannel        updatepolicy.Channel  `json:"stableChannel"`
+	StableArtifactSHA256 string                `json:"stableArtifactSha256"`
+	StableIdentity       certidentity.Identity `json:"stableIdentity"`
 }
 
 func VerifyStaticArtifact(options VerifyStaticOptions) (ArtifactEvidence, error) {
@@ -167,7 +186,15 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if rootCoveredErr != nil || policyCoveredErr != nil || !rootCovered || !policyCovered {
 		return ArtifactEvidence{}, errors.New("signed artifact embedded trust bytes do not match reviewed inputs")
 	}
-	policyEpoch, err := VerifyStablePolicy(rootDER, policy, options.ExpectedPolicyEpoch, options.StableArtifactSHA256, options.Now)
+	inspect := options.InspectAuthenticode
+	if inspect == nil {
+		inspect = InspectAuthenticodeFile
+	}
+	stableEvidence, err := VerifyStableArtifactPolicy(StablePolicyOptions{
+		RootDER: rootDER, PolicyBytes: policy, ExpectedEpoch: options.ExpectedPolicyEpoch,
+		ArtifactPath: options.StableArtifactPath, Tag: options.StableTag, Channel: options.StableChannel,
+		Now: options.Now, InspectAuthenticode: inspect,
+	})
 	if err != nil {
 		return ArtifactEvidence{}, err
 	}
@@ -199,10 +226,6 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 		return ArtifactEvidence{}, errors.New("reviewed FFmpeg archive does not match manifest")
 	}
 
-	inspect := options.InspectAuthenticode
-	if inspect == nil {
-		inspect = InspectAuthenticodeFile
-	}
 	outerIdentity, err := inspect(options.SignedPath)
 	if err != nil || outerIdentity != rushRushIdentity {
 		return ArtifactEvidence{}, errors.New("signed outer Authenticode identity is invalid")
@@ -225,10 +248,64 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 		Version: options.Version, Tag: options.Tag, Commit: options.Commit,
 		PEContentSHA256: signedDigest,
 		RootSPKISHA256:  options.ExpectedRootSHA256,
-		PolicySHA256:    options.ExpectedPolicySHA256, PolicyEpoch: policyEpoch,
+		PolicySHA256:    options.ExpectedPolicySHA256, PolicyEpoch: stableEvidence.PolicyEpoch,
 		OuterIdentity: outerIdentity,
 		FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: ffmpegIdentity,
 	}, nil
+}
+
+func VerifyStableArtifactPolicy(options StablePolicyOptions) (StablePolicyEvidence, error) {
+	stableSHA256, err := hashBoundedRegularFile(options.ArtifactPath, 128<<20)
+	if err != nil {
+		return StablePolicyEvidence{}, errors.New("stable convergence artifact is invalid")
+	}
+	inspect := options.InspectAuthenticode
+	if inspect == nil {
+		inspect = InspectAuthenticodeFile
+	}
+	stableIdentity, err := inspect(options.ArtifactPath)
+	if err != nil {
+		return StablePolicyEvidence{}, errors.New("stable convergence Authenticode is invalid")
+	}
+	stableSHA256AfterInspection, err := hashBoundedRegularFile(options.ArtifactPath, 128<<20)
+	if err != nil || stableSHA256AfterInspection != stableSHA256 {
+		return StablePolicyEvidence{}, errors.New("stable convergence artifact changed during Authenticode inspection")
+	}
+	epoch, err := VerifyStablePolicy(options.RootDER, options.PolicyBytes, options.ExpectedEpoch, updatepolicy.ArtifactIdentity{
+		Tag: options.Tag, Channel: options.Channel, SHA256: stableSHA256, Certificate: stableIdentity,
+	}, options.Now)
+	if err != nil {
+		return StablePolicyEvidence{}, err
+	}
+	return StablePolicyEvidence{
+		PolicyEpoch: epoch, PolicySHA256: sha256HexBytes(options.PolicyBytes), StableTag: options.Tag,
+		StableChannel: options.Channel, StableArtifactSHA256: stableSHA256, StableIdentity: stableIdentity,
+	}, nil
+}
+
+func hashBoundedRegularFile(path string, maximum int64) (string, error) {
+	if maximum <= 0 {
+		return "", errors.New("artifact size policy is invalid")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maximum {
+		return "", errors.New("artifact is unavailable")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", errors.New("artifact is unavailable")
+	}
+	hasher := sha256.New()
+	written, copyErr := io.Copy(hasher, io.LimitReader(file, maximum+1))
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil || written != info.Size() || written > maximum {
+		return "", errors.New("artifact read is invalid")
+	}
+	final, err := os.Lstat(path)
+	if err != nil || final.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, final) {
+		return "", errors.New("artifact changed during inspection")
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func extractSingleFFmpeg(archive []byte, expectedSize int64) ([]byte, error) {
@@ -252,7 +329,7 @@ func extractSingleFFmpeg(archive []byte, expectedSize int64) ([]byte, error) {
 	return contents, nil
 }
 
-func VerifyStablePolicy(rootDER, policyBytes []byte, expectedEpoch uint64, stableSHA256 string, now time.Time) (uint64, error) {
+func VerifyStablePolicy(rootDER, policyBytes []byte, expectedEpoch uint64, stable updatepolicy.ArtifactIdentity, now time.Time) (uint64, error) {
 	parsedRoot, err := x509.ParsePKIXPublicKey(rootDER)
 	root, ok := parsedRoot.(*ecdsa.PublicKey)
 	if err != nil || !ok {
@@ -262,7 +339,8 @@ func VerifyStablePolicy(rootDER, policyBytes []byte, expectedEpoch uint64, stabl
 	if err != nil || verified.Epoch != expectedEpoch {
 		return 0, errors.New("reviewed trust policy epoch is invalid")
 	}
-	if err := verified.AuthorizeExactManifest(updatepolicy.ArtifactIdentity{Tag: "v0.4.12", Channel: updatepolicy.ChannelStable, SHA256: stableSHA256, Certificate: naisNetIdentity}); err != nil {
+	stable.RequireManifestSHA256 = true
+	if err := verified.AuthorizeAt(stable, now); err != nil {
 		return 0, errors.New("reviewed trust policy manifest authorization is invalid")
 	}
 	return verified.Epoch, nil

@@ -27,10 +27,11 @@ const (
 )
 
 type ArtifactIdentity struct {
-	Tag         string
-	Channel     Channel
-	SHA256      string
-	Certificate certidentity.Identity
+	Tag                   string
+	Channel               Channel
+	SHA256                string
+	Certificate           certidentity.Identity
+	RequireManifestSHA256 bool
 }
 type Verified struct {
 	Epoch     uint64
@@ -128,31 +129,18 @@ func (p Verified) AuthorizeAt(input ArtifactIdentity, at time.Time) error {
 		return failure("publisher_not_authorized")
 	}
 	inputHash := strings.ToLower(strings.TrimSpace(input.SHA256))
+	if input.RequireManifestSHA256 && (!sha256Hex.MatchString(input.SHA256) || inputHash != input.SHA256) {
+		return failure("publisher_not_authorized")
+	}
 	certificate := normalize(input.Certificate)
 	for _, rule := range p.Rules {
 		if input.Channel != rule.AllowedChannel || !allows(rule.AllowedTags, input.Tag) || certificate.Country != rule.Country || certificate.Organization != rule.Organization || certificate.OrganizationID != rule.OrganizationID {
 			continue
 		}
-		if rule.ManifestSHA256 != "" && inputHash != rule.ManifestSHA256 {
+		if (input.RequireManifestSHA256 && rule.ManifestSHA256 == "") || (rule.ManifestSHA256 != "" && inputHash != rule.ManifestSHA256) {
 			continue
 		}
 		return nil
-	}
-	return failure("publisher_not_authorized")
-}
-
-func (p Verified) AuthorizeExactManifest(input ArtifactIdentity) error {
-	if !sha256Hex.MatchString(input.SHA256) {
-		return failure("publisher_not_authorized")
-	}
-	if err := p.Authorize(input); err != nil {
-		return err
-	}
-	certificate := normalize(input.Certificate)
-	for _, rule := range p.Rules {
-		if rule.ManifestSHA256 == input.SHA256 && input.Channel == rule.AllowedChannel && allows(rule.AllowedTags, input.Tag) && certificate.Country == rule.Country && certificate.Organization == rule.Organization && certificate.OrganizationID == rule.OrganizationID {
-			return nil
-		}
 	}
 	return failure("publisher_not_authorized")
 }

@@ -1,6 +1,7 @@
 export interface BridgeReadinessOptions {
   now: Date;
   stableReleaseBytes: Buffer;
+  stableArtifactBytes: Buffer;
   stableChecksumBytes: Buffer;
   observationEvidenceBytes: Buffer;
   expectedObservationSHA256: string;

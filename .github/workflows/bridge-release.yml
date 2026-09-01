@@ -67,8 +67,9 @@ jobs:
           "BRIDGE_READINESS_SCRIPT_PATH=$env:RUNNER_TEMP/bridge-release-inputs.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BOUNDED_GITHUB_ASSET_SCRIPT_PATH=$env:RUNNER_TEMP/bounded-github-asset.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TRUSTPOLICY_INSPECTOR_PATH=$env:RUNNER_TEMP/trustpolicy.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TOOLING_ROOT=$env:RUNNER_TEMP/release-tools" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOL_ROOT=$env:RUNNER_TEMP/release-tools" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BRIDGE_READINESS_ROOT=$env:RUNNER_TEMP/bridge-readiness" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Check out exact bridge tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -204,7 +205,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRIDGE_OBSERVATION_EVIDENCE_B64: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_B64 }}
         run: |
-          New-Item -ItemType Directory -Force -Path dist/bridge-readiness | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:BRIDGE_READINESS_ROOT | Out-Null
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
           try {
             $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/v0.4.12" -Headers $headers
@@ -215,15 +216,21 @@ jobs:
           $stableAssets = @($release.assets | Where-Object { $_.name -in @('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256') })
           if ($stableAssets.Count -ne 2) { throw 'Immutable v0.4.12 security asset metadata is incomplete.' }
           foreach ($asset in $stableAssets) {
-            if ([int64]$asset.size -le 0 -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.content_type -notin @('application/octet-stream','text/plain') -or [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') { throw 'Immutable v0.4.12 security asset metadata is invalid.' }
+            if ([int64]$asset.size -le 0 -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') { throw 'Immutable v0.4.12 security asset metadata is invalid.' }
           }
+          $executableAsset = @($stableAssets | Where-Object { $_.name -ceq 'gift-panel-windows-x64.exe' })[0]
           $checksumAsset = @($stableAssets | Where-Object { $_.name -ceq 'gift-panel-windows-x64.exe.sha256' })[0]
-          node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $checksumAsset.url --size $checksumAsset.size --sha256 ([string]$checksumAsset.digest).Substring(7) --content-type text/plain --max-bytes 16384 --output dist/bridge-readiness/stable-checksum.txt
+          if ([int64]$executableAsset.size -gt 134217728 -or [string]$executableAsset.content_type -cne 'application/octet-stream' -or [int64]$checksumAsset.size -gt 16384 -or [string]$checksumAsset.content_type -cne 'text/plain') {
+            throw 'Immutable v0.4.12 security asset size or media type is invalid.'
+          }
+          node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $executableAsset.url --size $executableAsset.size --sha256 ([string]$executableAsset.digest).Substring(7) --content-type application/octet-stream --max-bytes 134217728 --output "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Bounded v0.4.12 executable download failed.' }
+          node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $checksumAsset.url --size $checksumAsset.size --sha256 ([string]$checksumAsset.digest).Substring(7) --content-type text/plain --max-bytes 16384 --output "$env:BRIDGE_READINESS_ROOT/stable-checksum.txt"
           if ($LASTEXITCODE -ne 0) { throw 'Bounded v0.4.12 checksum download failed.' }
           $selectedStableAssets = foreach ($asset in $stableAssets) { [ordered]@{ name=[string]$asset.name;size=[int64]$asset.size;digest=[string]$asset.digest;content_type=[string]$asset.content_type;url=[string]$asset.url } }
           [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at; assets=@($selectedStableAssets) } |
-            ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/stable-release.json
-          [IO.File]::WriteAllBytes('dist/bridge-readiness/observation-evidence.json', [Convert]::FromBase64String($env:BRIDGE_OBSERVATION_EVIDENCE_B64))
+            ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding utf8 "$env:BRIDGE_READINESS_ROOT/stable-release.json"
+          [IO.File]::WriteAllBytes("$env:BRIDGE_READINESS_ROOT/observation-evidence.json", [Convert]::FromBase64String($env:BRIDGE_OBSERVATION_EVIDENCE_B64))
 
       - name: Fetch immutable production trust binding
         shell: pwsh
@@ -235,12 +242,10 @@ jobs:
           BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64 }}
         run: |
           $policyTag = 'publisher-policy-epoch-00000001'
-          $bundleParent = 'dist/bridge-readiness/private-bundle'
+          $bundleParent = "$env:BRIDGE_READINESS_ROOT/private-bundle"
           $bundleDirectory = "$bundleParent/bundle"
-          New-Item -ItemType Directory -Force -Path $bundleDirectory | Out-Null
-          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-          icacls $bundleParent /inheritance:r /grant:r "*$($sid):(OI)(CI)F" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Private publisher bundle ACL setup failed.' }
+          $downloadDirectory = "$env:BRIDGE_READINESS_ROOT/policy-download"
+          New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
           try {
             $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$policyTag" -Headers $headers
@@ -255,25 +260,25 @@ jobs:
           foreach ($asset in $assets) {
             $cap = if ($asset.name -ceq 'policy.json') { 262144 } else { 65536 }
             if ([int64]$asset.size -le 0 -or [int64]$asset.size -gt $cap -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.content_type -cne 'application/json' -or [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') { throw 'Immutable epoch-1 policy asset metadata is invalid.' }
-            node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $asset.url --size $asset.size --sha256 ([string]$asset.digest).Substring(7) --content-type application/json --max-bytes $cap --output "$bundleDirectory/$($asset.name)"
+            node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $asset.url --size $asset.size --sha256 ([string]$asset.digest).Substring(7) --content-type application/json --max-bytes $cap --output "$downloadDirectory/$($asset.name)"
             if ($LASTEXITCODE -ne 0) { throw 'Bounded epoch-1 policy asset download failed.' }
           }
-          $bundleEntries = @(Get-ChildItem -LiteralPath $bundleDirectory -File | ForEach-Object { $_.Name } | Sort-Object)
-          if ($bundleEntries.Count -ne 3 -or [string]::Join(',', $bundleEntries) -cne [string]::Join(',', @('audit.json','commit.json','policy.json'))) { throw 'Unexpected private bundle entry.' }
+          & $env:TRUSTPOLICY_INSPECTOR_PATH import-bundle --policy-source "$downloadDirectory/policy.json" --audit-source "$downloadDirectory/audit.json" --commit-source "$downloadDirectory/commit.json" --bundle-parent $bundleParent
+          if ($LASTEXITCODE -ne 0) { throw 'Private publisher bundle import failed.' }
           $selectedAssets = foreach ($asset in $assets) { [ordered]@{ name = [string]$asset.name; size = [int64]$asset.size; digest = [string]$asset.digest; content_type=[string]$asset.content_type; url=[string]$asset.url } }
           [ordered]@{ id = [int64]$release.id; tag_name = [string]$release.tag_name; draft = [bool]$release.draft; prerelease = [bool]$release.prerelease; published_at = [string]$release.published_at; assets = @($selectedAssets) } |
-            ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/policy-release.json
-          [IO.File]::WriteAllBytes('dist/bridge-readiness/root-spki.der', [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
+            ConvertTo-Json -Depth 5 -Compress | Set-Content -NoNewline -Encoding utf8 "$env:BRIDGE_READINESS_ROOT/policy-release.json"
+          [IO.File]::WriteAllBytes("$env:BRIDGE_READINESS_ROOT/root-spki.der", [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
           $bootstrapBytes = [Convert]::FromBase64String($env:BRIDGE_BOOTSTRAP_POLICY_B64)
-          [IO.File]::WriteAllBytes('dist/bridge-readiness/bootstrap-policy.json', $bootstrapBytes)
+          [IO.File]::WriteAllBytes("$env:BRIDGE_READINESS_ROOT/bootstrap-policy.json", $bootstrapBytes)
           $downloadedPolicy = [IO.File]::ReadAllBytes("$bundleDirectory/policy.json")
           $downloadedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($downloadedPolicy)).ToLowerInvariant()
           if ($downloadedHash -cne $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 -or -not [Linq.Enumerable]::SequenceEqual[byte]($downloadedPolicy, $bootstrapBytes)) {
             throw 'Bootstrap policy bytes do not match the immutable epoch-1 policy Release.'
           }
-          & $env:TRUSTPOLICY_INSPECTOR_PATH verify-bundle --policy dist/bridge-readiness/private-bundle/bundle/policy.json --audit dist/bridge-readiness/private-bundle/bundle/audit.json --reviewed-spki dist/bridge-readiness/root-spki.der --expected-spki-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --expected-previous-epoch 0 | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness/verified-bundle.json
+          & $env:TRUSTPOLICY_INSPECTOR_PATH verify-bundle --policy "$bundleDirectory/policy.json" --audit "$bundleDirectory/audit.json" --reviewed-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --expected-spki-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --expected-previous-epoch 0 | Set-Content -NoNewline -Encoding utf8 "$env:BRIDGE_READINESS_ROOT/verified-bundle.json"
           if ($LASTEXITCODE -ne 0) { throw 'Production publisher bundle verification failed.' }
-          [IO.File]::WriteAllBytes('dist/bridge-readiness/trust-attestation.json', [Convert]::FromBase64String($env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64))
+          [IO.File]::WriteAllBytes("$env:BRIDGE_READINESS_ROOT/trust-attestation.json", [Convert]::FromBase64String($env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_B64))
 
       - name: Verify reviewed bridge readiness
         shell: pwsh
@@ -281,11 +286,14 @@ jobs:
           BRIDGE_OBSERVATION_EVIDENCE_SHA256: ${{ vars.BRIDGE_OBSERVATION_EVIDENCE_SHA256 }}
           BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256: ${{ vars.BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 }}
         run: |
-          node $env:BRIDGE_READINESS_SCRIPT_PATH verify --stable-release dist/bridge-readiness/stable-release.json --stable-checksum dist/bridge-readiness/stable-checksum.txt --observation-evidence dist/bridge-readiness/observation-evidence.json --observation-sha256 $env:BRIDGE_OBSERVATION_EVIDENCE_SHA256 --root-spki dist/bridge-readiness/root-spki.der --policy dist/bridge-readiness/private-bundle/bundle/policy.json --audit dist/bridge-readiness/private-bundle/bundle/audit.json --verified-bundle dist/bridge-readiness/verified-bundle.json --policy-release dist/bridge-readiness/policy-release.json --trust-attestation dist/bridge-readiness/trust-attestation.json --trust-attestation-sha256 $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 | Set-Content -NoNewline -Encoding utf8 dist/bridge-readiness.json
+          node $env:BRIDGE_READINESS_SCRIPT_PATH verify --stable-release "$env:BRIDGE_READINESS_ROOT/stable-release.json" --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-checksum "$env:BRIDGE_READINESS_ROOT/stable-checksum.txt" --observation-evidence "$env:BRIDGE_READINESS_ROOT/observation-evidence.json" --observation-sha256 $env:BRIDGE_OBSERVATION_EVIDENCE_SHA256 --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json" --audit "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/audit.json" --verified-bundle "$env:BRIDGE_READINESS_ROOT/verified-bundle.json" --policy-release "$env:BRIDGE_READINESS_ROOT/policy-release.json" --trust-attestation "$env:BRIDGE_READINESS_ROOT/trust-attestation.json" --trust-attestation-sha256 $env:BRIDGE_PRODUCTION_TRUST_ATTESTATION_SHA256 | Set-Content -NoNewline -Encoding utf8 "$env:BRIDGE_READINESS_ROOT/readiness.json"
           if ($LASTEXITCODE -ne 0) { throw 'Reviewed bridge readiness verification failed.' }
-          $readiness = Get-Content dist/bridge-readiness.json -Raw | ConvertFrom-Json
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-policy --root-spki dist/bridge-readiness/root-spki.der --policy dist/bridge-readiness/policy.json --epoch 1 --stable-artifact-sha256 $readiness.stableArtifactSha256 | Set-Content -NoNewline -Encoding utf8 dist/bridge-policy-authorization.json
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-policy --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --verified-bundle "$env:BRIDGE_READINESS_ROOT/verified-bundle.json" --epoch 1 --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-tag v0.4.12 --stable-channel stable | Set-Content -NoNewline -Encoding utf8 "$env:BRIDGE_READINESS_ROOT/policy-authorization.json"
           if ($LASTEXITCODE -ne 0) { throw 'Production client policy authorization failed.' }
+          $authorization = Get-Content "$env:BRIDGE_READINESS_ROOT/policy-authorization.json" -Raw | ConvertFrom-Json
+          if ($authorization.stableIdentity.country -cne 'CN' -or $authorization.stableIdentity.organization -cne 'NaisNet Technology Co., Ltd.' -or $authorization.stableIdentity.organizationId -cne '91210103MA7CJ3C094') {
+            throw 'Observed v0.4.12 signer identity differs from the separately reviewed NaisNet identity.'
+          }
 
       - name: Install dependencies
         run: npm ci
@@ -316,7 +324,7 @@ jobs:
           if ($checkedManifest.version -cne '9.0' -or $checkedManifest.authenticode -ne $true -or [string]::IsNullOrWhiteSpace([string]$checkedManifest.signer_subject)) {
             throw 'Checked-in FFmpeg component manifest is incomplete.'
           }
-          $identity = node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" identity | ConvertFrom-Json
+          $identity = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $identity.schema -ne 2 -or $identity.fingerprint -cne $checkedManifest.component_fingerprint) {
             throw 'Fixed FFmpeg component identity does not match the checked-in reviewed manifest.'
           }
@@ -342,14 +350,14 @@ jobs:
           BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
           $componentDirectory = 'dist/bridge-ffmpeg-component'
-          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --metadata dist/bridge-ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --tool-root $env:RELEASE_TOOL_ROOT --metadata dist/bridge-ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
           if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg component metadata or download bytes failed verification.' }
           foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
             gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw 'Fixed FFmpeg component attestation verification failed.' }
           }
           $componentManifest = Get-Content "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
-          node "$env:RELEASE_TOOLING_ROOT/scripts/ffmpeg-component-assets.mjs" verify --input $componentDirectory
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory
           if ($LASTEXITCODE -ne 0) { throw 'Fixed signed FFmpeg component verification failed.' }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$componentDirectory/manifest.json").Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
               (Get-FileHash -Algorithm SHA256 -LiteralPath goserver/ffmpeg/manifest.json).Hash.ToLowerInvariant() -cne $env:BRIDGE_FFMPEG_COMPONENT_MANIFEST_SHA256 -or
@@ -432,16 +440,11 @@ jobs:
       - name: Inspect final bound bridge artifact
         shell: pwsh
         env:
-          BRIDGE_TRUST_ROOT_SPKI_B64: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_B64 }}
           BRIDGE_TRUST_ROOT_SPKI_SHA256: ${{ vars.BRIDGE_TRUST_ROOT_SPKI_SHA256 }}
-          BRIDGE_BOOTSTRAP_POLICY_B64: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_B64 }}
           BRIDGE_BOOTSTRAP_POLICY_SHA256: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}
           BRIDGE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}
         run: |
-          [IO.File]::WriteAllBytes('dist/bridge-root-spki.der', [Convert]::FromBase64String($env:BRIDGE_TRUST_ROOT_SPKI_B64))
-          [IO.File]::WriteAllBytes('dist/bridge-bootstrap-policy.json', [Convert]::FromBase64String($env:BRIDGE_BOOTSTRAP_POLICY_B64))
-          $readiness = Get-Content dist/bridge-readiness.json -Raw | ConvertFrom-Json
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.exe --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki dist/bridge-root-spki.der --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy dist/bridge-bootstrap-policy.json --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact-sha256 $readiness.stableArtifactSha256 --ffmpeg-archive goserver/ffmpeg/ffmpeg.zip --ffmpeg-manifest goserver/ffmpeg/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.exe --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json" --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-tag v0.4.12 --stable-channel stable --ffmpeg-archive goserver/ffmpeg/ffmpeg.zip --ffmpeg-manifest goserver/ffmpeg/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
           if ($LASTEXITCODE -ne 0) { throw 'Final bound bridge artifact inspection failed.' }
 
       - name: Prepare public bridge evidence
@@ -458,7 +461,7 @@ jobs:
             throw 'The bridge changelog must contain exactly one v0.4.11 entry.'
           }
           $inspection = Get-Content dist/bridge-artifact-inspection.json -Raw | ConvertFrom-Json
-          $readiness = Get-Content dist/bridge-readiness.json -Raw | ConvertFrom-Json
+          $readiness = Get-Content "$env:BRIDGE_READINESS_ROOT/readiness.json" -Raw | ConvertFrom-Json
           if ($inspection.version -cne '0.4.11' -or $inspection.tag -cne $env:BRIDGE_TAG -or $inspection.commit -cne $env:BRIDGE_COMMIT -or
               $inspection.rootSpkiSha256 -cne $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 -or $inspection.policySha256 -cne $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 -or
               [uint64]$inspection.policyEpoch -ne [uint64]$env:BRIDGE_BOOTSTRAP_POLICY_EPOCH -or
