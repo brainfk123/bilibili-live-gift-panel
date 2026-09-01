@@ -128,8 +128,17 @@ describe('CI scope classification', () => {
     }]));
     expect(summary).toContain('| Overall level | Run Windows | Run MySQL | Path | Classified level | Reason |');
     expect(summary).toContain('| desktop-high-risk | true | false |');
-    expect(summary).toContain('danger&#124;&#96;line&#13;&#10;&lt;unsafe&gt;&amp;&#92;path');
+    expect(summary).toContain('danger&#124;&#96;line&#13;&#10;&#60;unsafe&#62;&#38;&#92;path');
     expect(summary).not.toContain('danger|`line');
+  });
+
+  it('renders Git paths as inert text even when they contain Markdown syntax', () => {
+    const summary = formatGitHubSummary(classifyChanges([{
+      status: 'M',
+      path: '![probe](https://example.test/pixel) @owner #123 | \u0001 中文',
+    }]));
+
+    expect(summary).toContain('&#33;&#91;probe&#93;&#40;https&#58;//example.test/pixel&#41; &#64;owner &#35;123 &#124; &#1; &#20013;&#25991;');
   });
 
   it('writes all CLI outputs and the human-readable summary without shell interpolation', () => {
@@ -171,6 +180,6 @@ describe('CI scope classification', () => {
     expect(JSON.parse(lines.find((line) => line.startsWith('reasons_json='))!.slice('reasons_json='.length)))
       .toEqual([{ path: '<unknown-git-diff>', level: 'desktop-high-risk', reason: 'unknown-path-fail-closed' }]);
     expect(readFileSync(summary, 'utf8'))
-      .toContain('| desktop-high-risk | true | false | &lt;unknown-git-diff&gt; | desktop-high-risk | unknown-path-fail-closed |');
+      .toContain('| desktop-high-risk | true | false | &#60;unknown-git-diff&#62; | desktop-high-risk | unknown-path-fail-closed |');
   });
 });

@@ -85,7 +85,7 @@ export function formatGitHubSummary(decision) {
     '| --- | --- | --- | --- | --- | --- |',
   ];
   const rows = decision.reasons.map(({ path, level, reason }) =>
-    `| ${escapeMarkdownCell(decision.windowsLevel)} | ${escapeMarkdownCell(decision.runWindows)} | ${escapeMarkdownCell(decision.runMySQL)} | ${escapeMarkdownCell(path)} | ${escapeMarkdownCell(level)} | ${escapeMarkdownCell(reason)} |`);
+    `| ${escapeMarkdownCell(decision.windowsLevel)} | ${escapeMarkdownCell(decision.runWindows)} | ${escapeMarkdownCell(decision.runMySQL)} | ${escapeGitPathCell(path)} | ${escapeMarkdownCell(level)} | ${escapeMarkdownCell(reason)} |`);
   return `${[...header, ...rows].join('\n')}\n`;
 }
 
@@ -102,6 +102,15 @@ function escapeMarkdownCell(value) {
       const codePoint = character.codePointAt(0);
       escaped += codePoint <= 31 || codePoint === 127 ? `&#${codePoint};` : character;
     }
+  }
+  return escaped;
+}
+
+function escapeGitPathCell(value) {
+  let escaped = '';
+  for (const character of String(value)) {
+    if (/^[A-Za-z0-9 ._\/-]$/.test(character)) escaped += character;
+    else escaped += `&#${character.codePointAt(0)};`;
   }
   return escaped;
 }
