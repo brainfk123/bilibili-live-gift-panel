@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -195,11 +197,12 @@ type verifyBundleVerification struct {
 }
 
 type verifyBundleEnvelope struct {
-	SchemaVersion uint64                   `json:"schemaVersion"`
-	Verification  verifyBundleVerification `json:"verification"`
-	Commit        trustpolicy.BundleCommit `json:"commit"`
-	Policy        verifyBundleArtifact     `json:"policy"`
-	Audit         verifyBundleArtifact     `json:"audit"`
+	SchemaVersion  uint64                   `json:"schemaVersion"`
+	Verification   verifyBundleVerification `json:"verification"`
+	Commit         trustpolicy.BundleCommit `json:"commit"`
+	Policy         verifyBundleArtifact     `json:"policy"`
+	Audit          verifyBundleArtifact     `json:"audit"`
+	CommitArtifact verifyBundleArtifact     `json:"commitArtifact"`
 }
 
 type committedBundleReader func(string, string) (trustpolicy.CommittedBundle, error)
@@ -243,6 +246,7 @@ func runVerifyBundle(args []string, output io.Writer, reader committedBundleRead
 	if err != nil {
 		return errCommand
 	}
+	commitDigest := sha256.Sum256(committed.CommitBytes)
 	envelope, err := json.Marshal(verifyBundleEnvelope{
 		SchemaVersion: verifyBundleSchemaVersion,
 		Verification: verifyBundleVerification{
@@ -262,6 +266,12 @@ func runVerifyBundle(args []string, output io.Writer, reader committedBundleRead
 			Length:      committed.Commit.Audit.Length,
 			SHA256:      committed.Commit.Audit.SHA256,
 			BytesBase64: base64.StdEncoding.EncodeToString(committed.Audit),
+		},
+		CommitArtifact: verifyBundleArtifact{
+			Name:        trustpolicy.BundleCommitFileName,
+			Length:      uint64(len(committed.CommitBytes)),
+			SHA256:      hex.EncodeToString(commitDigest[:]),
+			BytesBase64: base64.StdEncoding.EncodeToString(committed.CommitBytes),
 		},
 	})
 	if err != nil || len(envelope) == 0 || len(envelope)+1 > maxVerifyBundleEnvelopeBytes {

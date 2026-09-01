@@ -323,22 +323,27 @@ func runVerifyArtifact(args []string, output io.Writer) error {
 	flags.StringVar(&options.Commit, "commit", "", "commit")
 	flags.StringVar(&options.RootSPKIPath, "root-spki", "", "root SPKI")
 	flags.StringVar(&options.ExpectedRootSHA256, "root-sha256", "", "root digest")
-	flags.StringVar(&options.PolicyPath, "policy", "", "policy")
-	flags.StringVar(&options.ExpectedPolicySHA256, "policy-sha256", "", "policy digest")
+	flags.StringVar(&options.BootstrapPolicyPath, "bootstrap-policy", "", "embedded bootstrap policy")
+	flags.StringVar(&options.ExpectedBootstrapPolicySHA256, "bootstrap-policy-sha256", "", "bootstrap policy digest")
+	bootstrapEpoch := flags.String("bootstrap-policy-epoch", "", "bootstrap policy epoch")
+	flags.StringVar(&options.AuthorizationPolicyPath, "authorization-policy", "", "external final authorization policy")
+	flags.StringVar(&options.ExpectedAuthorizationPolicySHA256, "authorization-policy-sha256", "", "authorization policy digest")
+	authorizationEpoch := flags.String("authorization-policy-epoch", "", "authorization policy epoch")
 	flags.StringVar(&options.StableArtifactPath, "stable-artifact", "", "exact stable convergence artifact")
 	flags.StringVar(&options.StableTag, "stable-tag", "", "exact stable tag")
 	stableChannel := flags.String("stable-channel", "", "exact stable channel")
-	policyEpoch := flags.String("policy-epoch", "", "policy epoch")
 	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "FFmpeg archive")
 	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "FFmpeg manifest")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("artifact arguments are invalid")
 	}
-	epoch, err := strconv.ParseUint(*policyEpoch, 10, 64)
-	if err != nil || epoch == 0 {
+	parsedBootstrapEpoch, bootstrapErr := strconv.ParseUint(*bootstrapEpoch, 10, 64)
+	parsedAuthorizationEpoch, authorizationErr := strconv.ParseUint(*authorizationEpoch, 10, 64)
+	if bootstrapErr != nil || authorizationErr != nil || parsedBootstrapEpoch == 0 || parsedAuthorizationEpoch <= parsedBootstrapEpoch {
 		return errors.New("artifact policy epoch is invalid")
 	}
-	options.ExpectedPolicyEpoch = epoch
+	options.ExpectedBootstrapPolicyEpoch = parsedBootstrapEpoch
+	options.ExpectedAuthorizationPolicyEpoch = parsedAuthorizationEpoch
 	options.StableChannel = updatepolicy.Channel(*stableChannel)
 	if options.StableChannel != updatepolicy.ChannelStable || options.StableArtifactPath == "" || options.StableTag == "" {
 		return errors.New("stable artifact arguments are invalid")

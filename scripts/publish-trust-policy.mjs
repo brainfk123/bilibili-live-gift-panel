@@ -4,13 +4,19 @@ import { appendFile, readFile as readLocalFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import {
+  POLICY_RELEASE_ASSET_CONTRACT,
+  policyReleaseAssetForRemoteName,
+  policyReleaseAssetForRole,
+} from './publisher-policy-release-contract.mjs';
 
 const MAX_MACHINE_ENVELOPE_BYTES = 512 << 10;
 const MAX_POLICY_BYTES = 256 << 10;
 const MAX_AUDIT_BYTES = 64 << 10;
 const MAX_REMOTE_JSON_BYTES = 512 << 10;
-const POLICY_ASSET = 'gift-panel-publisher-policy.json';
-const AUDIT_ASSET = 'gift-panel-publisher-policy.audit.json';
+const POLICY_ASSET = policyReleaseAssetForRole('policy').remoteName;
+const AUDIT_ASSET = policyReleaseAssetForRole('audit').remoteName;
+const COMMIT_ASSET = policyReleaseAssetForRole('commit').remoteName;
 const COS_POINTER = 'trust/publisher/latest.json';
 const GITHUB_POINTER_REF = 'refs/heads/publisher-trust';
 const GITHUB_POINTER_PATH = POLICY_ASSET;
@@ -229,7 +235,7 @@ function validateMachineEnvelope(raw, reviewedSPKI, expectedSPKISHA256, expected
   if (bytes.length <= 1 || bytes.length > MAX_MACHINE_ENVELOPE_BYTES || bytes.at(-1) !== 0x0a) throw new ValidationFailure();
   const withoutNewline = bytes.subarray(0, -1);
   const envelope = parseCanonicalJSON(withoutNewline, MAX_MACHINE_ENVELOPE_BYTES);
-  if (!exactKeys(envelope, ['schemaVersion', 'verification', 'commit', 'policy', 'audit']) || envelope.schemaVersion !== 2 ||
+  if (!exactKeys(envelope, ['schemaVersion', 'verification', 'commit', 'policy', 'audit', 'commitArtifact']) || envelope.schemaVersion !== 2 ||
     !exactKeys(envelope.verification, ['epoch', 'expectedPreviousEpoch', 'spkiSha256']) ||
     envelope.verification.expectedPreviousEpoch !== expectedPreviousEpoch || envelope.verification.spkiSha256 !== expectedSPKISHA256 ||
     !exactKeys(envelope.commit, ['schemaVersion', 'policy', 'audit']) || envelope.commit.schemaVersion !== 1) {
@@ -237,6 +243,17 @@ function validateMachineEnvelope(raw, reviewedSPKI, expectedSPKISHA256, expected
   }
   const policy = validateArtifact(envelope.policy, 'policy', envelope.commit.policy);
   const audit = validateArtifact(envelope.audit, 'audit', envelope.commit.audit);
+  if (!exactKeys(envelope.commitArtifact, ['name', 'length', 'sha256', 'bytesBase64']) ||
+    envelope.commitArtifact.name !== 'commit.json' || !Number.isSafeInteger(envelope.commitArtifact.length) ||
+    envelope.commitArtifact.length <= 0 || !SHA256.test(envelope.commitArtifact.sha256)) {
+    throw new ValidationFailure();
+  }
+  const commit = decodeCanonicalBase64(envelope.commitArtifact.bytesBase64);
+  const canonicalCommit = Buffer.from(JSON.stringify(envelope.commit));
+  if (commit.length !== envelope.commitArtifact.length || sha256(commit) !== envelope.commitArtifact.sha256 ||
+    !equalBytes(commit, canonicalCommit)) {
+    throw new ValidationFailure();
+  }
   const policyValidation = validatePolicyBytes(policy, reviewedSPKI, expectedSPKISHA256, expectedPreviousEpoch, now);
   if (envelope.verification.epoch !== policyValidation.epoch) throw new ValidationFailure();
   validateAuditBytes(audit, policyValidation.epoch, envelope.policy.sha256);
@@ -245,8 +262,10 @@ function validateMachineEnvelope(raw, reviewedSPKI, expectedSPKISHA256, expected
     expectedPreviousEpoch,
     policy,
     audit,
+    commit,
     policySHA256: envelope.policy.sha256,
     auditSHA256: envelope.audit.sha256,
+    commitSHA256: envelope.commitArtifact.sha256,
     reviewedSPKI: Buffer.from(reviewedSPKI),
     expectedSPKISHA256,
     now,
@@ -261,6 +280,7 @@ export function publisherTargets(epoch) {
     githubReleaseTag: `publisher-policy-epoch-${fixed}`,
     githubPolicyAsset: POLICY_ASSET,
     githubAuditAsset: AUDIT_ASSET,
+    githubCommitAsset: COMMIT_ASSET,
     cosPointerKey: COS_POINTER,
     githubPointerRef: GITHUB_POINTER_REF,
     githubPointerPath: GITHUB_POINTER_PATH,
@@ -274,6 +294,7 @@ function summaryFor(bundle, advanceDiscovery) {
     expectedPreviousEpoch: bundle.expectedPreviousEpoch,
     policySHA256: bundle.policySHA256,
     auditSHA256: bundle.auditSHA256,
+    commitSHA256: bundle.commitSHA256,
     ...publisherTargets(bundle.epoch),
     advanceDiscovery,
   };
@@ -328,8 +349,9 @@ async function verifyImmutableReadback(bundle, adapters) {
   verifyCOSPolicyObject(cos, bundle);
   const githubPolicy = Buffer.from(await adapters.github.downloadReleaseAsset(targets.githubReleaseTag, targets.githubPolicyAsset));
   const githubAudit = Buffer.from(await adapters.github.downloadReleaseAsset(targets.githubReleaseTag, targets.githubAuditAsset));
-  if (!equalBytes(githubPolicy, bundle.policy) || !equalBytes(githubAudit, bundle.audit) ||
-    sha256(githubPolicy) !== bundle.policySHA256 || sha256(githubAudit) !== bundle.auditSHA256) {
+  const githubCommit = Buffer.from(await adapters.github.downloadReleaseAsset(targets.githubReleaseTag, targets.githubCommitAsset));
+  if (!equalBytes(githubPolicy, bundle.policy) || !equalBytes(githubAudit, bundle.audit) || !equalBytes(githubCommit, bundle.commit) ||
+    sha256(githubPolicy) !== bundle.policySHA256 || sha256(githubAudit) !== bundle.auditSHA256 || sha256(githubCommit) !== bundle.commitSHA256) {
     throw new PublicationFailure();
   }
 }
@@ -345,6 +367,7 @@ async function publishImmutable(bundle, adapters) {
     assets: [
       { name: targets.githubPolicyAsset, bytes: bundle.policy, sha256: bundle.policySHA256 },
       { name: targets.githubAuditAsset, bytes: bundle.audit, sha256: bundle.auditSHA256 },
+      { name: targets.githubCommitAsset, bytes: bundle.commit, sha256: bundle.commitSHA256 },
     ],
   });
   await verifyImmutableReadback(bundle, adapters);
@@ -576,14 +599,15 @@ export function createGitHubPublisherAdapter(environment, fetchImpl = fetch) {
     return readRemoteJSON(response);
   }
   async function assetBytes(tag, name) {
-    const maximum = name === POLICY_ASSET ? MAX_POLICY_BYTES : name === AUDIT_ASSET ? MAX_AUDIT_BYTES : 0;
+    const contract = policyReleaseAssetForRemoteName(name);
+    const maximum = contract?.maximumBytes ?? 0;
     if (maximum === 0) throw new PublicationFailure();
     const release = await releaseForTag(tag);
     const assets = Array.isArray(release?.assets) ? release.assets : [];
     const asset = assets.find((candidate) => candidate?.name === name);
     if (!asset || typeof asset.url !== 'string' || !Number.isSafeInteger(asset.id) || asset.id <= 0 ||
       !Number.isSafeInteger(asset.size) || asset.size < 0 || asset.size > maximum ||
-      asset.content_type !== 'application/json' || asset.state !== 'uploaded' ||
+      asset.content_type !== contract.contentType || asset.state !== 'uploaded' ||
       !/^sha256:[0-9a-f]{64}$/.test(asset.digest)) {
       throw new PublicationFailure();
     }
@@ -632,7 +656,8 @@ export function createGitHubPublisherAdapter(environment, fetchImpl = fetch) {
   }
   return {
     publishImmutableRelease: safeAdapterMethod(async ({ tag, title, assets }) => {
-      if (!/^publisher-policy-epoch-[0-9]{8}$/.test(tag) || title !== tag || assets.length !== 2) throw new PublicationFailure();
+      if (!/^publisher-policy-epoch-[0-9]{8}$/.test(tag) || title !== tag || assets.length !== POLICY_RELEASE_ASSET_CONTRACT.length ||
+        POLICY_RELEASE_ASSET_CONTRACT.some((contract) => assets.filter((asset) => asset?.name === contract.remoteName).length !== 1)) throw new PublicationFailure();
       await ensureImmutableTag(tag);
       let release = await releaseForTag(tag);
       if (release === null) {

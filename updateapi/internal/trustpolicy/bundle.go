@@ -34,9 +34,10 @@ type BundleCommit struct {
 
 // CommittedBundle contains bytes that passed marker and content validation.
 type CommittedBundle struct {
-	Policy []byte
-	Audit  []byte
-	Commit BundleCommit
+	Policy      []byte
+	Audit       []byte
+	Commit      BundleCommit
+	CommitBytes []byte
 }
 
 type committedPolicyDocument struct {
@@ -100,9 +101,10 @@ func ValidateCommittedBundle(policyName string, policy []byte, auditName string,
 		return CommittedBundle{}, errCommittedBundle
 	}
 	return CommittedBundle{
-		Policy: append([]byte(nil), policy...),
-		Audit:  append([]byte(nil), audit...),
-		Commit: commit,
+		Policy:      append([]byte(nil), policy...),
+		Audit:       append([]byte(nil), audit...),
+		Commit:      commit,
+		CommitBytes: append([]byte(nil), marker...),
 	}, nil
 }
 

@@ -29,8 +29,12 @@ type VerifyArtifactOptions struct {
 	SealedDirectory                       string
 	Version, Tag, Commit                  string
 	RootSPKIPath, ExpectedRootSHA256      string
-	PolicyPath, ExpectedPolicySHA256      string
-	ExpectedPolicyEpoch                   uint64
+	BootstrapPolicyPath                   string
+	ExpectedBootstrapPolicySHA256         string
+	ExpectedBootstrapPolicyEpoch          uint64
+	AuthorizationPolicyPath               string
+	ExpectedAuthorizationPolicySHA256     string
+	ExpectedAuthorizationPolicyEpoch      uint64
 	StableArtifactPath, StableTag         string
 	StableChannel                         updatepolicy.Channel
 	FFmpegArchivePath, FFmpegManifestPath string
@@ -39,20 +43,22 @@ type VerifyArtifactOptions struct {
 }
 
 type ArtifactEvidence struct {
-	Version          string                `json:"version"`
-	Tag              string                `json:"tag"`
-	Commit           string                `json:"commit"`
-	PEContentSHA256  string                `json:"peContentSha256"`
-	SignedFileSHA256 string                `json:"signedFileSha256"`
-	SignedFileSize   int64                 `json:"signedFileSize"`
-	RootSPKISHA256   string                `json:"rootSpkiSha256"`
-	PolicySHA256     string                `json:"policySha256"`
-	PolicyEpoch      uint64                `json:"policyEpoch"`
-	OuterIdentity    certidentity.Identity `json:"outerIdentity"`
-	FFmpegVersion    string                `json:"ffmpegVersion"`
-	FFmpegSHA256     string                `json:"ffmpegSha256"`
-	FFmpegSize       int64                 `json:"ffmpegSize"`
-	FFmpegIdentity   certidentity.Identity `json:"ffmpegIdentity"`
+	Version                   string                `json:"version"`
+	Tag                       string                `json:"tag"`
+	Commit                    string                `json:"commit"`
+	PEContentSHA256           string                `json:"peContentSha256"`
+	SignedFileSHA256          string                `json:"signedFileSha256"`
+	SignedFileSize            int64                 `json:"signedFileSize"`
+	RootSPKISHA256            string                `json:"rootSpkiSha256"`
+	BootstrapPolicySHA256     string                `json:"bootstrapPolicySha256"`
+	BootstrapPolicyEpoch      uint64                `json:"bootstrapPolicyEpoch"`
+	AuthorizationPolicySHA256 string                `json:"authorizationPolicySha256"`
+	AuthorizationPolicyEpoch  uint64                `json:"authorizationPolicyEpoch"`
+	OuterIdentity             certidentity.Identity `json:"outerIdentity"`
+	FFmpegVersion             string                `json:"ffmpegVersion"`
+	FFmpegSHA256              string                `json:"ffmpegSha256"`
+	FFmpegSize                int64                 `json:"ffmpegSize"`
+	FFmpegIdentity            certidentity.Identity `json:"ffmpegIdentity"`
 }
 
 type VerifyStaticOptions struct {
@@ -190,21 +196,38 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if err != nil || sha256HexBytes(rootDER) != options.ExpectedRootSHA256 {
 		return ArtifactEvidence{}, errors.New("reviewed trust root is invalid")
 	}
-	policy, err := securefile.ReadBoundedRegular(options.PolicyPath, 256<<10, nil)
-	if err != nil || sha256HexBytes(policy) != options.ExpectedPolicySHA256 {
-		return ArtifactEvidence{}, errors.New("reviewed trust policy is invalid")
+	bootstrapPolicy, err := securefile.ReadBoundedRegular(options.BootstrapPolicyPath, 256<<10, nil)
+	if err != nil || sha256HexBytes(bootstrapPolicy) != options.ExpectedBootstrapPolicySHA256 {
+		return ArtifactEvidence{}, errors.New("reviewed bootstrap policy is invalid")
+	}
+	authorizationPolicy, err := securefile.ReadBoundedRegular(options.AuthorizationPolicyPath, 256<<10, nil)
+	if err != nil || sha256HexBytes(authorizationPolicy) != options.ExpectedAuthorizationPolicySHA256 {
+		return ArtifactEvidence{}, errors.New("reviewed authorization policy is invalid")
+	}
+	if options.ExpectedAuthorizationPolicyEpoch <= options.ExpectedBootstrapPolicyEpoch ||
+		options.ExpectedAuthorizationPolicySHA256 == options.ExpectedBootstrapPolicySHA256 || bytes.Equal(authorizationPolicy, bootstrapPolicy) {
+		return ArtifactEvidence{}, errors.New("authorization policy must advance bootstrap policy")
 	}
 	rootCovered, rootCoveredErr := CoveredContains(signed, []byte(base64.StdEncoding.EncodeToString(rootDER)))
-	policyCovered, policyCoveredErr := CoveredContains(signed, []byte(base64.StdEncoding.EncodeToString(policy)))
-	if rootCoveredErr != nil || policyCoveredErr != nil || !rootCovered || !policyCovered {
+	bootstrapCovered, bootstrapCoveredErr := CoveredContains(signed, []byte(base64.StdEncoding.EncodeToString(bootstrapPolicy)))
+	if rootCoveredErr != nil || bootstrapCoveredErr != nil || !rootCovered || !bootstrapCovered {
 		return ArtifactEvidence{}, errors.New("signed artifact embedded trust bytes do not match reviewed inputs")
+	}
+	parsedRoot, err := x509.ParsePKIXPublicKey(rootDER)
+	root, ok := parsedRoot.(*ecdsa.PublicKey)
+	if err != nil || !ok {
+		return ArtifactEvidence{}, errors.New("reviewed trust root is not P-256")
+	}
+	bootstrap, err := updatepolicy.ParseAndVerify(bootstrapPolicy, root, options.Now)
+	if err != nil || bootstrap.Epoch != options.ExpectedBootstrapPolicyEpoch {
+		return ArtifactEvidence{}, errors.New("bootstrap policy signature or epoch is invalid")
 	}
 	inspect := options.InspectAuthenticode
 	if inspect == nil {
 		inspect = InspectAuthenticodeFile
 	}
 	stableEvidence, err := VerifyStableArtifactPolicy(StablePolicyOptions{
-		RootDER: rootDER, PolicyBytes: policy, ExpectedEpoch: options.ExpectedPolicyEpoch,
+		RootDER: rootDER, PolicyBytes: authorizationPolicy, ExpectedEpoch: options.ExpectedAuthorizationPolicyEpoch,
 		ArtifactPath: options.StableArtifactPath, Tag: options.StableTag, Channel: options.StableChannel,
 		Now: options.Now, InspectAuthenticode: inspect,
 	})
@@ -246,6 +269,12 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	if err := signedSnapshot.Revalidate(); err != nil {
 		return ArtifactEvidence{}, errors.New("signed outer snapshot changed during Authenticode inspection")
 	}
+	if err := bootstrap.AuthorizeAt(updatepolicy.ArtifactIdentity{
+		Tag: options.Tag, Channel: updatepolicy.ChannelLegacyRushRush,
+		Certificate: outerIdentity,
+	}, options.Now); err != nil {
+		return ArtifactEvidence{}, errors.New("embedded bootstrap policy does not authorize the exact bridge")
+	}
 	ffmpegSnapshot, err := securefile.SnapshotBytes(ffmpeg, "gift-panel-artifact-ffmpeg-", "ffmpeg.exe")
 	if err != nil {
 		return ArtifactEvidence{}, errors.New("FFmpeg inspection file is unavailable")
@@ -266,10 +295,13 @@ func VerifyBoundArtifact(options VerifyArtifactOptions) (ArtifactEvidence, error
 	return ArtifactEvidence{
 		Version: options.Version, Tag: options.Tag, Commit: options.Commit,
 		PEContentSHA256: signedDigest, SignedFileSHA256: sealed.SHA256, SignedFileSize: sealed.Size,
-		RootSPKISHA256: options.ExpectedRootSHA256,
-		PolicySHA256:   options.ExpectedPolicySHA256, PolicyEpoch: stableEvidence.PolicyEpoch,
-		OuterIdentity: outerIdentity,
-		FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: ffmpegIdentity,
+		RootSPKISHA256:            options.ExpectedRootSHA256,
+		BootstrapPolicySHA256:     options.ExpectedBootstrapPolicySHA256,
+		BootstrapPolicyEpoch:      bootstrap.Epoch,
+		AuthorizationPolicySHA256: options.ExpectedAuthorizationPolicySHA256,
+		AuthorizationPolicyEpoch:  stableEvidence.PolicyEpoch,
+		OuterIdentity:             outerIdentity,
+		FFmpegVersion:             manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size, FFmpegIdentity: ffmpegIdentity,
 	}, nil
 }
 

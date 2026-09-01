@@ -29,6 +29,11 @@ async function verifiedEnvelope(overrides: { policy?: Buffer; spki?: Buffer; exp
     ciActor: 'task1-test-approver',
   }));
   const auditSHA256 = sha256(audit);
+  const commit = Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    policy: { name: 'policy.json', length: policy.length, sha256: policySHA256 },
+    audit: { name: 'audit.json', length: audit.length, sha256: auditSHA256 },
+  }));
   return {
     schemaVersion: 2,
     verification: {
@@ -49,6 +54,10 @@ async function verifiedEnvelope(overrides: { policy?: Buffer; spki?: Buffer; exp
       name: 'audit.json', length: audit.length, sha256: auditSHA256,
       bytesBase64: audit.toString('base64'),
     },
+    commitArtifact: {
+      name: 'commit.json', length: commit.length, sha256: sha256(commit),
+      bytesBase64: commit.toString('base64'),
+    },
   };
 }
 
@@ -68,6 +77,23 @@ function makeSignedPolicy(privateKey: KeyObject, epoch: number, expiresAt: strin
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function policyCommitBytes(policy: Buffer, audit: Buffer): Buffer {
+  return Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    policy: { name: 'policy.json', length: policy.length, sha256: sha256(policy) },
+    audit: { name: 'audit.json', length: audit.length, sha256: sha256(audit) },
+  }));
+}
+
+function policyReleaseAssets(policy: Buffer, audit: Buffer) {
+  const commit = policyCommitBytes(policy, audit);
+  return [
+    { name: 'gift-panel-publisher-policy.json', bytes: policy, sha256: sha256(policy) },
+    { name: 'gift-panel-publisher-policy.audit.json', bytes: audit, sha256: sha256(audit) },
+    { name: 'gift-panel-publisher-policy.commit.json', bytes: commit, sha256: sha256(commit) },
+  ];
 }
 
 function gitVersion(bytes: Uint8Array): string {
@@ -415,10 +441,7 @@ describe('real publisher remote adapters', () => {
     });
 
     await expect(adapter.publishImmutableRelease({
-      tag, title: tag, assets: [
-        { name: 'gift-panel-publisher-policy.json', bytes: policy, sha256: sha256(policy) },
-        { name: 'gift-panel-publisher-policy.audit.json', bytes: audit, sha256: sha256(audit) },
-      ],
+      tag, title: tag, assets: policyReleaseAssets(policy, audit),
     })).rejects.toThrow('publisher policy publication failed');
     expect(evilRequests).toBe(0);
   });
@@ -493,10 +516,7 @@ describe('real publisher remote adapters', () => {
     const tag = 'publisher-policy-epoch-00000001';
     const policy = Buffer.from('{"policy":"public"}');
     const audit = Buffer.from('{"audit":"public"}');
-    const assets = [
-      { name: 'gift-panel-publisher-policy.json', bytes: policy, sha256: sha256(policy) },
-      { name: 'gift-panel-publisher-policy.audit.json', bytes: audit, sha256: sha256(audit) },
-    ];
+    const assets = policyReleaseAssets(policy, audit);
     const release = {
       id: 99, tag_name: tag, draft: initialDraft, prerelease: initialPrerelease,
       upload_url: 'https://uploads.github.com/repos/owner/repository/releases/99/assets{?name,label}',
@@ -517,7 +537,7 @@ describe('real publisher remote adapters', () => {
         return new Response(JSON.stringify({ tag_name: 'v0.4.12', id: 7 }), { status: 200 });
       }
       if (url.includes('/releases/assets/')) {
-        const index = url.endsWith('/1') ? 0 : 1;
+        const index = Number(url.slice(url.lastIndexOf('/') + 1)) - 1;
         const bytes = assets[index]!.bytes;
         return streamingResponse([bytes], { headers: { 'content-length': String(bytes.length) } });
       }
@@ -540,10 +560,7 @@ describe('real publisher remote adapters', () => {
     const tag = 'publisher-policy-epoch-00000001';
     const policy = Buffer.from('{"policy":"public"}');
     const audit = Buffer.from('{"audit":"public"}');
-    const assets = [
-      { name: 'gift-panel-publisher-policy.json', bytes: policy, sha256: sha256(policy) },
-      { name: 'gift-panel-publisher-policy.audit.json', bytes: audit, sha256: sha256(audit) },
-    ];
+    const assets = policyReleaseAssets(policy, audit);
     const releaseAssets: Record<string, unknown>[] = [];
     const createBodies: Array<Record<string, unknown>> = [];
     const patchBodies: Array<Record<string, unknown>> = [];
@@ -580,7 +597,7 @@ describe('real publisher remote adapters', () => {
         return new Response('{}', { status: 201 });
       }
       if (url.includes('/releases/assets/')) {
-        const index = url.endsWith('/1') ? 0 : 1;
+        const index = Number(url.slice(url.lastIndexOf('/') + 1)) - 1;
         const bytes = assets[index]!.bytes;
         return streamingResponse([bytes], { headers: { 'content-length': String(bytes.length) } });
       }
@@ -602,10 +619,7 @@ describe('real publisher remote adapters', () => {
     const tag = 'publisher-policy-epoch-00000001';
     const policy = Buffer.from('{"policy":"public"}');
     const audit = Buffer.from('{"audit":"public"}');
-    const assets = [
-      { name: 'gift-panel-publisher-policy.json', bytes: policy, sha256: sha256(policy) },
-      { name: 'gift-panel-publisher-policy.audit.json', bytes: audit, sha256: sha256(audit) },
-    ];
+    const assets = policyReleaseAssets(policy, audit);
     const release = {
       id: 99, tag_name: tag, draft: false, prerelease: false,
       upload_url: 'https://uploads.github.com/repos/owner/repository/releases/99/assets{?name,label}',
@@ -620,7 +634,7 @@ describe('real publisher remote adapters', () => {
       if (url.includes('/git/ref/tags/')) return new Response(JSON.stringify({ ref: `refs/tags/${tag}`, object: { type: 'commit', sha: remoteEnvironment.GITHUB_SHA } }), { status: 200 });
       if (url.endsWith('/releases/latest')) return new Response(JSON.stringify({ tag_name: tag, id: 99 }), { status: 200 });
       if (url.includes('/releases/assets/')) {
-        const bytes = url.endsWith('/1') ? policy : audit;
+        const bytes = assets[Number(url.slice(url.lastIndexOf('/') + 1)) - 1]!.bytes;
         return streamingResponse([bytes], { headers: { 'content-length': String(bytes.length) } });
       }
       if (url.endsWith('/releases/99') && init?.method === 'PATCH') return new Response('{}', { status: 200 });
@@ -743,10 +757,7 @@ describe('real publisher remote adapters', () => {
     const policy = Buffer.from(envelope.policy.bytesBase64, 'base64');
     const audit = Buffer.from(envelope.audit.bytesBase64, 'base64');
     const tag = 'publisher-policy-epoch-00000001';
-    const assets = [
-      { name: 'gift-panel-publisher-policy.json', bytes: policy, sha256: sha256(policy) },
-      { name: 'gift-panel-publisher-policy.audit.json', bytes: audit, sha256: sha256(audit) },
-    ];
+    const assets = policyReleaseAssets(policy, audit);
     const release = {
       id: 99, tag_name: tag, draft: false, prerelease: false,
       upload_url: 'https://uploads.github.com/repos/owner/repository/releases/99/assets{?name,label}',
@@ -770,7 +781,7 @@ describe('real publisher remote adapters', () => {
       if (url.includes('/git/ref/tags/')) return new Response(JSON.stringify({ ref: `refs/tags/${tag}`, object: { type: 'commit', sha: remoteEnvironment.GITHUB_SHA } }), { status: 200 });
       if (url.endsWith('/releases/latest')) return new Response(JSON.stringify({ tag_name: 'v0.4.12', id: 7 }), { status: 200 });
       if (url.includes('/releases/assets/')) {
-        const bytes = url.endsWith('/1') ? policy : audit;
+        const bytes = assets[Number(url.slice(url.lastIndexOf('/') + 1)) - 1]!.bytes;
         return streamingResponse([bytes], { headers: { 'content-length': String(bytes.length) } });
       }
       if (url.endsWith('/releases/99') && init?.method === 'PATCH') return new Response('{}', { status: 200 });
@@ -795,6 +806,7 @@ describe('real publisher remote adapters', () => {
     const fixture = await epochTwoFixture();
     const policy = fixture.candidate;
     const audit = Buffer.from(fixture.envelope.audit.bytesBase64, 'base64');
+    const commit = Buffer.from(fixture.envelope.commitArtifact.bytesBase64, 'base64');
     const targets = publisherTargets(2);
     let cosPointer = cosCandidate ? fixture.candidate : fixture.previous;
     let githubPointer = githubCandidate ? fixture.candidate : fixture.previous;
@@ -805,6 +817,7 @@ describe('real publisher remote adapters', () => {
       assets: [
         { id: 1, name: targets.githubPolicyAsset, size: policy.length, content_type: 'application/json', state: 'uploaded', digest: `sha256:${sha256(policy)}`, url: 'https://api.github.com/repos/owner/repository/releases/assets/1' },
         { id: 2, name: targets.githubAuditAsset, size: audit.length, content_type: 'application/json', state: 'uploaded', digest: `sha256:${sha256(audit)}`, url: 'https://api.github.com/repos/owner/repository/releases/assets/2' },
+        { id: 3, name: targets.githubCommitAsset, size: commit.length, content_type: 'application/json', state: 'uploaded', digest: `sha256:${sha256(commit)}`, url: 'https://api.github.com/repos/owner/repository/releases/assets/3' },
       ],
     };
     const fetchFake = async (input: string | URL | Request, init?: RequestInit) => {
@@ -824,7 +837,7 @@ describe('real publisher remote adapters', () => {
       }
       if (url.pathname.includes('/releases/tags/')) return new Response(JSON.stringify(release), { status: 200 });
       if (url.pathname.includes('/releases/assets/')) {
-        const bytes = url.pathname.endsWith('/1') ? policy : audit;
+        const bytes = [policy, audit, commit][Number(url.pathname.slice(url.pathname.lastIndexOf('/') + 1)) - 1]!;
         return streamingResponse([bytes], { headers: { 'content-length': String(bytes.length) } });
       }
       if (url.pathname.endsWith('/contents/gift-panel-publisher-policy.json')) {
@@ -855,6 +868,25 @@ describe('real publisher remote adapters', () => {
 });
 
 describe('protected publisher-policy transaction', () => {
+  it('publishes and reads back the exact three-asset immutable policy Release closure', async () => {
+    const envelope = await verifiedEnvelope();
+    const { adapters, githubAssets } = await fakeAdapters(envelope);
+    await publishTrustPolicy(await testOptions({ mode: 'publish-immutable' }), adapters);
+
+    const tag = 'publisher-policy-epoch-00000001';
+    const names = [...githubAssets.keys()]
+      .filter((key) => key.startsWith(`${tag}/`))
+      .map((key) => key.slice(tag.length + 1))
+      .sort();
+    expect(names).toEqual([
+      'gift-panel-publisher-policy.audit.json',
+      'gift-panel-publisher-policy.commit.json',
+      'gift-panel-publisher-policy.json',
+    ]);
+    expect(githubAssets.get(`${tag}/gift-panel-publisher-policy.commit.json`))
+      .toEqual(Buffer.from(envelope.commitArtifact.bytesBase64, 'base64'));
+  });
+
   it('validates the Task 1 test-only root and prints only fixed targets and hashes in dry-run', async () => {
     const envelope = await verifiedEnvelope();
     const { adapters, operations } = await fakeAdapters(envelope);

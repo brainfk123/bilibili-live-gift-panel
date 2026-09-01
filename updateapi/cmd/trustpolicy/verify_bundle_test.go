@@ -85,11 +85,17 @@ func TestVerifyBundleSubprocessEmitsCanonicalEnvelopeWithExactBytes(t *testing.T
 	}
 	policyDigest := sha256.Sum256(policy)
 	auditDigest := sha256.Sum256(audit)
-	want := fmt.Sprintf("{\"schemaVersion\":2,\"verification\":{\"epoch\":1,\"expectedPreviousEpoch\":0,\"spkiSha256\":%q},\"commit\":{\"schemaVersion\":1,\"policy\":{\"name\":\"policy.json\",\"length\":%d,\"sha256\":%q},\"audit\":{\"name\":\"audit.json\",\"length\":%d,\"sha256\":%q}},\"policy\":{\"name\":\"policy.json\",\"length\":%d,\"sha256\":%q,\"bytesBase64\":%q},\"audit\":{\"name\":\"audit.json\",\"length\":%d,\"sha256\":%q,\"bytesBase64\":%q}}\n",
+	commit, err := trustpolicy.BuildBundleCommit("policy.json", policy, "audit.json", audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDigest := sha256.Sum256(commit)
+	want := fmt.Sprintf("{\"schemaVersion\":2,\"verification\":{\"epoch\":1,\"expectedPreviousEpoch\":0,\"spkiSha256\":%q},\"commit\":{\"schemaVersion\":1,\"policy\":{\"name\":\"policy.json\",\"length\":%d,\"sha256\":%q},\"audit\":{\"name\":\"audit.json\",\"length\":%d,\"sha256\":%q}},\"policy\":{\"name\":\"policy.json\",\"length\":%d,\"sha256\":%q,\"bytesBase64\":%q},\"audit\":{\"name\":\"audit.json\",\"length\":%d,\"sha256\":%q,\"bytesBase64\":%q},\"commitArtifact\":{\"name\":\"commit.json\",\"length\":%d,\"sha256\":%q,\"bytesBase64\":%q}}\n",
 		signer.digest,
 		len(policy), hex.EncodeToString(policyDigest[:]), len(audit), hex.EncodeToString(auditDigest[:]),
 		len(policy), hex.EncodeToString(policyDigest[:]), base64.StdEncoding.EncodeToString(policy),
-		len(audit), hex.EncodeToString(auditDigest[:]), base64.StdEncoding.EncodeToString(audit))
+		len(audit), hex.EncodeToString(auditDigest[:]), base64.StdEncoding.EncodeToString(audit),
+		len(commit), hex.EncodeToString(commitDigest[:]), base64.StdEncoding.EncodeToString(commit))
 	if stdout.String() != want {
 		t.Fatalf("verify-bundle stdout is not the canonical envelope\n got: %s\nwant: %s", stdout.String(), want)
 	}
@@ -112,6 +118,12 @@ func TestVerifyBundleSubprocessEmitsCanonicalEnvelopeWithExactBytes(t *testing.T
 			SHA256      string `json:"sha256"`
 			BytesBase64 string `json:"bytesBase64"`
 		} `json:"audit"`
+		CommitArtifact struct {
+			Name        string `json:"name"`
+			Length      uint64 `json:"length"`
+			SHA256      string `json:"sha256"`
+			BytesBase64 string `json:"bytesBase64"`
+		} `json:"commitArtifact"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
@@ -123,6 +135,10 @@ func TestVerifyBundleSubprocessEmitsCanonicalEnvelopeWithExactBytes(t *testing.T
 	decodedAudit, err := base64.StdEncoding.Strict().DecodeString(envelope.Audit.BytesBase64)
 	if err != nil || !bytes.Equal(decodedAudit, audit) {
 		t.Fatal("audit Base64 did not decode to exact retained-reader bytes")
+	}
+	decodedCommit, err := base64.StdEncoding.Strict().DecodeString(envelope.CommitArtifact.BytesBase64)
+	if err != nil || !bytes.Equal(decodedCommit, commit) {
+		t.Fatal("commit Base64 did not decode to exact retained-reader bytes")
 	}
 }
 
