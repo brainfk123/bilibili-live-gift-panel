@@ -182,7 +182,7 @@ describe('build-go update trust configuration', () => {
     });
 
     const output = `${result.stdout}${result.stderr}`;
-    expect(result.status).toBe(0);
+    expect(result.status, output).toBe(0);
     expect(output).toContain(createHash('sha256').update(Buffer.from(testTrustRootSPKIBase64, 'base64')).digest('hex'));
     expect(output).not.toContain(testTrustRootSPKIBase64);
     expect(output).not.toContain(recognizablePolicyBase64);
