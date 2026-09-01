@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	deploymentconfig "github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/config"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/httpapi"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/service"
@@ -19,12 +20,13 @@ import (
 
 const defaultListenAddress = "127.0.0.1:12450"
 
-type config struct {
+type serverConfig struct {
 	listenAddress string
 	bucket        string
 	region        string
 	secretID      string
 	secretKey     string
+	routing       deploymentconfig.Config
 }
 
 type standardLogger struct{ logger *log.Logger }
@@ -54,7 +56,7 @@ func main() {
 	}
 	handler := httpapi.New(
 		service.New(store, time.Now),
-		service.ChannelRouter{LegacyActive: legacyChannelActive},
+		newChannelRouter(configuration.routing),
 		nil,
 		standardLogger{logger},
 		standardMetrics{logger},
@@ -78,8 +80,10 @@ func main() {
 	}
 }
 
-func legacyChannelActive(context.Context) (bool, error) {
-	return false, nil
+func newChannelRouter(configuration deploymentconfig.Config) service.ChannelRouter {
+	return service.ChannelRouter{LegacyActive: func(context.Context) (bool, error) {
+		return configuration.LegacyRoutingActive, nil
+	}}
 }
 
 func serve(server *http.Server, signals <-chan os.Signal, logger *log.Logger) int {
@@ -106,16 +110,32 @@ func serve(server *http.Server, signals <-chan os.Signal, logger *log.Logger) in
 	}
 }
 
-func loadConfig() (config, error) {
-	configuration := config{
+func loadConfig() (serverConfig, error) {
+	routingValues := make(map[string]string)
+	for _, name := range []string{
+		"UPDATE_STABLE_CHANNEL_KEY",
+		"UPDATE_LEGACY_CHANNEL_KEY",
+		"UPDATE_LEGACY_ROUTING_ACTIVE",
+		"UPDATE_PUBLISHER_POLICY_KEY",
+	} {
+		if value, present := os.LookupEnv(name); present {
+			routingValues[name] = value
+		}
+	}
+	routing, err := deploymentconfig.FromEnv(routingValues)
+	if err != nil {
+		return serverConfig{}, err
+	}
+	configuration := serverConfig{
 		listenAddress: valueOrDefault("UPDATE_API_LISTEN", defaultListenAddress),
 		bucket:        os.Getenv("COS_BUCKET"),
 		region:        os.Getenv("COS_REGION"),
 		secretID:      os.Getenv("COS_SECRET_ID"),
 		secretKey:     os.Getenv("COS_SECRET_KEY"),
+		routing:       routing,
 	}
 	if err := validateLoopbackAddress(configuration.listenAddress); err != nil {
-		return config{}, err
+		return serverConfig{}, err
 	}
 	for _, variable := range []struct {
 		name  string
@@ -127,7 +147,7 @@ func loadConfig() (config, error) {
 		{"COS_SECRET_KEY", configuration.secretKey},
 	} {
 		if variable.value == "" {
-			return config{}, fmt.Errorf("%s is required", variable.name)
+			return serverConfig{}, fmt.Errorf("%s is required", variable.name)
 		}
 	}
 	return configuration, nil

@@ -14,13 +14,13 @@ GitHub Actions secrets: `EVSIGN_KEY`, `EVSIGN_PASSWORD`.
 
 Store these signing variables and secrets only in the protected GitHub Environment `release`, with its approval and branch rules enabled. The workflow prebuilds security tooling from `RELEASE_TOOLING_COMMIT_SHA`, then treats the requested tag only as target source/assets. Exact `v0.4.11` is rejected before the protected environment because only the bridge workflow owns it. A validated GitHub Release is the workflow's terminal success condition; the workflow does not hold COS credentials or invoke the COS publisher.
 
-Server environment variables: `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`. The channel object is fixed in the binary as `channels/stable/latest.json` and is not configurable.
+Server environment variables are `UPDATE_API_LISTEN`, `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`, `UPDATE_STABLE_CHANNEL_KEY`, `UPDATE_LEGACY_CHANNEL_KEY`, `UPDATE_LEGACY_ROUTING_ACTIVE`, and `UPDATE_PUBLISHER_POLICY_KEY`. The last four form a closed typed configuration: the only accepted object keys are `channels/stable/latest.json`, `channels/legacy-rushrush/latest.json`, and `trust/publisher/latest.json`; activation accepts only exact `true` or `false`. Omitted routing variables use those reviewed keys and keep legacy inactive. The production file must nevertheless spell out all four, with `UPDATE_LEGACY_ROUTING_ACTIVE=false`, so the candidate diff is reviewable.
 
-Mirror environment variables: `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, `COS_SECRET_KEY`. They belong only in the root-owned `/etc/gift-panel-release-mirror.env` on Lighthouse and must not be copied into GitHub.
+Mirror environment variables are only `COS_BUCKET`, `COS_REGION`, `COS_SECRET_ID`, and `COS_SECRET_KEY`. Stable uses system account `gift-panel-mirror`, CAM identity `lighthouse-cos-publisher`, and root-owned `/etc/gift-panel-release-mirror.env`; legacy uses distinct system account `gift-panel-legacy-mirror`, CAM identity `lighthouse-cos-legacy-publisher`, and root-owned `/etc/gift-panel-legacy-release-mirror.env`. Each file is mode `0600`, contains different credentials, and must not be copied into GitHub. Neither the API nor either mirror receives a KMS provider variable or KMS Sign permission.
 
 Rendering variables: `PUBLIC_DOMAIN`, `ICP_NUMBER`, `TLS_CERT_PATH`, `TLS_KEY_PATH`.
 
-The Lighthouse timer checks the public GitHub Release asynchronously every five minutes. GitHub publication never waits for the mirror. The oneshot validates all required public assets before constructing a COS client, preserves immutable release objects, and advances the stable pointer only after complete verification.
+The existing `gift-panel-release-mirror.timer` checks the public GitHub Release asynchronously every five minutes and still invokes `gift-panel-release-mirror.service`, now explicitly as `mirror --channel stable`. GitHub publication never waits for the mirror. The oneshot validates all required public assets before constructing a COS client, preserves immutable release objects, and advances the stable pointer only after complete verification. `gift-panel-legacy-release-mirror.service` is a dormant oneshot template for exact `mirror --channel legacy-rushrush --tag v0.4.11`; there is no legacy timer and it must not be enabled or started during this staging task.
 
 ## Install
 
@@ -79,6 +79,47 @@ curl --fail --silent --show-error http://127.0.0.1:12450/healthz | grep -Fx 'ok'
 curl --fail --silent --show-error https://PUBLIC_DOMAIN/api/v1/releases/latest
 curl --fail --silent --show-error https://PUBLIC_DOMAIN/api/v1/changelog
 ```
+
+### Stage version-aware routing with legacy inactive
+
+This is a local/read-only acceptance gate, not deployment authorization. Start the candidate API on an unused loopback port with a copy of the proposed root-owned environment and `UPDATE_LEGACY_ROUTING_ACTIVE=false`. Use the captured public User-Agent values verbatim and record only status, bounded error code, and `X-Gift-Panel-Update-Channel`; never record signed download query strings.
+
+```sh
+set -euo pipefail
+CANDIDATE_URL=http://127.0.0.1:12451
+check_route() {
+  expected_status=$1 expected_channel=$2 user_agent=$3
+  headers=$(mktemp) body=$(mktemp)
+  trap 'rm -f -- "$headers" "$body"' RETURN
+  status=$(curl --silent --show-error --output "$body" --dump-header "$headers" --write-out '%{http_code}' -H "User-Agent: $user_agent" "$CANDIDATE_URL/api/v1/releases/latest")
+  test "$status" = "$expected_status"
+  channel=$(tr -d '\r' < "$headers" | awk -F ': ' 'tolower($1)=="x-gift-panel-update-channel" {print $2}')
+  test "$channel" = "$expected_channel"
+  rm -f -- "$headers" "$body"
+  trap - RETURN
+}
+check_route 503 '' 'bilibili-live-gift-panel/0.4.7'
+check_route 200 stable 'bilibili-live-gift-panel/0.4.9'
+check_route 200 stable 'bilibili-live-gift-panel/0.4.10'
+```
+
+The v0.4.7 result must remain controlled unavailable even if `channels/legacy-rushrush/latest.json` already exists. It must never fall back to stable. Repeat v0.4.7 with an explicitly active local configuration against missing, malformed, and wrong-channel legacy fixtures; each must return controlled unavailable and must never read or return stable.
+
+Exercise fail-closed request handling separately: missing User-Agent, leading/trailing whitespace, duplicate User-Agent headers, prerelease/development versions, oversized values, and unknown versions must return HTTP 400 with `client_version_invalid`. The stable v0.4.9 and v0.4.10 checks must retain `Vary: User-Agent` and `Cache-Control: private, no-store`.
+
+Before and after the dry-run, read `channels/stable/latest.json` with the approved read-only COS tooling into separate mode-`0600` temporary files. Require byte equality with `cmp --silent` and matching `sha256sum`; do not run either mirror oneshot. The stable pointer and its hash must be unchanged while legacy is inactive.
+
+Verify the policy endpoint locally rather than trusting its shape. First run the reviewed `trustpolicy verify-bundle` command against the committed policy/audit bundle and reviewed P-256 SPKI. Save its verification envelope, decode `.policy.bytesBase64`, and require byte equality with `curl --fail --silent --show-error "$CANDIDATE_URL/api/v1/trust/publisher-policy"`. A JSON parse or field check alone is not signature verification.
+
+Record an exact byte comparison and SHA-256 for the installed and candidate binaries. For configuration, compare the complete root-owned installed and candidate files in the approved secure session, but export only a redacted diff that preserves the four routing names/values and reports credential fields as changed/unchanged without values. Confirm the candidate still has `UPDATE_LEGACY_ROUTING_ACTIVE=false`. Show the exact install, restart, health-check, and rollback commands together with these artifacts, then stop and obtain a separate action-time deployment confirmation before copying files, changing `current`, running `daemon-reload`, or restarting any service.
+
+Rollback restores the reviewed prior API binary and complete prior configuration, explicitly sets `UPDATE_LEGACY_ROUTING_ACTIVE=false`, restarts only the API after separate confirmation, and repeats the route matrix and local policy verification. A bridge rollback may restore or remove only the reviewed legacy pointer through a separately confirmed operator action; it never starts the stable mirror and never mutates `channels/stable/latest.json`.
+
+### Mirror permission and scheduler boundaries
+
+Review the two CAM identities independently in the provider policy simulator before creating or changing credentials. The stable identity may Head/Get/Put only the reviewed immutable stable release objects and `channels/stable/latest.json`; it must be denied `channels/legacy-rushrush/latest.json`, the trust-policy prefix, Delete/List/bucket administration, and every KMS action. The legacy identity may Head/Get/Put only the exact reviewed `releases/v0.4.11/` objects and `channels/legacy-rushrush/latest.json`; it must be denied `channels/stable/latest.json`, other release tags, the trust-policy prefix, Delete/List/bucket administration, and every KMS action. The API identity remains read-only for its reviewed release, channel, and policy objects and has no KMS action.
+
+Install the legacy environment and service file only after a separately approved bridge staging window. Do not create a legacy timer, add `WantedBy`, enable the oneshot, or alter `gift-panel-release-mirror.timer`. Separate state roots, system users, environment files, journals, locks, and ETags are mandatory; a dry-run or real invocation of one channel must not reuse the other's state.
 
 Before changing the stable channel, back up the current private COS object `channels/stable/latest.json` to a dated private key such as `channels/stable/backups/DATE/latest.json` using the approved COS operator tooling. To roll back, restore that verified backup to `channels/stable/latest.json`; do not overwrite immutable `releases/` objects. Restart the service only if its credentials or binary changed.
 
@@ -341,7 +382,7 @@ trap on_exit EXIT
 trap on_int INT
 trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
-printf '[Service]\nExecStart=\nExecStart=%s --dry-run\n' "$FINAL_BINARY" | sudo tee "$DROPIN" >/dev/null
+printf '[Service]\nExecStart=\nExecStart=%s --channel stable --dry-run\n' "$FINAL_BINARY" | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 mirror_verify_quiesced
 sudo systemctl start gift-panel-release-mirror.service
@@ -523,7 +564,7 @@ trap on_exit EXIT
 trap on_int INT
 trap on_term TERM
 sudo install -d -o root -g root -m 0755 "$DROPIN_DIR"
-printf '[Service]\nExecStart=\nExecStart=%s --dry-run\n' "$PREVIOUS_BINARY" | sudo tee "$DROPIN" >/dev/null
+printf '[Service]\nExecStart=\nExecStart=%s --channel stable --dry-run\n' "$PREVIOUS_BINARY" | sudo tee "$DROPIN" >/dev/null
 sudo systemctl daemon-reload
 mirror_verify_quiesced
 sudo systemctl start gift-panel-release-mirror.service

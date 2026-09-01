@@ -462,7 +462,7 @@ describe('update API deployment assets', () => {
     expect(sectionValue(service, 'Service', 'User')).toBe('gift-panel-mirror');
     expect(sectionValue(service, 'Service', 'Group')).toBe('gift-panel-mirror');
     expect(sectionValue(service, 'Service', 'EnvironmentFile')).toBe('/etc/gift-panel-release-mirror.env');
-    expect(sectionValue(service, 'Service', 'ExecStart')).toBe('/opt/gift-panel-release-mirror/current/gift-panel-release-mirror');
+    expect(sectionValue(service, 'Service', 'ExecStart')).toBe('/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --channel stable');
     expect(sectionValue(service, 'Service', 'StateDirectory')).toBe('gift-panel-release-mirror');
     expect(sectionValue(service, 'Service', 'StateDirectoryMode')).toBe('0700');
     for (const key of ['NoNewPrivileges', 'PrivateTmp', 'ProtectSystem', 'ProtectHome']) {
@@ -471,8 +471,8 @@ describe('update API deployment assets', () => {
     expect(sectionValue(service, 'Service', 'CapabilityBoundingSet')).toBe('');
     expect(sectionValue(service, 'Service', 'RestrictAddressFamilies')).toBe('AF_UNIX AF_INET AF_INET6');
     expect(sectionValue(service, 'Service', 'LogNamespace')).toBe('gift-panel-release-mirror');
-    expect(sectionValues(service, 'Service', 'ExecStart')).toEqual(['/opt/gift-panel-release-mirror/current/gift-panel-release-mirror']);
-    for (const [key, value] of Object.entries({ Type: 'oneshot', User: 'gift-panel-mirror', Group: 'gift-panel-mirror', EnvironmentFile: '/etc/gift-panel-release-mirror.env', ExecStart: '/opt/gift-panel-release-mirror/current/gift-panel-release-mirror', StateDirectory: 'gift-panel-release-mirror', StateDirectoryMode: '0700', NoNewPrivileges: 'true', PrivateTmp: 'true', ProtectSystem: 'strict', ProtectHome: 'true', ProtectKernelTunables: 'true', ProtectControlGroups: 'true', RestrictSUIDSGID: 'true', CapabilityBoundingSet: '', LockPersonality: 'true', MemoryDenyWriteExecute: 'true', RestrictAddressFamilies: 'AF_UNIX AF_INET AF_INET6', LogNamespace: 'gift-panel-release-mirror', UMask: '0077' })) {
+    expect(sectionValues(service, 'Service', 'ExecStart')).toEqual(['/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --channel stable']);
+    for (const [key, value] of Object.entries({ Type: 'oneshot', User: 'gift-panel-mirror', Group: 'gift-panel-mirror', EnvironmentFile: '/etc/gift-panel-release-mirror.env', ExecStart: '/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --channel stable', StateDirectory: 'gift-panel-release-mirror', StateDirectoryMode: '0700', NoNewPrivileges: 'true', PrivateTmp: 'true', ProtectSystem: 'strict', ProtectHome: 'true', ProtectKernelTunables: 'true', ProtectControlGroups: 'true', RestrictSUIDSGID: 'true', CapabilityBoundingSet: '', LockPersonality: 'true', MemoryDenyWriteExecute: 'true', RestrictAddressFamilies: 'AF_UNIX AF_INET AF_INET6', LogNamespace: 'gift-panel-release-mirror', UMask: '0077' })) {
       expect(sectionValues(service, 'Service', key)).toEqual([value]);
     }
     const repeated = parseUnit('[Service]\nUser=gift-panel-mirror\n[Service]\nUser=unexpected\n');
@@ -528,9 +528,9 @@ describe('update API deployment assets', () => {
     expect(readme).toContain('finish_dry_run 143');
     expect(readme).toContain('test ! -e "$DROPIN"');
     expect(readme).toContain('Result --value gift-panel-release-mirror.service');
-    expect(readme).toContain('ExecStart=%s --dry-run');
+    expect(readme).toContain('ExecStart=%s --channel stable --dry-run');
     expect(readme).toContain('systemctl start gift-panel-release-mirror.service');
-    expect(readme.indexOf('systemctl enable --now gift-panel-release-mirror.timer')).toBeGreaterThan(readme.indexOf('gift-panel-release-mirror --dry-run'));
+    expect(readme.indexOf('systemctl enable --now gift-panel-release-mirror.timer')).toBeGreaterThan(readme.indexOf('gift-panel-release-mirror --channel stable --dry-run'));
     expect(readme).not.toContain('ln -sfn /opt/gift-panel-release-mirror');
     expect(readme).toContain('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
     expect(readme).toContain('Head/Get/Put');
@@ -606,7 +606,7 @@ describe('update API deployment assets', () => {
     const checksum = install.indexOf('sha256sum -c -');
     const identity = install.indexOf('go version -m "$STAGED_BINARY"');
     const publish = install.indexOf('sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"');
-    const dryRun = dryRunBlock.indexOf("ExecStart=%s --dry-run");
+    const dryRun = dryRunBlock.indexOf("ExecStart=%s --channel stable --dry-run");
     const pointer = dryRunBlock.indexOf('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
 
     for (const [name, index] of Object.entries({ quiesce, stage, finalCheck, checksum, identity, publish, dryRun, pointer })) {
@@ -618,7 +618,7 @@ describe('update API deployment assets', () => {
     expect(finalCheck).toBeLessThan(publish);
     expect(checksum).toBeLessThan(publish);
     expect(identity).toBeLessThan(publish);
-    expect(readme.indexOf('sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"')).toBeLessThan(readme.indexOf('ExecStart=%s --dry-run'));
+    expect(readme.indexOf('sudo mv -T -- "$STAGE_DIR" "$FINAL_RELEASE"')).toBeLessThan(readme.indexOf('ExecStart=%s --channel stable --dry-run'));
     expect(dryRun).toBeLessThan(pointer);
     for (const evidence of [
       'sudo chmod 0755 "$STAGE_DIR"',
@@ -706,7 +706,7 @@ describe('update API deployment assets', () => {
     const sidecar = rollback.indexOf('PREVIOUS_SIDECAR="$PREVIOUS_RELEASE/gift-panel-release-mirror.reviewed"');
     const checksum = rollback.indexOf('sha256sum -c -');
     const identity = rollback.indexOf('go version -m "$PREVIOUS_BINARY"');
-    const dryRun = rollback.indexOf('ExecStart=%s --dry-run');
+    const dryRun = rollback.indexOf('ExecStart=%s --channel stable --dry-run');
     const pointer = rollback.indexOf('sudo mv -Tf -- "$CURRENT_TMP" /opt/gift-panel-release-mirror/current');
 
     for (const [name, index] of Object.entries({ quiesce, sidecar, checksum, identity, dryRun, pointer })) {
