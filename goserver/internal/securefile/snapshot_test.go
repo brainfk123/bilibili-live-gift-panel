@@ -103,3 +103,60 @@ func TestExactPairPublicationKeepsCommittedOutputsWhenBackupCleanupFails(t *test
 		}
 	}
 }
+
+func TestLinkContentAddressedCreatesSameFileExpectedName(t *testing.T) {
+	directory := t.TempDir()
+	contents := []byte("exact sealed executable bytes")
+	digest := sha256.Sum256(contents)
+	hash := hex.EncodeToString(digest[:])
+	sourceName := hash + ".exe"
+	if err := os.WriteFile(filepath.Join(directory, sourceName), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := LinkContentAddressed(directory, hash, "gift-panel-windows-x64.exe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked.SHA256 != hash || linked.Size != int64(len(contents)) || linked.Name != "gift-panel-windows-x64.exe" {
+		t.Fatalf("linked evidence = %#v", linked)
+	}
+	sourceInfo, err := os.Stat(filepath.Join(directory, sourceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedInfo, err := os.Stat(filepath.Join(directory, linked.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(sourceInfo, linkedInfo) {
+		t.Fatal("expected-name executable is not the same file as the sealed source")
+	}
+}
+
+func TestLinkContentAddressedRejectsSourceSwapAfterRetainedOpen(t *testing.T) {
+	directory := t.TempDir()
+	contents := []byte("retained sealed executable")
+	digest := sha256.Sum256(contents)
+	hash := hex.EncodeToString(digest[:])
+	source := filepath.Join(directory, hash+".exe")
+	if err := os.WriteFile(source, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LinkContentAddressed(directory, hash, "gift-panel-windows-x64.exe", &LinkHooks{AfterOpenSource: func() error {
+		parked := source + ".parked"
+		if renameErr := os.Rename(source, parked); renameErr != nil {
+			return renameErr
+		}
+		if writeErr := os.WriteFile(source, []byte("attacker replacement"), 0o600); writeErr != nil {
+			_ = os.Rename(parked, source)
+			return writeErr
+		}
+		return nil
+	}})
+	if err == nil {
+		t.Fatal("source swap after retained open was accepted")
+	}
+	if _, statErr := os.Stat(filepath.Join(directory, "gift-panel-windows-x64.exe")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected-name link was published after swap: %v", statErr)
+	}
+}

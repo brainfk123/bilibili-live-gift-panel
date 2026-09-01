@@ -61,7 +61,7 @@ function fixture() {
     standaloneFFmpegPath: write('ffmpeg-windows-x64.exe', standaloneFFmpeg),
     ffmpegSidecarPath: write('ffmpeg-windows-x64.exe.sha256', `${ffmpegHash}  ffmpeg-windows-x64.exe`),
 	ffmpegArchivePath: write('ffmpeg.zip', ffmpegArchive), ffmpegManifestPath: write('manifest.json', ffmpegManifest), expectedFFmpegManifestSHA256: sha256(ffmpegManifest),
-    rootSPKIPath: write('root.der', rootSPKI), expectedRootSHA256: sha256(rootSPKI), rootKeyID: 'kms-production-root-key-01',
+	rootSPKIPath: write('root.der', rootSPKI), expectedRootSHA256: sha256(rootSPKI),
     bootstrapPolicyPath: write('bootstrap.json', bootstrapPolicy), expectedBootstrapPolicySHA256: sha256(bootstrapPolicy), bootstrapPolicyEpoch: 1,
     authorizationPolicyPath: write('authorization.json', authorizationPolicy), expectedAuthorizationPolicySHA256: sha256(authorizationPolicy), authorizationPolicyEpoch: 2,
     version: '0.4.12', tag: 'v0.4.12', commit, outputPath: join(outputDirectory, 'stable-release-evidence.json'),
@@ -86,7 +86,7 @@ describe('verify enrollment build', () => {
     expect(evidence).toEqual({
       schemaVersion: 1, version: '0.4.12', tag: 'v0.4.12', commit: 'a'.repeat(40),
 	  artifact: { sha256: value.artifactHash, peContentSha256: 'b'.repeat(64), signatureStatus: 'Valid', identity: naisNet },
-      root: { spkiSha256: value.options.expectedRootSHA256, keyId: 'kms-production-root-key-01' },
+	  root: { spkiSha256: value.options.expectedRootSHA256, rootKeyId: `sha256:${value.options.expectedRootSHA256}` },
       bootstrapPolicy: { sha256: value.options.expectedBootstrapPolicySHA256, epoch: 1, signatureStatus: 'Valid' },
 	  authorizationPolicy: { sha256: value.options.expectedAuthorizationPolicySHA256, epoch: 2, signatureStatus: 'Valid', tag: 'v0.4.12', artifactSha256: value.artifactHash, identity: naisNet },
 	  ffmpeg: { version: '9.0', sha256: value.ffmpegHash, archiveSha256: value.goEvidence.ffmpegArchiveSha256, manifestSha256: value.goEvidence.ffmpegManifestSha256, signatureStatus: 'Valid', identity: naisNet },
@@ -95,7 +95,8 @@ describe('verify enrollment build', () => {
     const serialized = JSON.stringify(evidence);
     expect(serialized).not.toContain(value.root);
     expect(serialized).not.toMatch(/[A-Z]:\\|\/tmp\//i);
-	expect(serialized).not.toMatch(/"(?:size|sidecars|channel)"/);
+    expect(serialized).not.toMatch(/"(?:size|sidecars|channel)"/);
+	expect(serialized).not.toContain('kms-production-root-key-01');
     expect(basename(value.options.artifactPath)).toBe(`${value.artifactHash}.exe`);
   });
 
@@ -126,5 +127,11 @@ describe('verify enrollment build', () => {
     writeFileSync(renamed, value.artifact);
     value.options.artifactPath = renamed;
     await expect(verifyEnrollmentBuild(value.options)).rejects.toThrow(/content-addressed/i);
+  });
+
+  it('rejects a user-controlled root key ID instead of copying it into evidence', async () => {
+	const value=fixture();
+	(value.options as EnrollmentVerificationOptions & { rootKeyID:string }).rootKeyID='kms-user-controlled';
+	await expect(verifyEnrollmentBuild(value.options)).rejects.toThrow(/enrollment build verification failed/i);
   });
 });

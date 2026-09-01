@@ -118,6 +118,24 @@ func TestVerifyEnrollmentPoliciesProvesExactAuthorizationBeforeBuild(t *testing.
 	}
 }
 
+func TestVerifyEnrollmentCandidateBeforeAuthorizationPolicyExists(t *testing.T) {
+	fixture := enrollmentArtifactFixture(t)
+	evidence, err := VerifyEnrollmentCandidate(VerifyEnrollmentCandidateOptions{
+		ArtifactPath: fixture.options.ArtifactPath, ExpectedPEContentSHA256: fixture.options.ExpectedPEContentSHA256,
+		Version: fixture.options.Version, Tag: fixture.options.Tag, Commit: fixture.options.Commit,
+		RootSPKIPath: fixture.options.RootSPKIPath, ExpectedRootSHA256: fixture.options.ExpectedRootSHA256,
+		BootstrapPolicyPath: fixture.options.BootstrapPolicyPath, ExpectedBootstrapPolicySHA256: fixture.options.ExpectedBootstrapPolicySHA256, ExpectedBootstrapPolicyEpoch: fixture.options.ExpectedBootstrapPolicyEpoch,
+		FFmpegArchivePath: fixture.options.FFmpegArchivePath, FFmpegManifestPath: fixture.options.FFmpegManifestPath,
+		Now: fixture.options.Now, InspectAuthenticode: fixture.options.InspectAuthenticode,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.SchemaVersion != 1 || evidence.SignedFileSHA256 != fixture.artifactSHA256 || evidence.RootKeyID != "sha256:"+fixture.options.ExpectedRootSHA256 || evidence.BootstrapSignatureStatus != "Valid" || evidence.OuterIdentity != naisNetIdentity || evidence.FFmpegIdentity != naisNetIdentity {
+		t.Fatalf("candidate evidence = %#v", evidence)
+	}
+}
+
 type enrollmentArtifactTestFixture struct {
 	root                            string
 	key                             *ecdsa.PrivateKey

@@ -1,4 +1,4 @@
-name: Release Windows executable
+name: Stable Release lifecycle
 
 on:
   push:
@@ -6,165 +6,441 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
     inputs:
+      operation:
+        description: Explicit stable lifecycle operation
+        required: true
+        type: choice
+        options:
+          - publish-candidate
+          - verify-existing
       tag:
-        description: Existing vMAJOR.MINOR.PATCH tag to publish or repair
+        description: Exact canonical stable tag
         required: true
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
-  group: gift-panel-production-release
+  group: gift-panel-stable-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  validate-tag:
+  classify:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
-      tag: ${{ steps.validate.outputs.tag }}
+      mode: ${{ steps.classify.outputs.mode }}
+      tag: ${{ steps.classify.outputs.tag }}
+      version: ${{ steps.classify.outputs.version }}
     steps:
-      - name: Reject bridge tag from stable workflow
-        id: validate
+      - name: Classify verified stable lifecycle state
+        id: classify
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_OPERATION: ${{ inputs.operation || '' }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo 'stable release tag is not canonical' >&2
+            echo 'stable tag is not canonical' >&2
             exit 1
           fi
           if [[ "$RELEASE_TAG" == 'v0.4.11' ]]; then
             echo 'bridge workflow alone owns v0.4.11' >&2
             exit 1
           fi
-          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          version="${RELEASE_TAG#v}"
+          IFS=. read -r major minor patch <<<"$version"
+          enrollment=false
+          if (( major > 0 || (major == 0 && (minor > 4 || (minor == 4 && patch >= 12))) )); then enrollment=true; fi
+          encoded_tag="$(node -p 'encodeURIComponent(process.argv[1])' "$RELEASE_TAG")"
+          status="$(curl --silent --show-error --output release.json --write-out '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag")"
+          if [[ "$status" == 200 ]]; then
+            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and (.draft == false) and (.prerelease == false) and (.published_at | type == "string")' release.json >/dev/null
+            release_exists=true
+          elif [[ "$status" == 404 ]]; then
+            release_exists=false
+          else
+            echo 'GitHub Release lookup failed' >&2
+            exit 1
+          fi
+          if [[ "$release_exists" == true && "$enrollment" == true ]]; then
+            echo 'Existing enrollment stable Releases are immutable and require a separate audited recovery.' >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            if [[ "$release_exists" == true ]]; then mode=historical-verify
+            elif [[ "$enrollment" == true ]]; then mode=prepare-candidate
+            else
+              echo 'Historical stable tags are verification-only and cannot be recreated.' >&2
+              exit 1
+            fi
+          elif [[ "$REQUESTED_OPERATION" == publish-candidate ]]; then
+            if [[ "$enrollment" != true || "$release_exists" == true ]]; then
+              echo 'Publish requires an absent v0.4.12+ Release.' >&2
+              exit 1
+            fi
+            mode=publish-candidate
+          elif [[ "$REQUESTED_OPERATION" == verify-existing ]]; then
+            if [[ "$enrollment" == true || "$release_exists" != true ]]; then
+              echo 'Historical verification requires a verified existing pre-v0.4.12 Release.' >&2
+              exit 1
+            fi
+            mode=historical-verify
+          else
+            echo 'unsupported stable operation' >&2
+            exit 1
+          fi
+          printf 'mode=%s\ntag=%s\nversion=%s\n' "$mode" "$RELEASE_TAG" "$version" >>"$GITHUB_OUTPUT"
 
-  release:
-    needs: validate-tag
+  historical-verify:
+    needs: classify
+    if: needs.classify.outputs.mode == 'historical-verify'
     runs-on: windows-latest
-    environment: release
+    permissions:
+      contents: read
     env:
-      RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+      RELEASE_TAG: ${{ needs.classify.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.classify.outputs.version }}
     steps:
-      - name: Validate release tag
-        shell: pwsh
-        run: |
-          if ($env:RELEASE_TAG -cnotmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$') {
-            throw "Release tag must use canonical vMAJOR.MINOR.PATCH syntax"
-          }
-          $releaseVersion = [Version]$env:RELEASE_TAG.Substring(1)
-          $standaloneFFmpeg = $releaseVersion -ge [Version]'0.4.10'
-          "RELEASE_STANDALONE_FFMPEG=$($standaloneFFmpeg.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Validate reviewed release tooling commit
-        shell: pwsh
-        env:
-          RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
-        run: |
-          if ($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Reviewed release tooling commit is invalid.' }
-
-      - name: Check out reviewed release tooling
+      - name: Check out reviewed verification tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
           path: release-tools
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Set up reviewed tooling Go
+      - name: Set up credential-free historical verifier
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: release-tools/goserver/go.mod
           cache-dependency-path: release-tools/goserver/go.sum
-
-      - name: Build reviewed release security tools
+      - name: Build credential-free historical verifier
         shell: pwsh
         run: |
-          Copy-Item -LiteralPath release-tools -Destination "$env:RUNNER_TEMP/release-tools" -Recurse
           go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
-          if ($LASTEXITCODE -ne 0) { throw 'Reviewed artifact inspector build failed.' }
-          Copy-Item -LiteralPath release-tools/scripts/sign-evsign.mjs -Destination "$env:RUNNER_TEMP/sign-evsign.mjs"
-          Copy-Item -LiteralPath release-tools/scripts/verify-enrollment-build.mjs -Destination "$env:RUNNER_TEMP/verify-enrollment-build.mjs"
-          "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "ENROLLMENT_VERIFIER_SCRIPT_PATH=$env:RUNNER_TEMP/verify-enrollment-build.mjs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TOOL_ROOT=$env:RUNNER_TEMP/release-tools" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Check out release tag
+          if ($LASTEXITCODE -ne 0) { throw 'Historical verifier build failed.' }
+          "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/release-tools" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check out exact historical tag as data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
-          fetch-depth: 0
+          ref: refs/tags/${{ needs.classify.outputs.tag }}
+          fetch-depth: 1
           persist-credentials: false
-
-      - name: Resolve checked-out release commit
-        shell: pwsh
-        run: |
-          $releaseCommit = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { throw "Could not resolve checked-out release commit" }
-          "RELEASE_COMMIT=$releaseCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Inspect existing GitHub release
+      - name: Download existing historical Release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $encodedTag = [Uri]::EscapeDataString($env:RELEASE_TAG)
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
+          New-Item -ItemType Directory -Path dist/historical -ErrorAction Stop | Out-Null
+          gh release download $env:RELEASE_TAG --dir dist/historical --pattern gift-panel-windows-x64.exe --pattern gift-panel-windows-x64.exe.sha256 --pattern gift-panel-update.json --pattern gift-panel-changelog.json
+          if ($LASTEXITCODE -ne 0) { throw 'Historical Release asset download failed.' }
+          if ([Version]$env:RELEASE_VERSION -ge [Version]'0.4.10') {
+            gh release download $env:RELEASE_TAG --dir dist/historical --pattern ffmpeg-windows-x64.exe --pattern ffmpeg-windows-x64.exe.sha256
+            if ($LASTEXITCODE -ne 0) { throw 'Historical standalone FFmpeg download failed.' }
           }
-          try {
-            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-          } catch {
-            if ($_.Exception.Response.StatusCode -eq [Net.HttpStatusCode]::NotFound) {
-              'RELEASE_EXISTS=false' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-              exit 0
-            }
-            throw "GitHub Release lookup failed"
+      - name: Verify standalone FFmpeg repair component
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ([Version]$env:RELEASE_VERSION -lt [Version]'0.4.10') { exit 0 }
+          $identity = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --kind fixed --tool-root $env:RELEASE_TOOL_ROOT | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or [string]$identity.tag -cnotmatch '^ffmpeg-component-v2-[0-9a-f]{64}$') { throw 'Fixed historical FFmpeg identity failed.' }
+          $encoded=[Uri]::EscapeDataString([string]$identity.tag);$headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+          $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encoded" -Headers $headers
+          $required=@('ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt')
+          $names=@($release.assets|ForEach-Object{[string]$_.name});if($release.draft -or $release.prerelease -or $names.Count -ne $required.Count){throw 'Fixed historical FFmpeg Release closure failed.'}
+          New-Item -ItemType Directory -Path dist/historical-component -ErrorAction Stop|Out-Null
+          $release|ConvertTo-Json -Depth 10|Set-Content -NoNewline -Encoding utf8 dist/historical-component-release.json
+          foreach($name in $required){
+            gh release download $identity.tag --dir dist/historical-component --pattern $name
+            if($LASTEXITCODE -ne 0){throw 'Fixed historical FFmpeg component download failed.'}
           }
-          if ($release.draft -or $release.prerelease -or -not $release.published_at) {
-            throw "Existing GitHub Release is incomplete. Manual recovery required before rerunning."
-          }
-
-          try {
-            $publishedAt = [DateTimeOffset]$release.published_at
-          } catch {
-            throw "Existing GitHub Release publication timestamp is invalid. Manual recovery required before rerunning."
-          }
-          'RELEASE_EXISTS=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Classify verified stable Release state
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --tool-root $env:RELEASE_TOOL_ROOT --metadata dist/historical-component-release.json --input dist/historical-component --tag $identity.tag
+          if($LASTEXITCODE -ne 0){throw 'Fixed historical FFmpeg metadata failed.'}
+          foreach($asset in Get-ChildItem dist/historical-component -File){gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY;if($LASTEXITCODE -ne 0){throw 'Fixed historical FFmpeg attestation failed.'}}
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input dist/historical-component --sealed-output dist/historical-ffmpeg-sealed --manifest-output dist/historical-component-manifest.json
+          if($LASTEXITCODE -ne 0){throw 'Fixed historical FFmpeg sealing failed.'}
+      - name: Verify historical Release without mutation
         shell: pwsh
         run: |
-          $releaseVersion = [Version]$env:RELEASE_TAG.Substring(1)
-          if ($env:RELEASE_EXISTS -eq 'true') {
-            if ($releaseVersion -ge [Version]'0.4.12') { throw 'Existing enrollment stable Releases are immutable and require a separate audited recovery; this workflow will not rebuild, resign, or reinterpret them.' }
-            'RELEASE_MODE=verified-existing-repair' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            exit 0
+          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/historical/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+          if ($LASTEXITCODE -ne 0) { throw 'Historical EXE Authenticode verification failed.' }
+          $exeHash = (Get-FileHash -Algorithm SHA256 dist/historical/gift-panel-windows-x64.exe).Hash.ToLowerInvariant()
+          if ((Get-Content dist/historical/gift-panel-windows-x64.exe.sha256 -Raw) -cne "$exeHash  gift-panel-windows-x64.exe") { throw 'Historical EXE sidecar mismatch.' }
+          function Test-ExactJsonObjectProperties {
+            param([System.Text.Json.JsonElement]$Element,[string[]]$Names)
+            if($Element.ValueKind -ne [System.Text.Json.JsonValueKind]::Object){return $false}
+            $actual=@($Element.EnumerateObject()|ForEach-Object{$_.Name})
+            if($actual.Count -ne $Names.Count){return $false}
+            foreach($name in $Names){if(@($actual|Where-Object{$_ -ceq $name}).Count -ne 1){return $false}}
+            return $true
           }
-          if ($releaseVersion -lt [Version]'0.4.12') {
-            throw 'Historical stable tags are repair-only and require a verified existing GitHub Release.'
+          try{$manifestDocument=[System.Text.Json.JsonDocument]::Parse((Get-Content dist/historical/gift-panel-update.json -Raw))}catch{throw 'Historical fallback update manifest is malformed.'}
+          try{
+            $manifest=$manifestDocument.RootElement
+            if(-not(Test-ExactJsonObjectProperties $manifest @('tag_name','draft','prerelease','assets'))){throw 'Historical fallback update manifest root is inconsistent.'}
+            $tag=$manifest.GetProperty('tag_name');$draft=$manifest.GetProperty('draft');$prerelease=$manifest.GetProperty('prerelease');$assets=$manifest.GetProperty('assets')
+            if($tag.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $tag.GetString() -cne $env:RELEASE_TAG -or $draft.ValueKind -ne [System.Text.Json.JsonValueKind]::False -or $prerelease.ValueKind -ne [System.Text.Json.JsonValueKind]::False -or $assets.ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or $assets.GetArrayLength() -ne 1){throw 'Historical fallback update manifest metadata is inconsistent.'}
+            $asset=$assets[0]
+            if(-not(Test-ExactJsonObjectProperties $asset @('name','browser_download_url','size','digest'))){throw 'Historical fallback update manifest asset is inconsistent.'}
+            $name=$asset.GetProperty('name');$url=$asset.GetProperty('browser_download_url');$size=$asset.GetProperty('size');$digest=$asset.GetProperty('digest');[int64]$parsedSize=0
+            $expectedURL="https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
+            if($name.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $name.GetString() -cne 'gift-panel-windows-x64.exe' -or $url.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $url.GetString() -cne $expectedURL -or $digest.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or $digest.GetString() -cne "sha256:$exeHash" -or $size.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or -not $size.TryGetInt64([ref]$parsedSize) -or $parsedSize -ne (Get-Item dist/historical/gift-panel-windows-x64.exe).Length){throw 'Historical fallback update manifest asset is inconsistent.'}
+          }finally{$manifestDocument.Dispose()}
+          $changelog = Get-Content dist/historical/gift-panel-changelog.json -Raw | ConvertFrom-Json
+          if ($changelog.schemaVersion -ne 1 -or @($changelog.releases).Count -eq 0) { throw 'Historical changelog is invalid.' }
+          if ([Version]$env:RELEASE_VERSION -ge [Version]'0.4.10') {
+            & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/historical/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
+            if ($LASTEXITCODE -ne 0) { throw 'Historical FFmpeg Authenticode verification failed.' }
+            $ffmpegHash = (Get-FileHash -Algorithm SHA256 dist/historical/ffmpeg-windows-x64.exe).Hash.ToLowerInvariant()
+            if ((Get-Content dist/historical/ffmpeg-windows-x64.exe.sha256 -Raw) -cne "$ffmpegHash  ffmpeg-windows-x64.exe") { throw 'Historical standalone FFmpeg does not match its checksum.' }
+            $component=Get-Content dist/historical-component-manifest.json -Raw|ConvertFrom-Json
+            if($component.version -cne '9.0' -or $component.authenticode -ne $true -or $component.sha256 -cne $ffmpegHash -or [int64]$component.size -ne (Get-Item dist/historical/ffmpeg-windows-x64.exe).Length){throw 'Historical standalone FFmpeg differs from fixed sealed component.'}
           }
-          'RELEASE_MODE=new-enrollment-stable' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Validate stable enrollment inputs
-        if: env.RELEASE_EXISTS != 'true'
+  prepare-candidate:
+    needs: classify
+    if: needs.classify.outputs.mode == 'prepare-candidate'
+    runs-on: windows-latest
+    environment: stable-prepare
+    permissions:
+      contents: read
+    outputs:
+      candidate-sha256: ${{ steps.candidate.outputs.sha256 }}
+      candidate-size: ${{ steps.candidate.outputs.size }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-name: ${{ steps.candidate.outputs.artifact-name }}
+    env:
+      RELEASE_TAG: ${{ needs.classify.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.classify.outputs.version }}
+    steps:
+      - name: Check out reviewed candidate tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
+          path: release-tools
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up reviewed candidate tooling
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: release-tools/goserver/go.mod
+          cache-dependency-path: release-tools/goserver/go.sum
+      - name: Build credential-scoped candidate tools
+        shell: pwsh
+        run: |
+          go -C release-tools/goserver build -o "$env:RUNNER_TEMP/artifact-inspector.exe" ./cmd/artifact-inspector
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate inspector build failed.' }
+          Copy-Item release-tools/scripts/sign-evsign.mjs "$env:RUNNER_TEMP/sign-evsign.mjs"
+          Copy-Item release-tools/scripts/verify-enrollment-build.mjs "$env:RUNNER_TEMP/verify-enrollment-build.mjs"
+          "AUTHENTICODE_INSPECTOR_PATH=$env:RUNNER_TEMP/artifact-inspector.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "EVSIGN_SCRIPT_PATH=$env:RUNNER_TEMP/sign-evsign.mjs" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/release-tools" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TARGET_ROOT=$env:GITHUB_WORKSPACE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check out exact candidate tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/tags/${{ needs.classify.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate prepare request and bootstrap trust
         shell: pwsh
         env:
           STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
           STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
           STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
-          STABLE_TRUST_ROOT_KEY_ID: ${{ vars.STABLE_TRUST_ROOT_KEY_ID }}
+          STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
+          STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
+          STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
+          STABLE_FFMPEG_COMPONENT_TAG: ${{ vars.STABLE_FFMPEG_COMPONENT_TAG }}
+          STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
+        run: |
+          $commit = git rev-parse HEAD
+          $rawObject = git rev-parse "refs/tags/$env:RELEASE_TAG"
+          $peeled = git rev-parse "refs/tags/$env:RELEASE_TAG^{commit}"
+          if ($commit -cne $env:STABLE_REVIEWED_COMMIT_SHA -or $peeled -cne $env:STABLE_REVIEWED_COMMIT_SHA -or $rawObject -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA) { throw 'Reviewed candidate tag binding failed.' }
+          if ((Get-Content package.json -Raw | ConvertFrom-Json).version -cne $env:RELEASE_VERSION) { throw 'Candidate tag does not match package version.' }
+          if ($env:STABLE_TRUST_ROOT_SPKI_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_BOOTSTRAP_POLICY_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_BOOTSTRAP_POLICY_EPOCH -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_FFMPEG_COMPONENT_TAG -cnotmatch '^ffmpeg-component-v2-[0-9a-f]{64}$') { throw 'Candidate trust input is missing or malformed.' }
+          try { $root = [Convert]::FromBase64String($env:STABLE_TRUST_ROOT_SPKI_B64); $bootstrap = [Convert]::FromBase64String($env:STABLE_BOOTSTRAP_POLICY_B64) } catch { throw 'Candidate trust Base64 is invalid.' }
+          if ([Convert]::ToBase64String($root) -cne $env:STABLE_TRUST_ROOT_SPKI_B64 -or [Convert]::ToBase64String($bootstrap) -cne $env:STABLE_BOOTSTRAP_POLICY_B64) { throw 'Candidate trust Base64 is noncanonical.' }
+          $rootHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($root)).ToLowerInvariant()
+          $bootstrapHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bootstrap)).ToLowerInvariant()
+          if ($rootHash -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or $bootstrapHash -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or $rootHash -ceq '5cd252fb0ce8932436faf8ccd1040981b89ee4ad6b9fe9e2a2b7e71aacb27cd3' -or $bootstrapHash -ceq '205b8ea9bf7e79d55292d63a1266a4882ab01fa5edb3eb79421724ddb9265d0e') { throw 'Candidate trust digest or fixture gate failed.' }
+          $trustRoot = Join-Path $env:RUNNER_TEMP 'candidate-trust'
+          New-Item -ItemType Directory -Path $trustRoot -ErrorAction Stop | Out-Null
+          [IO.File]::WriteAllBytes("$trustRoot/root-spki.der", $root)
+          [IO.File]::WriteAllBytes("$trustRoot/bootstrap-policy.json", $bootstrap)
+          "RELEASE_COMMIT=$commit" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_TRUST_ROOT=$trustRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Set up Node.js for candidate tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Resolve closed stable signer
+        shell: pwsh
+        env:
+          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
+          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
+        run: |
+          $profile = node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $profile.profile -cne 'stable' -or $profile.identity.country -cne 'CN' -or $profile.identity.organization -cne 'NaisNet Technology Co., Ltd.' -or $profile.identity.organizationId -cne '91210103MA7CJ3C094') { throw 'Stable signer profile is invalid.' }
+      - name: Install and test candidate source
+        run: |
+          npm ci
+          npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
+          npm run typecheck
+          npm run build:ui
+          npm run prepare:go-assets
+          go -C goserver test ./...
+      - name: Download reviewed signed FFmpeg closure
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_FFMPEG_COMPONENT_TAG: ${{ vars.STABLE_FFMPEG_COMPONENT_TAG }}
+          STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
+        run: |
+          $encoded = [Uri]::EscapeDataString($env:STABLE_FFMPEG_COMPONENT_TAG)
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $release = Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encoded" -Headers $headers
+          $required = @('ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt')
+          $names = @($release.assets | ForEach-Object { [string]$_.name })
+          if ($release.draft -or $release.prerelease -or $release.tag_name -cne $env:STABLE_FFMPEG_COMPONENT_TAG -or $names.Count -ne $required.Count) { throw 'Reviewed FFmpeg component Release is invalid.' }
+          New-Item -ItemType Directory -Path dist/ffmpeg-component -ErrorAction Stop | Out-Null
+          $release | ConvertTo-Json -Depth 10 | Set-Content -NoNewline -Encoding utf8 dist/ffmpeg-component-release.json
+          foreach ($name in $required) { gh release download $env:STABLE_FFMPEG_COMPONENT_TAG --dir dist/ffmpeg-component --pattern $name; if ($LASTEXITCODE -ne 0) { throw 'FFmpeg component download failed.' } }
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --tool-root $env:RELEASE_TOOL_ROOT --metadata dist/ffmpeg-component-release.json --input dist/ffmpeg-component --tag $env:STABLE_FFMPEG_COMPONENT_TAG
+          foreach ($asset in Get-ChildItem dist/ffmpeg-component -File) { gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY; if ($LASTEXITCODE -ne 0) { throw 'FFmpeg component attestation failed.' } }
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input dist/ffmpeg-component --sealed-output dist/release-ffmpeg-sealed
+          if ((Get-FileHash dist/release-ffmpeg-sealed/manifest.json -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256) { throw 'Reviewed FFmpeg manifest digest mismatch.' }
+      - name: Build and sign stable candidate
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.classify.outputs.tag }}
+          APP_COMMIT: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
+          APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
+          APP_UPDATE_PUBLISHER: NaisNet Technology Co., Ltd.
+          APP_UPDATE_TRUST_REQUIRED: '1'
+          APP_UPDATE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
+          APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
+          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
+          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
+          EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
+          EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
+        run: |
+          npm run build:exe
+          Copy-Item dist/gift-panel.exe dist/gift-panel-windows-x64.unsigned.exe
+          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Stable candidate signing failed.' }
+      - name: Prepare signed stable candidate
+        id: candidate
+        shell: pwsh
+        env:
+          STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
+          STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
+          STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
+        run: |
+          New-Item -ItemType Directory -Path dist/stable-candidate/sealed -ErrorAction Stop | Out-Null
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/stable-candidate/sealed --version $env:RELEASE_VERSION --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/stable-artifact-inspection.json
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate seal failed.' }
+          $inspection = Get-Content dist/stable-candidate/stable-artifact-inspection.json -Raw | ConvertFrom-Json
+          $sealed = "dist/stable-candidate/sealed/$($inspection.signedFileSha256).exe"
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-candidate --artifact $sealed --pe-content-sha256 $inspection.peContentSha256 --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --root-spki "$env:CANDIDATE_TRUST_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$env:CANDIDATE_TRUST_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/candidate-evidence.json
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate enrollment verification failed.' }
+          $candidateEvidence = Get-Content dist/stable-candidate/candidate-evidence.json -Raw | ConvertFrom-Json
+          if ($candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256" -or $candidateEvidence.signedFileSha256 -cne $inspection.signedFileSha256) { throw 'Candidate evidence cross-binding failed.' }
+          "$($inspection.signedFileSha256)  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/gift-panel-windows-x64.exe.sha256
+          [ordered]@{ tag_name=$env:RELEASE_TAG; draft=$false; prerelease=$false; assets=@([ordered]@{ name='gift-panel-windows-x64.exe'; browser_download_url="https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"; size=[int64]$inspection.signedFileSize; digest="sha256:$($inspection.signedFileSha256)" }) } | ConvertTo-Json -Depth 6 | Set-Content -NoNewline -Encoding utf8 dist/stable-candidate/gift-panel-update.json
+          Copy-Item gift-panel-changelog.json dist/stable-candidate/gift-panel-changelog.json
+          Copy-Item dist/release-ffmpeg-sealed/ffmpeg.zip dist/stable-candidate/ffmpeg.zip
+          Copy-Item dist/release-ffmpeg-sealed/manifest.json dist/stable-candidate/manifest.json
+          Expand-Archive dist/release-ffmpeg-sealed/ffmpeg.zip -DestinationPath dist/stable-candidate/standalone
+          Copy-Item dist/stable-candidate/standalone/ffmpeg.exe dist/stable-candidate/ffmpeg-windows-x64.exe
+          Remove-Item -LiteralPath dist/stable-candidate/standalone/ffmpeg.exe -Force
+          Remove-Item -LiteralPath dist/stable-candidate/standalone -Force
+          $ffmpegHash=(Get-FileHash dist/stable-candidate/ffmpeg-windows-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$ffmpegHash  ffmpeg-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/ffmpeg-windows-x64.exe.sha256
+          Copy-Item dist/ffmpeg-component/ffmpeg-9.0.tar.xz,dist/ffmpeg-component/ffmpeg-9.0.tar.xz.asc,dist/ffmpeg-component/ffmpeg-build-config.txt,dist/ffmpeg-component/ffmpeg-component-gate.txt dist/stable-candidate
+          Copy-Item third_party/ffmpeg/toolchain-lock.json,third_party/ffmpeg/NOTICE.md,third_party/ffmpeg/COPYING.LGPLv2.1 dist/stable-candidate
+          New-Item -ItemType Directory -Path dist/stable-candidate/tools -ErrorAction Stop | Out-Null
+          Copy-Item $env:AUTHENTICODE_INSPECTOR_PATH dist/stable-candidate/tools/artifact-inspector.exe
+          Copy-Item "$env:RUNNER_TEMP/verify-enrollment-build.mjs" dist/stable-candidate/tools/verify-enrollment-build.mjs
+          $inspectorHash=(Get-FileHash dist/stable-candidate/tools/artifact-inspector.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $verifierHash=(Get-FileHash dist/stable-candidate/tools/verify-enrollment-build.mjs -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$inspectorHash  artifact-inspector.exe" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/tools/artifact-inspector.exe.sha256
+          "$verifierHash  verify-enrollment-build.mjs" | Set-Content -NoNewline -Encoding ascii dist/stable-candidate/tools/verify-enrollment-build.mjs.sha256
+          $candidateRoot=(Resolve-Path dist/stable-candidate).Path
+          $allowed=@("sealed/$($inspection.signedFileSha256).exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
+          $actual=@(Get-ChildItem $candidateRoot -File -Recurse|ForEach-Object{$_.FullName.Substring($candidateRoot.Length+1).Replace('\','/')}|Sort-Object)
+          if(Compare-Object $allowed $actual){throw 'Candidate closure contains a missing or unexpected candidate file.'}
+          "sha256=$($inspection.signedFileSha256)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "size=$($inspection.signedFileSize)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact-name=stable-candidate-$env:RELEASE_TAG-$($inspection.signedFileSha256)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Upload content-addressed stable candidate
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.candidate.outputs.artifact-name }}
+          path: dist/stable-candidate
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Read back uploaded stable candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.candidate.outputs.artifact-name }}
+          path: dist/candidate-readback
+      - name: Verify uploaded candidate is bit-identical
+        shell: pwsh
+        run: |
+          if ('${{ steps.upload.outputs.artifact-id }}' -cnotmatch '^[1-9][0-9]*$' -or '${{ steps.upload.outputs.artifact-digest }}' -cnotmatch '^[0-9a-f]{64}$') { throw 'Actions candidate artifact identity is invalid.' }
+          $sourceRoot=(Resolve-Path dist/stable-candidate).Path
+          $readbackRoot=(Resolve-Path dist/candidate-readback).Path
+          $source=@(Get-ChildItem $sourceRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($sourceRoot.Length+1) } | Sort-Object)
+          $readback=@(Get-ChildItem $readbackRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($readbackRoot.Length+1) } | Sort-Object)
+          if (Compare-Object $source $readback) { throw 'Candidate artifact file closure changed during upload/readback.' }
+          foreach($relative in $source){ $left=Join-Path $sourceRoot $relative; $right=Join-Path $readbackRoot $relative; if((Get-FileHash $left -Algorithm SHA256).Hash -cne (Get-FileHash $right -Algorithm SHA256).Hash -or (Get-Item $left).Length -ne (Get-Item $right).Length){ throw 'Candidate bytes changed during Actions artifact upload/readback.' } }
+
+  publish-candidate:
+    needs: classify
+    if: needs.classify.outputs.mode == 'publish-candidate'
+    runs-on: windows-latest
+    environment: stable-publish
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ needs.classify.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.classify.outputs.version }}
+    steps:
+      - name: Validate reviewed publish inputs
+        shell: pwsh
+        env:
+          STABLE_CANDIDATE_RUN_ID: ${{ vars.STABLE_CANDIDATE_RUN_ID }}
+          STABLE_CANDIDATE_ARTIFACT_ID: ${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}
+          STABLE_CANDIDATE_ARTIFACT_DIGEST: ${{ vars.STABLE_CANDIDATE_ARTIFACT_DIGEST }}
+          STABLE_CANDIDATE_SHA256: ${{ vars.STABLE_CANDIDATE_SHA256 }}
+          STABLE_CANDIDATE_SIZE: ${{ vars.STABLE_CANDIDATE_SIZE }}
+          STABLE_CANDIDATE_TAG: ${{ vars.STABLE_CANDIDATE_TAG }}
+          STABLE_CANDIDATE_COMMIT_SHA: ${{ vars.STABLE_CANDIDATE_COMMIT_SHA }}
+          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
+          STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ vars.STABLE_CANDIDATE_INSPECTOR_SHA256 }}
+          STABLE_CANDIDATE_VERIFIER_SHA256: ${{ vars.STABLE_CANDIDATE_VERIFIER_SHA256 }}
+          STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
+          STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
           STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
@@ -173,850 +449,142 @@ jobs:
           STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
           STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          $required = @(
-            $env:STABLE_REVIEWED_COMMIT_SHA, $env:STABLE_REVIEWED_TAG_OBJECT_SHA,
-            $env:STABLE_TRUST_ROOT_SPKI_B64, $env:STABLE_TRUST_ROOT_SPKI_SHA256, $env:STABLE_TRUST_ROOT_KEY_ID,
-            $env:STABLE_BOOTSTRAP_POLICY_B64, $env:STABLE_BOOTSTRAP_POLICY_SHA256, $env:STABLE_BOOTSTRAP_POLICY_EPOCH,
-            $env:STABLE_AUTHORIZATION_POLICY_B64, $env:STABLE_AUTHORIZATION_POLICY_SHA256, $env:STABLE_AUTHORIZATION_POLICY_EPOCH,
-            $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256
-          )
-          if ($required | Where-Object { [string]::IsNullOrWhiteSpace($_) }) { throw 'stable enrollment input is missing' }
-          if ($env:STABLE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or
-              $env:STABLE_TRUST_ROOT_SPKI_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_BOOTSTRAP_POLICY_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $env:STABLE_AUTHORIZATION_POLICY_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $env:STABLE_TRUST_ROOT_KEY_ID -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$' -or
-              $env:STABLE_BOOTSTRAP_POLICY_EPOCH -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_AUTHORIZATION_POLICY_EPOCH -cnotmatch '^[1-9][0-9]*$' -or
-              [uint64]$env:STABLE_AUTHORIZATION_POLICY_EPOCH -le [uint64]$env:STABLE_BOOTSTRAP_POLICY_EPOCH) {
-            throw 'stable enrollment input is malformed'
-          }
-          if ($env:STABLE_REVIEWED_COMMIT_SHA -cne $env:RELEASE_COMMIT) { throw 'reviewed stable commit does not match the checked-out tag' }
-          try {
-            $rootBytes = [Convert]::FromBase64String($env:STABLE_TRUST_ROOT_SPKI_B64)
-            $bootstrapBytes = [Convert]::FromBase64String($env:STABLE_BOOTSTRAP_POLICY_B64)
-            $authorizationBytes = [Convert]::FromBase64String($env:STABLE_AUTHORIZATION_POLICY_B64)
-          } catch { throw 'stable enrollment Base64 is invalid' }
-          if ([Convert]::ToBase64String($rootBytes) -cne $env:STABLE_TRUST_ROOT_SPKI_B64 -or [Convert]::ToBase64String($bootstrapBytes) -cne $env:STABLE_BOOTSTRAP_POLICY_B64 -or [Convert]::ToBase64String($authorizationBytes) -cne $env:STABLE_AUTHORIZATION_POLICY_B64 -or
-              $rootBytes.Length -le 0 -or $rootBytes.Length -gt 4096 -or $bootstrapBytes.Length -le 0 -or $bootstrapBytes.Length -gt 262144 -or $authorizationBytes.Length -le 0 -or $authorizationBytes.Length -gt 262144) {
-            throw 'stable enrollment Base64 or size is invalid'
-          }
-          $rootHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($rootBytes)).ToLowerInvariant()
-          $bootstrapHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bootstrapBytes)).ToLowerInvariant()
-          $authorizationHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($authorizationBytes)).ToLowerInvariant()
-          if ($rootHash -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or $bootstrapHash -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or $authorizationHash -cne $env:STABLE_AUTHORIZATION_POLICY_SHA256) { throw 'stable enrollment digest is invalid' }
-          if ($rootHash -ceq '5cd252fb0ce8932436faf8ccd1040981b89ee4ad6b9fe9e2a2b7e71aacb27cd3' -or $bootstrapHash -ceq '205b8ea9bf7e79d55292d63a1266a4882ab01fa5edb3eb79421724ddb9265d0e' -or $authorizationHash -ceq '205b8ea9bf7e79d55292d63a1266a4882ab01fa5edb3eb79421724ddb9265d0e') { throw 'known Task 1 test fixture trust material is forbidden' }
-          $rawRef = "refs/tags/$env:RELEASE_TAG"
-          $peeledRef = "$rawRef^{}"
-          $localObject = git rev-parse $rawRef
-          $localCommit = git rev-parse "$rawRef^{commit}"
-          $remoteLines = @(git ls-remote origin $rawRef $peeledRef)
-          if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed stable tag binding failed' }
-          $remote = @{}
-          foreach ($line in $remoteLines) {
-            $parts = $line -split "`t", 2
-            if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @($rawRef, $peeledRef)) { throw 'reviewed stable tag binding failed' }
-            $remote[$parts[1]] = $parts[0]
-          }
-          if (-not $remote.ContainsKey($rawRef) -or $remote[$rawRef] -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA -or $localObject -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA -or $localCommit -cne $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' }
-          if ($remote.ContainsKey($peeledRef)) { if ($remoteLines.Count -ne 2 -or $remote[$peeledRef] -cne $env:STABLE_REVIEWED_COMMIT_SHA -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -ceq $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' } }
-          elseif ($remoteLines.Count -ne 1 -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' }
-          $enrollmentRoot = Join-Path $env:RUNNER_TEMP 'stable-enrollment'
-          if (Test-Path -LiteralPath $enrollmentRoot) { throw 'stable enrollment workspace already exists' }
-          New-Item -ItemType Directory -Path $enrollmentRoot -ErrorAction Stop | Out-Null
-          [IO.File]::WriteAllBytes((Join-Path $enrollmentRoot 'root-spki.der'), $rootBytes)
-          [IO.File]::WriteAllBytes((Join-Path $enrollmentRoot 'bootstrap-policy.json'), $bootstrapBytes)
-          [IO.File]::WriteAllBytes((Join-Path $enrollmentRoot 'authorization-policy.json'), $authorizationBytes)
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-policies --root-spki "$enrollmentRoot/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$enrollmentRoot/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --authorization-policy "$enrollmentRoot/authorization-policy.json" --authorization-policy-sha256 $env:STABLE_AUTHORIZATION_POLICY_SHA256 --authorization-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --tag $env:RELEASE_TAG | Set-Content -NoNewline -Encoding utf8 "$enrollmentRoot/policy-preflight.json"
-          if ($LASTEXITCODE -ne 0) { throw 'stable enrollment policy verification failed before build' }
-          $policyPreflight = Get-Content -LiteralPath "$enrollmentRoot/policy-preflight.json" -Raw | ConvertFrom-Json
-          if ($policyPreflight.schemaVersion -ne 1 -or $policyPreflight.tag -cne $env:RELEASE_TAG -or $policyPreflight.rootSpkiSha256 -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or
-              $policyPreflight.bootstrapPolicySha256 -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or [uint64]$policyPreflight.bootstrapPolicyEpoch -ne [uint64]$env:STABLE_BOOTSTRAP_POLICY_EPOCH -or $policyPreflight.bootstrapSignatureStatus -cne 'Valid' -or
-              $policyPreflight.authorizationPolicySha256 -cne $env:STABLE_AUTHORIZATION_POLICY_SHA256 -or [uint64]$policyPreflight.authorizationPolicyEpoch -ne [uint64]$env:STABLE_AUTHORIZATION_POLICY_EPOCH -or $policyPreflight.authorizationSignatureStatus -cne 'Valid' -or
-              $policyPreflight.authorizedChannel -cne 'stable' -or [string]$policyPreflight.authorizedArtifactSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-              $policyPreflight.authorizedIdentity.country -cne 'CN' -or $policyPreflight.authorizedIdentity.organization -cne 'NaisNet Technology Co., Ltd.' -or $policyPreflight.authorizedIdentity.organizationId -cne '91210103MA7CJ3C094') {
-            throw 'stable enrollment policy preflight evidence is invalid'
-          }
-          "STABLE_ENROLLMENT_ROOT=$enrollmentRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_AUTHORIZED_ARTIFACT_SHA256=$($policyPreflight.authorizedArtifactSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Download existing release assets
-        if: env.RELEASE_EXISTS == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          gh release download $env:RELEASE_TAG --dir dist --pattern gift-panel-windows-x64.exe --pattern gift-panel-windows-x64.exe.sha256 --pattern gift-panel-update.json --pattern gift-panel-changelog.json
-          if ($LASTEXITCODE -ne 0) { throw "Existing GitHub Release assets could not be downloaded. Manual recovery required." }
-          $requiredPaths = @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')
-          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
-            gh release download $env:RELEASE_TAG --dir dist --pattern ffmpeg-windows-x64.exe --pattern ffmpeg-windows-x64.exe.sha256
-            if ($LASTEXITCODE -ne 0) { throw "Existing GitHub Release standalone FFmpeg assets could not be downloaded. Manual recovery required." }
-            $requiredPaths += @('dist/ffmpeg-windows-x64.exe', 'dist/ffmpeg-windows-x64.exe.sha256')
-          }
-          foreach ($path in $requiredPaths) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Existing GitHub Release is missing required assets. Manual recovery required."
-            }
-          }
-
-      - name: Set up Node.js
-        if: env.RELEASE_EXISTS != 'true'
+          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Reviewed candidate publication input is missing or malformed.' }
+          "STABLE_CANDIDATE_RUN_ID=$env:STABLE_CANDIDATE_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_ARTIFACT_ID=$env:STABLE_CANDIDATE_ARTIFACT_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_ARTIFACT_DIGEST=$env:STABLE_CANDIDATE_ARTIFACT_DIGEST" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_SHA256=$env:STABLE_CANDIDATE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_SIZE=$env:STABLE_CANDIDATE_SIZE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_CANDIDATE_COMMIT_SHA=$env:STABLE_CANDIDATE_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Set up publish verifier runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-          cache: npm
-
-      - name: Set up Go
-        if: env.RELEASE_EXISTS != 'true'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - name: Verify exact Actions artifact metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+          $artifact=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:STABLE_CANDIDATE_ARTIFACT_ID" -Headers $headers
+          $expectedName="stable-candidate-$env:RELEASE_TAG-$env:STABLE_CANDIDATE_SHA256"
+          if ([string]$artifact.id -cne $env:STABLE_CANDIDATE_ARTIFACT_ID -or [string]$artifact.workflow_run.id -cne $env:STABLE_CANDIDATE_RUN_ID -or [string]$artifact.name -cne $expectedName -or $artifact.expired -ne $false -or [string]$artifact.digest -cne "sha256:$env:STABLE_CANDIDATE_ARTIFACT_DIGEST") { throw 'Reviewed Actions candidate artifact metadata mismatch.' }
+      - name: Download exact reviewed stable candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          go-version-file: updateapi/go.mod
-          cache-dependency-path: updateapi/go.sum
-
-      - name: Resolve EVSign signer profile
-        if: env.RELEASE_EXISTS != 'true'
+          artifact-ids: ${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}
+          run-id: ${{ vars.STABLE_CANDIDATE_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: candidate
+          merge-multiple: true
+      - name: Revalidate reviewed stable candidate
         shell: pwsh
         env:
-          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
-          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
-        run: |
-          $profileJSON = node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable
-          if ($LASTEXITCODE -ne 0) { throw "EVSign signer profile resolution failed" }
-          $profile = $profileJSON | ConvertFrom-Json
-          if ($profile.schema -ne 2 -or $profile.profile -cne 'stable' -or $profile.certificateConfigured -ne $true) {
-            throw "EVSign signer profile output is invalid"
-          }
-          "APP_UPDATE_PUBLISHER=NaisNet Technology Co., Ltd." | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Resolved closed EVSign signer profile '$($profile.profile)'."
-
-      - name: Test domestic update tooling
-        if: env.RELEASE_EXISTS != 'true'
-        env:
-          GOWORK: 'off'
-        run: go -C updateapi test ./... -race -count=1
-
-      - name: Verify tag matches package version
-        shell: pwsh
-        run: |
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ("v$packageVersion" -ne $env:RELEASE_TAG) {
-            throw "Tag $env:RELEASE_TAG does not match package.json version $packageVersion"
-          }
-
-      - name: Install dependencies
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm ci
-
-      - name: Install pinned Playwright Chromium for release E2E
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path .cache | Out-Null
-          npm exec -- playwright install chromium
-
-      - name: Run tests
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
-
-      - name: Type check
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm run typecheck
-
-      - name: Build frontend
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm run build:ui
-
-      - name: Prepare backend UI assets
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm run prepare:go-assets
-
-      - name: Resolve FFmpeg component identity
-        if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
-        shell: pwsh
-        run: |
-          $componentKind = if ($env:RELEASE_EXISTS -eq 'true') { 'fixed' } else { 'current' }
-          $identityJSON = node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" identity --kind $componentKind --tool-root $env:RELEASE_TOOL_ROOT
-          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component identity resolution failed" }
-          $identity = $identityJSON | ConvertFrom-Json
-          if ($identity.schema -ne 2 -or [string]$identity.fingerprint -cnotmatch '^[0-9a-f]{64}$' -or [string]$identity.tag -cne "ffmpeg-component-v2-$($identity.fingerprint)") {
-            throw "FFmpeg component identity output is invalid"
-          }
-          "FFMPEG_COMPONENT_FINGERPRINT=$($identity.fingerprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "FFMPEG_COMPONENT_TAG=$($identity.tag)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Inspect signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $encodedTag = [Uri]::EscapeDataString($env:FFMPEG_COMPONENT_TAG)
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
-          try {
-            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-          } catch {
-            if ($_.Exception.Response.StatusCode -eq [Net.HttpStatusCode]::NotFound) {
-              if ($env:RELEASE_EXISTS -eq 'true' -and $env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
-                throw "Existing Release repair requires its immutable signed FFmpeg component. Manual recovery required."
-              }
-              'FFMPEG_COMPONENT_EXISTS=false' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-              exit 0
-            }
-            throw "FFmpeg component lookup failed without an exact 404"
-          }
-          $requiredAssets = @('ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt')
-          $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-          if ($release.tag_name -cne $env:FFMPEG_COMPONENT_TAG -or $release.draft -or $release.prerelease -or -not $release.published_at -or $assetNames.Count -ne $requiredAssets.Count) {
-            throw "Existing FFmpeg component Release is incomplete. Manual recovery required."
-          }
-          foreach ($name in $requiredAssets) {
-            if (@($assetNames | Where-Object { $_ -ceq $name }).Count -ne 1) { throw "Existing FFmpeg component asset closure is invalid. Manual recovery required." }
-          }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $release | ConvertTo-Json -Depth 10 | Set-Content -NoNewline -Encoding utf8 dist/ffmpeg-component-release.json
-          'FFMPEG_COMPONENT_EXISTS=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Download signed FFmpeg component
-        if: env.FFMPEG_COMPONENT_EXISTS == 'true' && (env.RELEASE_EXISTS != 'true' || env.RELEASE_STANDALONE_FFMPEG == 'true')
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/ffmpeg-component-download | Out-Null
-          gh release download $env:FFMPEG_COMPONENT_TAG --dir dist/ffmpeg-component-download --pattern ffmpeg.zip --pattern manifest.json --pattern gift-clip-test-tools.zip --pattern ffmpeg-9.0.tar.xz --pattern ffmpeg-9.0.tar.xz.asc --pattern ffmpeg-build-config.txt --pattern ffmpeg-component-gate.txt --pattern toolchain-lock.json --pattern NOTICE.md --pattern COPYING.LGPLv2.1 --pattern SHA256SUMS.txt
-          if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component download failed" }
-
-      - name: Verify standalone FFmpeg repair component
-        if: env.RELEASE_EXISTS == 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $componentDirectory = 'dist/ffmpeg-component-download'
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --tool-root $env:RELEASE_TOOL_ROOT --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
-          if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component GitHub metadata or digest verification failed" }
-          foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
-            gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
-            if ($LASTEXITCODE -ne 0) { throw "Repair FFmpeg component attestation verification failed for $($asset.Name)" }
-          }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --sealed-output dist/repair-ffmpeg-sealed --manifest-output dist/standalone-component-manifest.json
-          if ($LASTEXITCODE -ne 0) { throw "Repair signed FFmpeg component verification failed" }
-
-      - name: Set up MSYS2 host environment
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        id: msys2
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
-        with:
-          msystem: UCRT64
-          update: false
-          cache: false
-
-      - name: Build and verify pinned FFmpeg
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        shell: pwsh
-        run: |
-          $msys2Root = '${{ steps.msys2.outputs.msys2-location }}'
-          $env:PATH = "$env:SystemRoot\System32;$msys2Root\usr\bin;$env:PATH"
-          npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain -BuildGiftClipTestTools
-          if ($LASTEXITCODE -ne 0) {
-            throw "Pinned FFmpeg build failed with exit code $LASTEXITCODE"
-          }
-          node "$env:RELEASE_TOOL_ROOT/scripts/verify-ffmpeg.mjs"
-          if ($LASTEXITCODE -ne 0) {
-            throw "FFmpeg verification failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Sign and verify inner FFmpeg
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        shell: pwsh
-        env:
-          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
-          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
-          EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
-          EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
-        run: |
-          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/ffmpeg/ffmpeg.exe
-          if ($LASTEXITCODE -ne 0) {
-            throw "FFmpeg signing failed with exit code $LASTEXITCODE"
-          }
-          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg/ffmpeg.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
-          if ($LASTEXITCODE -ne 0) { throw 'Inner FFmpeg structured Authenticode inspection failed.' }
-          Write-Host 'Verified inner FFmpeg Authenticode signature.'
-
-      - name: Package and verify signed FFmpeg payload
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        shell: pwsh
-        env:
-          FFMPEG_AUTHENTICODE: 'true'
-          APP_VERSION: ${{ env.RELEASE_TAG }}
-          APP_COMMIT: ${{ env.RELEASE_COMMIT }}
-        run: |
-          node "$env:RELEASE_TOOL_ROOT/scripts/package-ffmpeg.mjs" --input dist/ffmpeg/ffmpeg.exe
-          if ($LASTEXITCODE -ne 0) {
-            throw "FFmpeg packaging failed with exit code $LASTEXITCODE"
-          }
-          node "$env:RELEASE_TOOL_ROOT/scripts/verify-ffmpeg.mjs"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Signed FFmpeg payload verification failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Package signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        shell: pwsh
-        run: |
-          Compress-Archive -LiteralPath dist/gift-clip-test-tools/ffmpeg.exe,dist/gift-clip-test-tools/ffprobe.exe,dist/gift-clip-test-tools/manifest.json -DestinationPath dist/gift-clip-test-tools.zip -CompressionLevel Optimal
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" prepare --kind current --tool-root $env:RELEASE_TOOL_ROOT --output dist/ffmpeg-component-publish --sealed-output dist/component-source-sealed
-          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component asset packaging failed" }
-
-      - name: Attest signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-path: dist/ffmpeg-component-publish/*
-
-      - name: Publish signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api "repos/$env:GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$env:FFMPEG_COMPONENT_TAG" -f sha="$env:RELEASE_COMMIT"
-          if ($LASTEXITCODE -ne 0) {
-            $global:LASTEXITCODE = 0
-            $encodedTag = [Uri]::EscapeDataString($env:FFMPEG_COMPONENT_TAG)
-            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
-            try {
-              $winner = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-            } catch {
-              throw "FFmpeg component tag conflict has no complete Release. Manual recovery required."
-            }
-            $requiredAssets = @('ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt')
-            $assetNames = @($winner.assets | ForEach-Object { [string]$_.name })
-            if ($winner.tag_name -cne $env:FFMPEG_COMPONENT_TAG -or $winner.draft -or $winner.prerelease -or -not $winner.published_at -or $assetNames.Count -ne $requiredAssets.Count) {
-              throw "Conflicting FFmpeg component Release is incomplete. Manual recovery required."
-            }
-            foreach ($name in $requiredAssets) {
-              if (@($assetNames | Where-Object { $_ -ceq $name }).Count -ne 1) { throw "Conflicting FFmpeg component asset closure is invalid. Manual recovery required." }
-            }
-            Write-Host 'Another publisher created the FFmpeg component; the winner will be redownloaded and fully verified.'
-            exit 0
-          }
-          gh release create $env:FFMPEG_COMPONENT_TAG --draft --verify-tag --title $env:FFMPEG_COMPONENT_TAG --latest=false
-          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component draft creation failed. Manual recovery required." }
-          gh release upload $env:FFMPEG_COMPONENT_TAG dist/ffmpeg-component-publish/ffmpeg.zip dist/ffmpeg-component-publish/manifest.json dist/ffmpeg-component-publish/gift-clip-test-tools.zip dist/ffmpeg-component-publish/ffmpeg-9.0.tar.xz dist/ffmpeg-component-publish/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-component-publish/ffmpeg-build-config.txt dist/ffmpeg-component-publish/ffmpeg-component-gate.txt dist/ffmpeg-component-publish/toolchain-lock.json dist/ffmpeg-component-publish/NOTICE.md dist/ffmpeg-component-publish/COPYING.LGPLv2.1 dist/ffmpeg-component-publish/SHA256SUMS.txt
-          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component upload failed; draft retained for manual recovery" }
-          gh release edit $env:FFMPEG_COMPONENT_TAG --draft=false --latest=false
-          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component publication failed. Manual recovery required." }
-
-      - name: Download published FFmpeg component
-        if: env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/ffmpeg-component-published | Out-Null
-          gh release download $env:FFMPEG_COMPONENT_TAG --dir dist/ffmpeg-component-published --pattern ffmpeg.zip --pattern manifest.json --pattern gift-clip-test-tools.zip --pattern ffmpeg-9.0.tar.xz --pattern ffmpeg-9.0.tar.xz.asc --pattern ffmpeg-build-config.txt --pattern ffmpeg-component-gate.txt --pattern toolchain-lock.json --pattern NOTICE.md --pattern COPYING.LGPLv2.1 --pattern SHA256SUMS.txt
-          if ($LASTEXITCODE -ne 0) { throw "Published FFmpeg component redownload failed" }
-          $encodedTag = [Uri]::EscapeDataString($env:FFMPEG_COMPONENT_TAG)
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
-          try {
-            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-          } catch {
-            throw "Published FFmpeg component metadata refetch failed. Manual recovery required."
-          }
-          $release | ConvertTo-Json -Depth 10 | Set-Content -NoNewline -Encoding utf8 dist/ffmpeg-component-release.json
-
-      - name: Verify and install signed FFmpeg component
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $componentDirectory = if ($env:FFMPEG_COMPONENT_EXISTS -eq 'true') { 'dist/ffmpeg-component-download' } else { 'dist/ffmpeg-component-published' }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" verify-metadata --tool-root $env:RELEASE_TOOL_ROOT --metadata dist/ffmpeg-component-release.json --input $componentDirectory --tag $env:FFMPEG_COMPONENT_TAG
-          if ($LASTEXITCODE -ne 0) { throw "FFmpeg component GitHub metadata or digest verification failed" }
-          foreach ($asset in Get-ChildItem -LiteralPath $componentDirectory -File) {
-            gh attestation verify $asset.FullName --repo $env:GITHUB_REPOSITORY
-            if ($LASTEXITCODE -ne 0) { throw "FFmpeg component attestation verification failed for $($asset.Name)" }
-          }
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input $componentDirectory --sealed-output dist/release-ffmpeg-sealed
-          if ($LASTEXITCODE -ne 0) { throw "Signed FFmpeg component verification or installation failed" }
-          New-Item -ItemType Directory -Force -Path dist/ffmpeg-source | Out-Null
-          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz
-          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-9.0.tar.xz.asc" -Destination dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc
-          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-build-config.txt" -Destination dist/ffmpeg-build-config.txt
-          Copy-Item -LiteralPath "$componentDirectory/ffmpeg-component-gate.txt" -Destination dist/ffmpeg-component-gate.txt
-          if (Test-Path -LiteralPath dist/gift-clip-test-tools) { throw 'Gift clip test-tool destination already exists.' }
-          Expand-Archive -LiteralPath "$componentDirectory/gift-clip-test-tools.zip" -DestinationPath dist/gift-clip-test-tools
-          node "$env:RELEASE_TOOL_ROOT/scripts/gift-clip-test-tools.mjs" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Cached gift clip test tools failed verification" }
-
-      - name: Prepare standalone FFmpeg release asset
-        if: env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
-        shell: pwsh
-        run: |
-          $componentDirectory = 'dist/release-ffmpeg-sealed'
-          $standaloneDirectory = 'dist/standalone-ffmpeg'
-          New-Item -ItemType Directory -Force -Path $standaloneDirectory | Out-Null
-          Expand-Archive -LiteralPath "$componentDirectory/ffmpeg.zip" -DestinationPath $standaloneDirectory
-          $source = Join-Path $standaloneDirectory 'ffmpeg.exe'
-          $destination = 'dist/ffmpeg-windows-x64.exe'
-          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Signed FFmpeg component does not contain ffmpeg.exe' }
-          Copy-Item -LiteralPath $source -Destination $destination
-
-          $componentManifest = Get-Content -LiteralPath "$componentDirectory/manifest.json" -Raw | ConvertFrom-Json
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
-          $size = (Get-Item -LiteralPath $destination).Length
-          if ($componentManifest.authenticode -ne $true -or $componentManifest.sha256 -cne $hash -or [int64]$componentManifest.size -ne $size) {
-            throw 'Standalone FFmpeg does not match the verified component manifest.'
-          }
-          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
-          if ($LASTEXITCODE -ne 0) { throw 'Standalone FFmpeg structured Authenticode inspection failed.' }
-          "$hash  ffmpeg-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/ffmpeg-windows-x64.exe.sha256
-
-      - name: Build release executable
-        if: env.RELEASE_EXISTS != 'true'
-        run: npm run build:exe
-        env:
-          APP_VERSION: ${{ env.RELEASE_TAG }}
-          APP_COMMIT: ${{ env.RELEASE_COMMIT }}
-          APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
-          APP_UPDATE_PUBLISHER: NaisNet Technology Co., Ltd.
-          APP_UPDATE_TRUST_REQUIRED: '1'
-          APP_UPDATE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
-          APP_UPDATE_TRUST_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
-
-      - name: Run backend tests
-        if: env.RELEASE_EXISTS != 'true'
-        working-directory: goserver
-        run: go test ./...
-
-      - name: Prepare and sign release executable
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        env:
-          EVSIGN_CERTIFICATE: ${{ vars.EVSIGN_CERTIFICATE }}
-          EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
-          EVSIGN_KEY: ${{ secrets.EVSIGN_KEY }}
-          EVSIGN_PASSWORD: ${{ secrets.EVSIGN_PASSWORD }}
-        run: |
-          Copy-Item -LiteralPath dist/gift-panel.exe -Destination dist/gift-panel-windows-x64.unsigned.exe
-          node $env:EVSIGN_SCRIPT_PATH --profile stable dist/gift-panel-windows-x64.unsigned.exe dist/gift-panel-windows-x64.signed-candidate.exe
-          if ($LASTEXITCODE -ne 0) { throw 'Stable outer signing failed.' }
-
-      - name: Verify deterministic gift clip exports from signed package chain
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        env:
-          GIFT_CLIP_FFMPEG_E2E: '1'
-        run: |
-          $tools = node "$env:RELEASE_TOOL_ROOT/scripts/gift-clip-test-tools.mjs" | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) {
-            throw "Gift clip test-tool verification failed with exit code $LASTEXITCODE"
-          }
-          $env:FFMPEG_FULL_BIN = [IO.Path]::GetFullPath([string]$tools.ffmpeg)
-          $env:FFPROBE_BIN = [IO.Path]::GetFullPath([string]$tools.ffprobe)
-          npm run verify:gift-clip-export
-          if ($LASTEXITCODE -ne 0) {
-            throw "Gift clip browser E2E failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Seal final stable executable
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        run: |
-          $version = $env:RELEASE_TAG.Substring(1)
-          New-Item -ItemType Directory -Path dist/stable-sealed-executable -ErrorAction Stop | Out-Null
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/stable-sealed-executable --version $version --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/stable-artifact-inspection.json
-          if ($LASTEXITCODE -ne 0) { throw 'Stable outer bound artifact inspection failed.' }
-          $inspection = Get-Content -LiteralPath dist/stable-artifact-inspection.json -Raw | ConvertFrom-Json
-          if ([string]$inspection.signedFileSha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$inspection.signedFileSize -le 0 -or [string]$inspection.peContentSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Stable sealed artifact evidence is invalid.' }
-          $sealedPath = Join-Path 'dist/stable-sealed-executable' "$($inspection.signedFileSha256).exe"
-          if (-not (Test-Path -LiteralPath $sealedPath -PathType Leaf) -or (Get-Item -LiteralPath $sealedPath).Length -ne [int64]$inspection.signedFileSize -or (Get-FileHash -Algorithm SHA256 -LiteralPath $sealedPath).Hash.ToLowerInvariant() -cne [string]$inspection.signedFileSha256) { throw 'Stable sealed artifact bytes do not match final inspection.' }
-          "STABLE_SEALED_EXE_PATH=$sealedPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host 'Verified and sealed outer application Authenticode signature.'
-
-      - name: Prepare release assets
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        run: |
-          $inspection = Get-Content -LiteralPath dist/stable-artifact-inspection.json -Raw | ConvertFrom-Json
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:STABLE_SEALED_EXE_PATH).Hash.ToLowerInvariant()
-          $size = (Get-Item -LiteralPath $env:STABLE_SEALED_EXE_PATH).Length
-          if ($hash -cne [string]$inspection.signedFileSha256 -or $size -ne [int64]$inspection.signedFileSize) { throw 'Stable sealed artifact changed after final inspection.' }
-          New-Item -ItemType HardLink -Path dist/gift-panel-windows-x64.exe -Target $env:STABLE_SEALED_EXE_PATH -ErrorAction Stop | Out-Null
-          "$hash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
-          @{
-            tag_name = $env:RELEASE_TAG
-            draft = $false
-            prerelease = $false
-            assets = @(
-              @{
-                name = "gift-panel-windows-x64.exe"
-                browser_download_url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
-                size = $size
-                digest = "sha256:$hash"
-              }
-            )
-          } | ConvertTo-Json -Depth 4 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-update.json
-          $currentChangelog = Get-Content gift-panel-changelog.json -Raw | ConvertFrom-Json
-          $releaseHistory = @()
-          $previousTag = git tag --sort=-version:refname | Where-Object { $_ -and $_ -ne $env:RELEASE_TAG } | Select-Object -First 1
-          if ($previousTag) {
-            try {
-              $previousChangelog = Invoke-RestMethod -Uri "https://github.com/brainfk123/bilibili-live-gift-panel/releases/download/$previousTag/gift-panel-changelog.json" -TimeoutSec 20
-              $releaseHistory = @($previousChangelog.releases)
-            } catch {
-              Write-Host "No hosted changelog exists for $previousTag; reading its bundled changelog from Git history."
-              $previousChangelogJson = git show "${previousTag}:gift-panel-changelog.json" 2>$null
-              $gitShowExitCode = $LASTEXITCODE
-              $global:LASTEXITCODE = 0
-              if ($gitShowExitCode -eq 0 -and $previousChangelogJson) {
-                $previousChangelog = $previousChangelogJson | ConvertFrom-Json
-                $releaseHistory = @($previousChangelog.releases)
-              } else {
-                Write-Host "No previous changelog is available; publishing the bundled current release only."
-              }
-            }
-          }
-          $historySeed = @()
-          if (Test-Path .github/changelog-history.json) {
-            $historySeedDocument = Get-Content .github/changelog-history.json -Raw | ConvertFrom-Json
-            $historySeed = @($historySeedDocument.releases)
-          } else {
-            try {
-              $historySeedDocument = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/brainfk123/bilibili-live-gift-panel/master/.github/changelog-history.json" -TimeoutSec 20
-              $historySeed = @($historySeedDocument.releases)
-            } catch {
-              Write-Host "No changelog history seed is available."
-            }
-          }
-          $seenVersions = @{}
-          $mergedReleases = @()
-          foreach ($release in @($currentChangelog.releases) + $releaseHistory + $historySeed) {
-            $version = [string]$release.version
-            if ($version -and -not $seenVersions.ContainsKey($version)) {
-              $seenVersions[$version] = $true
-              $mergedReleases += $release
-            }
-          }
-          @{
-            schemaVersion = 1
-            releases = $mergedReleases
-          } | ConvertTo-Json -Depth 8 | Set-Content -NoNewline -Encoding utf8 dist/gift-panel-changelog.json
-
-      - name: Verify sealed enrollment release closure
-        if: env.RELEASE_EXISTS != 'true'
-        shell: pwsh
-        env:
+          STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ vars.STABLE_CANDIDATE_INSPECTOR_SHA256 }}
+          STABLE_CANDIDATE_VERIFIER_SHA256: ${{ vars.STABLE_CANDIDATE_VERIFIER_SHA256 }}
+          STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
-          STABLE_TRUST_ROOT_KEY_ID: ${{ vars.STABLE_TRUST_ROOT_KEY_ID }}
+          STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
           STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
+          STABLE_AUTHORIZATION_POLICY_B64: ${{ vars.STABLE_AUTHORIZATION_POLICY_B64 }}
           STABLE_AUTHORIZATION_POLICY_SHA256: ${{ vars.STABLE_AUTHORIZATION_POLICY_SHA256 }}
           STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
           STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          $version = $env:RELEASE_TAG.Substring(1)
-          node $env:ENROLLMENT_VERIFIER_SCRIPT_PATH --inspector $env:AUTHENTICODE_INSPECTOR_PATH --artifact $env:STABLE_SEALED_EXE_PATH --artifact-inspection dist/stable-artifact-inspection.json --artifact-sidecar dist/gift-panel-windows-x64.exe.sha256 --standalone-ffmpeg dist/ffmpeg-windows-x64.exe --ffmpeg-sidecar dist/ffmpeg-windows-x64.exe.sha256 --ffmpeg-archive dist/release-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/release-ffmpeg-sealed/manifest.json --ffmpeg-manifest-sha256 $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 --root-spki "$env:STABLE_ENROLLMENT_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --root-key-id $env:STABLE_TRUST_ROOT_KEY_ID --bootstrap-policy "$env:STABLE_ENROLLMENT_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --authorization-policy "$env:STABLE_ENROLLMENT_ROOT/authorization-policy.json" --authorization-policy-sha256 $env:STABLE_AUTHORIZATION_POLICY_SHA256 --authorization-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --version $version --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --output dist/stable-release-evidence.json
-          if ($LASTEXITCODE -ne 0) { throw 'Stable enrollment closure verification failed.' }
-          $evidence = Get-Content -LiteralPath dist/stable-release-evidence.json -Raw | ConvertFrom-Json
-          if ($evidence.authorizationPolicy.artifactSha256 -cne $env:STABLE_AUTHORIZED_ARTIFACT_SHA256 -or $evidence.artifact.sha256 -cne $env:STABLE_AUTHORIZED_ARTIFACT_SHA256) { throw 'Final sealed EXE does not match the pre-build reviewed authorization hash.' }
-
-      - name: Attest executable provenance
-        if: env.RELEASE_EXISTS != 'true'
+          $inspector='candidate/tools/artifact-inspector.exe'; $verifier='candidate/tools/verify-enrollment-build.mjs'
+          if ((Get-FileHash $inspector -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -or (Get-FileHash $verifier -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_VERIFIER_SHA256 -or (Get-Content candidate/tools/artifact-inspector.exe.sha256 -Raw) -cne "$env:STABLE_CANDIDATE_INSPECTOR_SHA256  artifact-inspector.exe" -or (Get-Content candidate/tools/verify-enrollment-build.mjs.sha256 -Raw) -cne "$env:STABLE_CANDIDATE_VERIFIER_SHA256  verify-enrollment-build.mjs") { throw 'Reviewed candidate verifier tooling hash mismatch.' }
+          $candidate='candidate/sealed/'+$env:STABLE_CANDIDATE_SHA256+'.exe'
+          if ((Get-FileHash $candidate -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_SHA256 -or (Get-Item $candidate).Length -ne [int64]$env:STABLE_CANDIDATE_SIZE) { throw 'Reviewed candidate bytes mismatch.' }
+          $candidateEvidence=Get-Content candidate/candidate-evidence.json -Raw | ConvertFrom-Json
+          if ($candidateEvidence.tag -cne $env:RELEASE_TAG -or $candidateEvidence.commit -cne $env:STABLE_CANDIDATE_COMMIT_SHA -or $candidateEvidence.signedFileSha256 -cne $env:STABLE_CANDIDATE_SHA256 -or $candidateEvidence.rootKeyId -cne "sha256:$env:STABLE_TRUST_ROOT_SPKI_SHA256") { throw 'Candidate evidence mismatch.' }
+          $candidateRoot=(Resolve-Path candidate).Path
+          $allowed=@("sealed/$env:STABLE_CANDIDATE_SHA256.exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
+          $actual=@(Get-ChildItem $candidateRoot -File -Recurse|ForEach-Object{$_.FullName.Substring($candidateRoot.Length+1).Replace('\','/')}|Sort-Object)
+          if(Compare-Object $allowed $actual){throw 'Downloaded artifact contains an unexpected candidate file.'}
+          try { $root=[Convert]::FromBase64String($env:STABLE_TRUST_ROOT_SPKI_B64); $bootstrap=[Convert]::FromBase64String($env:STABLE_BOOTSTRAP_POLICY_B64); $authorization=[Convert]::FromBase64String($env:STABLE_AUTHORIZATION_POLICY_B64) } catch { throw 'Publish trust Base64 is invalid.' }
+          $trust="$env:RUNNER_TEMP/publish-trust"; New-Item -ItemType Directory -Path $trust -ErrorAction Stop | Out-Null
+          [IO.File]::WriteAllBytes("$trust/root.der",$root); [IO.File]::WriteAllBytes("$trust/bootstrap.json",$bootstrap); [IO.File]::WriteAllBytes("$trust/authorization.json",$authorization)
+          if ((Get-FileHash "$trust/root.der" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or (Get-FileHash "$trust/bootstrap.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or (Get-FileHash "$trust/authorization.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_AUTHORIZATION_POLICY_SHA256) { throw 'Publish trust digest mismatch.' }
+          node $verifier --inspector $inspector --artifact $candidate --artifact-inspection candidate/stable-artifact-inspection.json --artifact-sidecar candidate/gift-panel-windows-x64.exe.sha256 --standalone-ffmpeg candidate/ffmpeg-windows-x64.exe --ffmpeg-sidecar candidate/ffmpeg-windows-x64.exe.sha256 --ffmpeg-archive candidate/ffmpeg.zip --ffmpeg-manifest candidate/manifest.json --ffmpeg-manifest-sha256 $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 --root-spki "$trust/root.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$trust/bootstrap.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --authorization-policy "$trust/authorization.json" --authorization-policy-sha256 $env:STABLE_AUTHORIZATION_POLICY_SHA256 --authorization-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:STABLE_CANDIDATE_COMMIT_SHA --output candidate/stable-release-evidence.json
+          if ($LASTEXITCODE -ne 0) { throw 'Final candidate authorization verification failed.' }
+          "PUBLISH_INSPECTOR=$inspector" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Create expected-name stable asset
+        shell: pwsh
+        run: |
+          & $env:PUBLISH_INSPECTOR link-sealed-executable --directory candidate/sealed --sha256 $env:STABLE_CANDIDATE_SHA256 --expected-name gift-panel-windows-x64.exe | Set-Content -NoNewline -Encoding utf8 candidate/expected-name-link.json
+          if ($LASTEXITCODE -ne 0) { throw 'Expected-name stable hard link failed.' }
+          $link=Get-Content candidate/expected-name-link.json -Raw | ConvertFrom-Json
+          if ($link.name -cne 'gift-panel-windows-x64.exe' -or $link.sha256 -cne $env:STABLE_CANDIDATE_SHA256 -or (Get-FileHash candidate/sealed/gift-panel-windows-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_SHA256) { throw 'Expected-name stable hard link evidence mismatch.' }
+      - name: Attest reviewed stable assets
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
-            dist/stable-sealed-executable/*.exe
-            dist/ffmpeg-windows-x64.exe
-            dist/stable-release-evidence.json
-
-      - name: Recheck reviewed stable tag before draft
-        if: env.RELEASE_EXISTS != 'true'
+            candidate/sealed/gift-panel-windows-x64.exe
+            candidate/ffmpeg-windows-x64.exe
+            candidate/stable-release-evidence.json
+      - name: Recheck reviewed tag before stable draft
         shell: pwsh
         env:
-          STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
+          GH_TOKEN: ${{ github.token }}
           STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
         run: |
-          $rawRef = "refs/tags/$env:RELEASE_TAG"
-          $peeledRef = "$rawRef^{}"
-          $localObject = git rev-parse $rawRef
-          $localCommit = git rev-parse "$rawRef^{commit}"
-          $remoteLines = @(git ls-remote origin $rawRef $peeledRef)
-          if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed stable tag binding failed' }
-          $remote = @{}
-          foreach ($line in $remoteLines) {
-            $parts = $line -split "`t", 2
-            if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @($rawRef, $peeledRef)) { throw 'reviewed stable tag binding failed' }
-            $remote[$parts[1]] = $parts[0]
-          }
-          if (-not $remote.ContainsKey($rawRef) -or $remote[$rawRef] -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA -or $localObject -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA -or $localCommit -cne $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' }
-          if ($remote.ContainsKey($peeledRef)) { if ($remoteLines.Count -ne 2 -or $remote[$peeledRef] -cne $env:STABLE_REVIEWED_COMMIT_SHA -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -ceq $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' } }
-          elseif ($remoteLines.Count -ne 1 -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' }
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+          $encoded=[Uri]::EscapeDataString($env:RELEASE_TAG)
+          $ref=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$encoded" -Headers $headers
+          if([string]$ref.object.sha -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA){throw 'Reviewed stable raw tag object changed.'}
+          if([string]$ref.object.type -ceq 'tag'){
+            $tagObject=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/tags/$env:STABLE_REVIEWED_TAG_OBJECT_SHA" -Headers $headers
+            if([string]$tagObject.object.type -cne 'commit' -or [string]$tagObject.object.sha -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable peeled tag commit changed.'}
+          } elseif([string]$ref.object.type -cne 'commit' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable lightweight tag binding changed.'}
 
       - name: Create immutable-shaped stable draft
-        if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ($env:RELEASE_STANDALONE_FFMPEG -cne 'true') { throw 'Enrollment stable Releases require the standalone FFmpeg closure.' }
-          gh release create $env:RELEASE_TAG --draft --verify-tag --generate-notes --title $env:RELEASE_TAG --latest=false
-          if ($LASTEXITCODE -ne 0) { throw "GitHub Release draft creation failed" }
-          gh release upload $env:RELEASE_TAG "$env:STABLE_SEALED_EXE_PATH#gift-panel-windows-x64.exe" dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/gift-panel-changelog.json dist/stable-release-evidence.json dist/ffmpeg-source/ffmpeg-9.0.tar.xz dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc dist/ffmpeg-build-config.txt dist/ffmpeg-component-gate.txt third_party/ffmpeg/toolchain-lock.json third_party/ffmpeg/NOTICE.md third_party/ffmpeg/COPYING.LGPLv2.1 dist/ffmpeg-windows-x64.exe dist/ffmpeg-windows-x64.exe.sha256
-          if ($LASTEXITCODE -ne 0) { throw "GitHub Release asset upload failed; draft retained for manual recovery" }
-
-      - name: Read back and verify stable draft
-        if: env.RELEASE_EXISTS != 'true'
+          gh release create $env:RELEASE_TAG --draft --verify-tag --title $env:RELEASE_TAG --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'Stable draft creation failed.' }
+          gh release upload $env:RELEASE_TAG candidate/sealed/gift-panel-windows-x64.exe candidate/gift-panel-windows-x64.exe.sha256 candidate/gift-panel-update.json candidate/gift-panel-changelog.json candidate/stable-release-evidence.json candidate/ffmpeg-9.0.tar.xz candidate/ffmpeg-9.0.tar.xz.asc candidate/ffmpeg-build-config.txt candidate/ffmpeg-component-gate.txt candidate/toolchain-lock.json candidate/NOTICE.md candidate/COPYING.LGPLv2.1 candidate/ffmpeg-windows-x64.exe candidate/ffmpeg-windows-x64.exe.sha256
+          if ($LASTEXITCODE -ne 0) { throw 'Stable draft upload failed.' }
+      - name: Read back exact stable draft
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $encodedTag = [Uri]::EscapeDataString($env:RELEASE_TAG)
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
-          $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-          $required = @(
-            [ordered]@{ name = 'gift-panel-windows-x64.exe'; path = $env:STABLE_SEALED_EXE_PATH },
-            [ordered]@{ name = 'gift-panel-windows-x64.exe.sha256'; path = 'dist/gift-panel-windows-x64.exe.sha256' },
-            [ordered]@{ name = 'gift-panel-update.json'; path = 'dist/gift-panel-update.json' },
-            [ordered]@{ name = 'gift-panel-changelog.json'; path = 'dist/gift-panel-changelog.json' },
-            [ordered]@{ name = 'stable-release-evidence.json'; path = 'dist/stable-release-evidence.json' },
-            [ordered]@{ name = 'ffmpeg-9.0.tar.xz'; path = 'dist/ffmpeg-source/ffmpeg-9.0.tar.xz' },
-            [ordered]@{ name = 'ffmpeg-9.0.tar.xz.asc'; path = 'dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc' },
-            [ordered]@{ name = 'ffmpeg-build-config.txt'; path = 'dist/ffmpeg-build-config.txt' },
-            [ordered]@{ name = 'ffmpeg-component-gate.txt'; path = 'dist/ffmpeg-component-gate.txt' },
-            [ordered]@{ name = 'toolchain-lock.json'; path = 'third_party/ffmpeg/toolchain-lock.json' },
-            [ordered]@{ name = 'NOTICE.md'; path = 'third_party/ffmpeg/NOTICE.md' },
-            [ordered]@{ name = 'COPYING.LGPLv2.1'; path = 'third_party/ffmpeg/COPYING.LGPLv2.1' },
-            [ordered]@{ name = 'ffmpeg-windows-x64.exe'; path = 'dist/ffmpeg-windows-x64.exe' },
-            [ordered]@{ name = 'ffmpeg-windows-x64.exe.sha256'; path = 'dist/ffmpeg-windows-x64.exe.sha256' }
-          )
-          $names = @($release.assets | ForEach-Object { [string]$_.name })
-          if ($release.tag_name -cne $env:RELEASE_TAG -or -not $release.draft -or $release.prerelease -or $names.Count -ne $required.Count) { throw 'Stable draft metadata is not the exact immutable-shaped closure.' }
-          New-Item -ItemType Directory -Path dist/stable-draft-readback -ErrorAction Stop | Out-Null
-          foreach ($entry in $required) {
-            if (@($names | Where-Object { $_ -ceq $entry.name }).Count -ne 1) { throw 'Stable draft asset names are not an exact set.' }
-            gh release download $env:RELEASE_TAG --dir dist/stable-draft-readback --pattern $entry.name
-            if ($LASTEXITCODE -ne 0) { throw 'Stable draft asset readback failed.' }
-            $readback = "dist/stable-draft-readback/$($entry.name)"
-            $asset = @($release.assets | Where-Object { $_.name -ceq $entry.name })[0]
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.path).Hash.ToLowerInvariant()
-            $size = (Get-Item -LiteralPath $entry.path).Length
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $readback).Hash.ToLowerInvariant() -cne $hash -or (Get-Item -LiteralPath $readback).Length -ne $size -or [int64]$asset.size -ne $size -or [string]$asset.digest -cne "sha256:$hash") { throw 'Stable draft asset digest, size, or downloaded bytes differ.' }
-          }
-
-      - name: Recheck reviewed stable tag before publication
-        if: env.RELEASE_EXISTS != 'true'
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+          $tag=[Uri]::EscapeDataString($env:RELEASE_TAG); $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers
+          $required=@('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','stable-release-evidence.json','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256')
+          $names=@($release.assets|ForEach-Object{[string]$_.name}); if(-not $release.draft -or $names.Count -ne $required.Count){throw 'Stable draft closure mismatch.'}
+          New-Item -ItemType Directory -Path draft-readback -ErrorAction Stop|Out-Null
+          foreach($name in $required){if(@($names|Where-Object{$_ -ceq $name}).Count -ne 1){throw 'Stable draft name mismatch.'};gh release download $env:RELEASE_TAG --dir draft-readback --pattern $name;if($LASTEXITCODE -ne 0){throw 'Stable draft readback failed.'};$source=if($name -ceq 'gift-panel-windows-x64.exe'){'candidate/sealed/gift-panel-windows-x64.exe'}else{"candidate/$name"};$hash=(Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant();$asset=@($release.assets|Where-Object{$_.name -ceq $name})[0];if((Get-FileHash "draft-readback/$name" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash -or [string]$asset.digest -cne "sha256:$hash"){throw 'Stable draft bytes or API asset name mismatch.'}}
+      - name: Recheck reviewed tag before stable publication
         shell: pwsh
         env:
-          STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
+          GH_TOKEN: ${{ github.token }}
           STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
         run: |
-          $rawRef = "refs/tags/$env:RELEASE_TAG"
-          $peeledRef = "$rawRef^{}"
-          $localObject = git rev-parse $rawRef
-          $localCommit = git rev-parse "$rawRef^{commit}"
-          $remoteLines = @(git ls-remote origin $rawRef $peeledRef)
-          if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -lt 1 -or $remoteLines.Count -gt 2) { throw 'reviewed stable tag binding failed' }
-          $remote = @{}
-          foreach ($line in $remoteLines) {
-            $parts = $line -split "`t", 2
-            if ($parts.Count -ne 2 -or $parts[0] -cnotmatch '^[0-9a-f]{40}$' -or $remote.ContainsKey($parts[1]) -or $parts[1] -notin @($rawRef, $peeledRef)) { throw 'reviewed stable tag binding failed' }
-            $remote[$parts[1]] = $parts[0]
-          }
-          if (-not $remote.ContainsKey($rawRef) -or $remote[$rawRef] -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA -or $localObject -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA -or $localCommit -cne $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' }
-          if ($remote.ContainsKey($peeledRef)) { if ($remoteLines.Count -ne 2 -or $remote[$peeledRef] -cne $env:STABLE_REVIEWED_COMMIT_SHA -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -ceq $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' } }
-          elseif ($remoteLines.Count -ne 1 -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_REVIEWED_COMMIT_SHA) { throw 'reviewed stable tag binding failed' }
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
+          $encoded=[Uri]::EscapeDataString($env:RELEASE_TAG)
+          $ref=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$encoded" -Headers $headers
+          if([string]$ref.object.sha -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA){throw 'Reviewed stable raw tag object changed.'}
+          if([string]$ref.object.type -ceq 'tag'){
+            $tagObject=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/tags/$env:STABLE_REVIEWED_TAG_OBJECT_SHA" -Headers $headers
+            if([string]$tagObject.object.type -cne 'commit' -or [string]$tagObject.object.sha -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable peeled tag commit changed.'}
+          } elseif([string]$ref.object.type -cne 'commit' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable lightweight tag binding changed.'}
 
       - name: Publish stable as latest
-        if: env.RELEASE_EXISTS != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release edit $env:RELEASE_TAG --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Stable GitHub Release publication failed; manual recovery required.' }
-
-      - name: Verify published stable is latest
-        if: env.RELEASE_EXISTS != 'true'
+          if ($LASTEXITCODE -ne 0) { throw 'Stable publication failed.' }
+      - name: Verify published stable latest closure
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $encodedTag = [Uri]::EscapeDataString($env:RELEASE_TAG)
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
-          $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$encodedTag" -Headers $headers
-          $latest = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
-          if ($release.tag_name -cne $env:RELEASE_TAG -or $release.draft -or $release.prerelease -or -not $release.published_at -or $latest.id -ne $release.id -or $latest.tag_name -cne $env:RELEASE_TAG) { throw 'Published stable Release is not the exact GitHub latest Release.' }
-          try { $publishedAt = [DateTimeOffset]$release.published_at } catch { throw 'Published GitHub Release publication timestamp is invalid; manual recovery required.' }
-          $required = @(
-            [ordered]@{ name = 'gift-panel-windows-x64.exe'; path = $env:STABLE_SEALED_EXE_PATH },
-            [ordered]@{ name = 'gift-panel-windows-x64.exe.sha256'; path = 'dist/gift-panel-windows-x64.exe.sha256' },
-            [ordered]@{ name = 'gift-panel-update.json'; path = 'dist/gift-panel-update.json' },
-            [ordered]@{ name = 'gift-panel-changelog.json'; path = 'dist/gift-panel-changelog.json' },
-            [ordered]@{ name = 'stable-release-evidence.json'; path = 'dist/stable-release-evidence.json' },
-            [ordered]@{ name = 'ffmpeg-9.0.tar.xz'; path = 'dist/ffmpeg-source/ffmpeg-9.0.tar.xz' },
-            [ordered]@{ name = 'ffmpeg-9.0.tar.xz.asc'; path = 'dist/ffmpeg-source/ffmpeg-9.0.tar.xz.asc' },
-            [ordered]@{ name = 'ffmpeg-build-config.txt'; path = 'dist/ffmpeg-build-config.txt' },
-            [ordered]@{ name = 'ffmpeg-component-gate.txt'; path = 'dist/ffmpeg-component-gate.txt' },
-            [ordered]@{ name = 'toolchain-lock.json'; path = 'third_party/ffmpeg/toolchain-lock.json' },
-            [ordered]@{ name = 'NOTICE.md'; path = 'third_party/ffmpeg/NOTICE.md' },
-            [ordered]@{ name = 'COPYING.LGPLv2.1'; path = 'third_party/ffmpeg/COPYING.LGPLv2.1' },
-            [ordered]@{ name = 'ffmpeg-windows-x64.exe'; path = 'dist/ffmpeg-windows-x64.exe' },
-            [ordered]@{ name = 'ffmpeg-windows-x64.exe.sha256'; path = 'dist/ffmpeg-windows-x64.exe.sha256' }
-          )
-          $names = @($release.assets | ForEach-Object { [string]$_.name })
-          if ($names.Count -ne $required.Count) { throw 'Published stable asset closure changed.' }
-          New-Item -ItemType Directory -Path dist/stable-published-readback -ErrorAction Stop | Out-Null
-          foreach ($entry in $required) {
-            if (@($names | Where-Object { $_ -ceq $entry.name }).Count -ne 1) { throw 'Published stable asset names changed.' }
-            gh release download $env:RELEASE_TAG --dir dist/stable-published-readback --pattern $entry.name
-            if ($LASTEXITCODE -ne 0) { throw 'Published stable asset readback failed.' }
-            $readback = "dist/stable-published-readback/$($entry.name)"
-            $asset = @($release.assets | Where-Object { $_.name -ceq $entry.name })[0]
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.path).Hash.ToLowerInvariant()
-            $size = (Get-Item -LiteralPath $entry.path).Length
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $readback).Hash.ToLowerInvariant() -cne $hash -or (Get-Item -LiteralPath $readback).Length -ne $size -or [int64]$asset.size -ne $size -or [string]$asset.digest -cne "sha256:$hash") { throw 'Published stable asset digest, size, or downloaded bytes differ.' }
-          }
-
-      - name: Redownload published standalone FFmpeg
-        if: env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          Remove-Item -LiteralPath dist/ffmpeg-windows-x64.exe,dist/ffmpeg-windows-x64.exe.sha256 -Force
-          gh release download $env:RELEASE_TAG --dir dist --pattern ffmpeg-windows-x64.exe --pattern ffmpeg-windows-x64.exe.sha256
-          if ($LASTEXITCODE -ne 0) { throw "Published standalone FFmpeg assets could not be redownloaded. Manual recovery required." }
-
-      - name: Validate published release assets
-        shell: pwsh
-        run: |
-          $requiredPaths = @('dist/gift-panel-windows-x64.exe', 'dist/gift-panel-windows-x64.exe.sha256', 'dist/gift-panel-update.json', 'dist/gift-panel-changelog.json')
-          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
-            $requiredPaths += @('dist/ffmpeg-windows-x64.exe', 'dist/ffmpeg-windows-x64.exe.sha256')
-          }
-          foreach ($path in $requiredPaths) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Published GitHub Release is missing required assets. Manual recovery required."
-            }
-          }
-          if ($env:RELEASE_STANDALONE_FFMPEG -eq 'true') {
-            & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/ffmpeg-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
-            if ($LASTEXITCODE -ne 0) { throw 'Published standalone FFmpeg structured Authenticode inspection failed. Manual recovery required.' }
-            $ffmpegChecksum = Get-Content -LiteralPath dist/ffmpeg-windows-x64.exe.sha256 -Raw
-            if ($ffmpegChecksum -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+ffmpeg-windows-x64\.exe\s*$') {
-              $expectedFFmpegHash = $Matches.digest
-            } else {
-              throw "Published standalone FFmpeg checksum is malformed. Manual recovery required."
-            }
-            $actualFFmpegHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/ffmpeg-windows-x64.exe).Hash
-            if (-not [String]::Equals($actualFFmpegHash, $expectedFFmpegHash, [StringComparison]::OrdinalIgnoreCase)) {
-              throw "Published standalone FFmpeg does not match its checksum. Manual recovery required."
-            }
-            $componentManifestPath = if ($env:RELEASE_EXISTS -eq 'true') { 'dist/standalone-component-manifest.json' } else { 'dist/release-ffmpeg-sealed/manifest.json' }
-            $componentManifest = Get-Content -LiteralPath $componentManifestPath -Raw | ConvertFrom-Json
-            $ffmpegSize = (Get-Item -LiteralPath dist/ffmpeg-windows-x64.exe).Length
-            if ($componentManifest.version -cne '9.0' -or $componentManifest.authenticode -ne $true -or $componentManifest.sha256 -cne $actualFFmpegHash.ToLowerInvariant() -or [int64]$componentManifest.size -ne $ffmpegSize) {
-              throw "Published standalone FFmpeg does not match the verified signed component manifest. Manual recovery required."
-            }
-          }
-          & $env:AUTHENTICODE_INSPECTOR_PATH authenticode --file dist/gift-panel-windows-x64.exe --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094
-          if ($LASTEXITCODE -ne 0) { throw 'Published EXE structured Authenticode inspection failed. Manual recovery required.' }
-          $checksumText = Get-Content -LiteralPath dist/gift-panel-windows-x64.exe.sha256 -Raw
-          if ($checksumText -cmatch '^(?<digest>[0-9a-fA-F]{64})\s+gift-panel-windows-x64\.exe\s*$') {
-            $expectedHash = $Matches.digest
-          } else {
-            throw "Published checksum asset is malformed. Manual recovery required."
-          }
-          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash
-          if (-not [String]::Equals($actualHash, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Published EXE does not match its checksum. Manual recovery required."
-          }
-          $actualSize = (Get-Item -LiteralPath dist/gift-panel-windows-x64.exe).Length
-          $expectedDigest = "sha256:$($actualHash.ToLowerInvariant())"
-          $expectedURL = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe"
-
-          function Test-ExactJsonObjectProperties {
-            param(
-              [System.Text.Json.JsonElement]$Element,
-              [string[]]$Names
-            )
-            if ($Element.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
-              return $false
-            }
-            $actualNames = @($Element.EnumerateObject() | ForEach-Object { $_.Name })
-            if ($actualNames.Count -ne $Names.Count) {
-              return $false
-            }
-            foreach ($name in $Names) {
-              if (@($actualNames | Where-Object { $_ -ceq $name }).Count -ne 1) {
-                return $false
-              }
-            }
-            return $true
-          }
-
-          $manifestDocument = $null
-          try {
-            $manifestJSON = Get-Content -LiteralPath dist/gift-panel-update.json -Raw
-            $manifestDocument = [System.Text.Json.JsonDocument]::Parse($manifestJSON)
-          } catch {
-            throw "Published fallback update manifest is malformed. Manual recovery required."
-          }
-          try {
-            $updateManifest = $manifestDocument.RootElement
-            if (-not (Test-ExactJsonObjectProperties $updateManifest @('tag_name', 'draft', 'prerelease', 'assets'))) {
-              throw "Published fallback update manifest metadata is inconsistent. Manual recovery required."
-            }
-
-            $tagName = $updateManifest.GetProperty('tag_name')
-            $draft = $updateManifest.GetProperty('draft')
-            $prerelease = $updateManifest.GetProperty('prerelease')
-            $assets = $updateManifest.GetProperty('assets')
-            if (
-              $tagName.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
-              $tagName.GetString() -cne $env:RELEASE_TAG -or
-              $draft.ValueKind -ne [System.Text.Json.JsonValueKind]::False -or
-              $prerelease.ValueKind -ne [System.Text.Json.JsonValueKind]::False -or
-              $assets.ValueKind -ne [System.Text.Json.JsonValueKind]::Array -or
-              $assets.GetArrayLength() -ne 1
-            ) {
-              throw "Published fallback update manifest metadata is inconsistent. Manual recovery required."
-            }
-
-            $manifestAsset = $assets[0]
-            if (-not (Test-ExactJsonObjectProperties $manifestAsset @('name', 'browser_download_url', 'size', 'digest'))) {
-              throw "Published fallback update manifest asset is inconsistent. Manual recovery required."
-            }
-            $assetName = $manifestAsset.GetProperty('name')
-            $assetURL = $manifestAsset.GetProperty('browser_download_url')
-            $assetSize = $manifestAsset.GetProperty('size')
-            $assetDigest = $manifestAsset.GetProperty('digest')
-            [int64]$manifestSize = 0
-            if (
-              $assetName.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
-              $assetName.GetString() -cne 'gift-panel-windows-x64.exe' -or
-              $assetURL.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
-              $assetURL.GetString() -cne $expectedURL -or
-              $assetDigest.ValueKind -ne [System.Text.Json.JsonValueKind]::String -or
-              $assetDigest.GetString() -cne $expectedDigest -or
-              $assetSize.ValueKind -ne [System.Text.Json.JsonValueKind]::Number -or
-              -not $assetSize.TryGetInt64([ref]$manifestSize) -or
-              $manifestSize -le 0 -or
-              $manifestSize -ne $actualSize
-            ) {
-              throw "Published fallback update manifest asset is inconsistent. Manual recovery required."
-            }
-          } finally {
-            $manifestDocument.Dispose()
-          }
-          try {
-            $changelog = Get-Content -LiteralPath dist/gift-panel-changelog.json -Raw | ConvertFrom-Json
-          } catch {
-            throw "Published changelog is malformed. Manual recovery required."
-          }
-          if ($changelog.schemaVersion -ne 1 -or @($changelog.releases).Count -eq 0) {
-            throw "Published changelog is incomplete. Manual recovery required."
-          }
+          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'};$tag=[Uri]::EscapeDataString($env:RELEASE_TAG)
+          $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers;$latest=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
+          if($release.draft -or $release.prerelease -or $latest.id -ne $release.id -or $latest.tag_name -cne $env:RELEASE_TAG){throw 'Published stable is not exact latest.'}

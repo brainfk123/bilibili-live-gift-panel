@@ -75,7 +75,7 @@ export async function verifyEnrollmentBuild(options) {
     tag: options.tag,
     commit: options.commit,
 	artifact: { sha256: artifactSHA256, peContentSha256: inspection.peContentSha256, signatureStatus: 'Valid', identity: naisNetIdentity },
-    root: { spkiSha256: rootSHA256, keyId: options.rootKeyID },
+	root: { spkiSha256: rootSHA256, rootKeyId: `sha256:${rootSHA256}` },
     bootstrapPolicy: { sha256: bootstrapSHA256, epoch: options.bootstrapPolicyEpoch, signatureStatus: 'Valid' },
 	authorizationPolicy: { sha256: authorizationSHA256, epoch: options.authorizationPolicyEpoch, signatureStatus: 'Valid', tag: options.tag, artifactSha256: artifactSHA256, identity: naisNetIdentity },
 	ffmpeg: { version: '9.0', sha256: standaloneFFmpegSHA256, archiveSha256: inspection.ffmpegArchiveSha256, manifestSha256: inspection.ffmpegManifestSha256, signatureStatus: 'Valid', identity: naisNetIdentity },
@@ -85,11 +85,11 @@ export async function verifyEnrollmentBuild(options) {
 }
 
 function validateOptions(options) {
+	if (options && ('rootKeyID' in options || 'rootKeyId' in options || 'keyId' in options)) fail();
   if (!options || Object.getPrototypeOf(options) !== Object.prototype || !isEnrollmentVersion(options.version) || options.tag !== `v${options.version}` || !lowerHex(options.commit, 40) ||
       !lowerHex(options.expectedRootSHA256, 64) || !lowerHex(options.expectedBootstrapPolicySHA256, 64) || !lowerHex(options.expectedAuthorizationPolicySHA256, 64) ||
 	  !lowerHex(options.expectedFFmpegManifestSHA256, 64) ||
-	  !Number.isSafeInteger(options.bootstrapPolicyEpoch) || options.bootstrapPolicyEpoch < 1 || !Number.isSafeInteger(options.authorizationPolicyEpoch) || options.authorizationPolicyEpoch <= options.bootstrapPolicyEpoch ||
-      typeof options.rootKeyID !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/.test(options.rootKeyID)) fail();
+	  !Number.isSafeInteger(options.bootstrapPolicyEpoch) || options.bootstrapPolicyEpoch < 1 || !Number.isSafeInteger(options.authorizationPolicyEpoch) || options.authorizationPolicyEpoch <= options.bootstrapPolicyEpoch) fail();
   for (const name of ['inspectorPath', 'artifactPath', 'artifactInspectionPath', 'artifactSidecarPath', 'standaloneFFmpegPath', 'ffmpegSidecarPath', 'ffmpegArchivePath', 'ffmpegManifestPath', 'rootSPKIPath', 'bootstrapPolicyPath', 'authorizationPolicyPath', 'outputPath']) {
     if (typeof options[name] !== 'string' || options[name].length === 0) fail();
   }
@@ -179,7 +179,7 @@ function fail() {
 }
 
 function parseCLI(arguments_) {
-	const names = new Set(['--inspector', '--artifact', '--artifact-inspection', '--artifact-sidecar', '--standalone-ffmpeg', '--ffmpeg-sidecar', '--ffmpeg-archive', '--ffmpeg-manifest', '--ffmpeg-manifest-sha256', '--root-spki', '--root-sha256', '--root-key-id', '--bootstrap-policy', '--bootstrap-policy-sha256', '--bootstrap-policy-epoch', '--authorization-policy', '--authorization-policy-sha256', '--authorization-policy-epoch', '--version', '--tag', '--commit', '--output']);
+	const names = new Set(['--inspector', '--artifact', '--artifact-inspection', '--artifact-sidecar', '--standalone-ffmpeg', '--ffmpeg-sidecar', '--ffmpeg-archive', '--ffmpeg-manifest', '--ffmpeg-manifest-sha256', '--root-spki', '--root-sha256', '--bootstrap-policy', '--bootstrap-policy-sha256', '--bootstrap-policy-epoch', '--authorization-policy', '--authorization-policy-sha256', '--authorization-policy-epoch', '--version', '--tag', '--commit', '--output']);
   const values = new Map();
   for (let index = 0; index < arguments_.length; index += 2) {
     const name = arguments_[index];
@@ -198,7 +198,7 @@ function parseCLI(arguments_) {
   return {
     inspectorPath: resolve(values.get('--inspector')), artifactPath: resolve(values.get('--artifact')), artifactInspectionPath: resolve(values.get('--artifact-inspection')), artifactSidecarPath: resolve(values.get('--artifact-sidecar')),
 	standaloneFFmpegPath: resolve(values.get('--standalone-ffmpeg')), ffmpegSidecarPath: resolve(values.get('--ffmpeg-sidecar')), ffmpegArchivePath: resolve(values.get('--ffmpeg-archive')), ffmpegManifestPath: resolve(values.get('--ffmpeg-manifest')), expectedFFmpegManifestSHA256: values.get('--ffmpeg-manifest-sha256'),
-    rootSPKIPath: resolve(values.get('--root-spki')), expectedRootSHA256: values.get('--root-sha256'), rootKeyID: values.get('--root-key-id'),
+	rootSPKIPath: resolve(values.get('--root-spki')), expectedRootSHA256: values.get('--root-sha256'),
     bootstrapPolicyPath: resolve(values.get('--bootstrap-policy')), expectedBootstrapPolicySHA256: values.get('--bootstrap-policy-sha256'), bootstrapPolicyEpoch: number('--bootstrap-policy-epoch'),
     authorizationPolicyPath: resolve(values.get('--authorization-policy')), expectedAuthorizationPolicySHA256: values.get('--authorization-policy-sha256'), authorizationPolicyEpoch: number('--authorization-policy-epoch'),
     version: values.get('--version'), tag: values.get('--tag'), commit: values.get('--commit'), outputPath: resolve(values.get('--output')),

@@ -12,7 +12,6 @@ export interface EnrollmentVerificationOptions {
 	expectedFFmpegManifestSHA256: string;
   rootSPKIPath: string;
   expectedRootSHA256: string;
-  rootKeyID: string;
   bootstrapPolicyPath: string;
   expectedBootstrapPolicySHA256: string;
   bootstrapPolicyEpoch: number;
@@ -32,7 +31,7 @@ export interface EnrollmentEvidence {
   tag: string;
   commit: string;
 	artifact: { sha256: string; peContentSha256: string; signatureStatus: 'Valid'; identity: EVSignPublisherIdentity };
-  root: { spkiSha256: string; keyId: string };
+	root: { spkiSha256: string; rootKeyId: string };
   bootstrapPolicy: { sha256: string; epoch: number; signatureStatus: 'Valid' };
 	authorizationPolicy: { sha256: string; epoch: number; signatureStatus: 'Valid'; tag: string; artifactSha256: string; identity: EVSignPublisherIdentity };
 	ffmpeg: { version: string; sha256: string; archiveSha256: string; manifestSha256: string; signatureStatus: 'Valid'; identity: EVSignPublisherIdentity };

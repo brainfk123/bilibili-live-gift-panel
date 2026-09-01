@@ -447,14 +447,23 @@ jobs:
           BRIDGE_BOOTSTRAP_POLICY_SHA256: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_SHA256 }}
           BRIDGE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.BRIDGE_BOOTSTRAP_POLICY_EPOCH }}
         run: |
-          New-Item -ItemType Directory -Path dist/bridge-sealed-executable -ErrorAction Stop | Out-Null
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist/bridge-sealed-executable --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json" --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-tag v0.4.12 --stable-channel stable --ffmpeg-archive dist/bridge-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/bridge-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-artifact --unsigned dist/gift-panel-windows-x64.unsigned.exe --signed dist/gift-panel-windows-x64.signed-candidate.exe --sealed-directory dist --version 0.4.11 --tag v0.4.11 --commit $env:BRIDGE_COMMIT --root-spki "$env:BRIDGE_READINESS_ROOT/root-spki.der" --root-sha256 $env:BRIDGE_TRUST_ROOT_SPKI_SHA256 --policy "$env:BRIDGE_READINESS_ROOT/private-bundle/bundle/policy.json" --policy-sha256 $env:BRIDGE_BOOTSTRAP_POLICY_SHA256 --policy-epoch $env:BRIDGE_BOOTSTRAP_POLICY_EPOCH --stable-artifact "$env:BRIDGE_READINESS_ROOT/stable-artifact.exe" --stable-tag v0.4.12 --stable-channel stable --ffmpeg-archive dist/bridge-ffmpeg-sealed/ffmpeg.zip --ffmpeg-manifest dist/bridge-ffmpeg-sealed/manifest.json | Set-Content -NoNewline -Encoding utf8 dist/bridge-artifact-inspection.json
           if ($LASTEXITCODE -ne 0) { throw 'Final bound bridge artifact inspection failed.' }
           $inspection = Get-Content -LiteralPath dist/bridge-artifact-inspection.json -Raw | ConvertFrom-Json
           if ([string]$inspection.signedFileSha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$inspection.signedFileSize -le 0 -or [string]$inspection.peContentSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Bridge sealed artifact evidence is invalid.' }
-          $sealedPath = Join-Path 'dist/bridge-sealed-executable' "$($inspection.signedFileSha256).exe"
+          $sealedPath = Join-Path 'dist' "$($inspection.signedFileSha256).exe"
           if (-not (Test-Path -LiteralPath $sealedPath -PathType Leaf) -or (Get-Item -LiteralPath $sealedPath).Length -ne [int64]$inspection.signedFileSize -or (Get-FileHash -Algorithm SHA256 -LiteralPath $sealedPath).Hash.ToLowerInvariant() -cne [string]$inspection.signedFileSha256) { throw 'Bridge sealed artifact bytes do not match final inspection.' }
           "BRIDGE_SEALED_EXE_PATH=$sealedPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create expected-name bridge asset
+        shell: pwsh
+        run: |
+          $inspection = Get-Content -LiteralPath dist/bridge-artifact-inspection.json -Raw | ConvertFrom-Json
+          & $env:AUTHENTICODE_INSPECTOR_PATH link-sealed-executable --directory dist --sha256 $inspection.signedFileSha256 --expected-name gift-panel-windows-x64.exe | Set-Content -NoNewline -Encoding utf8 dist/bridge-expected-name-link.json
+          if ($LASTEXITCODE -ne 0) { throw 'Bridge expected-name hard link failed.' }
+          $link = Get-Content -LiteralPath dist/bridge-expected-name-link.json -Raw | ConvertFrom-Json
+          if ($link.name -cne 'gift-panel-windows-x64.exe' -or $link.sha256 -cne $inspection.signedFileSha256 -or (Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe).Hash.ToLowerInvariant() -cne $inspection.signedFileSha256) { throw 'Bridge expected-name hard link evidence mismatch.' }
+          'BRIDGE_EXPECTED_EXE_PATH=dist/gift-panel-windows-x64.exe' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Prepare public bridge evidence
         shell: pwsh
@@ -479,10 +488,9 @@ jobs:
               $readiness.rootSpkiSha256 -cne $inspection.rootSpkiSha256 -or $readiness.policySha256 -cne $inspection.policySha256 -or [uint64]$readiness.policyEpoch -ne [uint64]$inspection.policyEpoch) {
             throw 'Final artifact inspection and reviewed readiness evidence are inconsistent.'
           }
-          $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BRIDGE_SEALED_EXE_PATH).Hash.ToLowerInvariant()
-          $exeSize = (Get-Item -LiteralPath $env:BRIDGE_SEALED_EXE_PATH).Length
+          $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BRIDGE_EXPECTED_EXE_PATH).Hash.ToLowerInvariant()
+          $exeSize = (Get-Item -LiteralPath $env:BRIDGE_EXPECTED_EXE_PATH).Length
           if ($exeHash -cne [string]$inspection.signedFileSha256 -or $exeSize -ne [int64]$inspection.signedFileSize) { throw 'Bridge sealed artifact changed after final inspection.' }
-          New-Item -ItemType HardLink -Path dist/gift-panel-windows-x64.exe -Target $env:BRIDGE_SEALED_EXE_PATH -ErrorAction Stop | Out-Null
           "$exeHash  gift-panel-windows-x64.exe" | Set-Content -NoNewline -Encoding ascii dist/gift-panel-windows-x64.exe.sha256
           [ordered]@{
             tag_name = $env:BRIDGE_TAG
@@ -536,7 +544,7 @@ jobs:
             )
           } | ConvertTo-Json -Depth 8 | Set-Content -NoNewline -Encoding utf8 dist/bridge-release-evidence.json
           $checksumPaths = @(
-            @($env:BRIDGE_SEALED_EXE_PATH, 'gift-panel-windows-x64.exe'),
+            @($env:BRIDGE_EXPECTED_EXE_PATH, 'gift-panel-windows-x64.exe'),
             @('dist/gift-panel-windows-x64.exe.sha256', 'gift-panel-windows-x64.exe.sha256'),
             @('dist/gift-panel-update.json', 'gift-panel-update.json'),
             @('dist/ffmpeg-windows-x64.exe', 'ffmpeg-windows-x64.exe'),
@@ -558,7 +566,7 @@ jobs:
           $releaseAssets = foreach ($entry in $required) {
             $name = [string]$entry[0]
             $id = [int]$entry[1]
-            $path = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_SEALED_EXE_PATH } else { "dist/$name" }
+            $path = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_EXPECTED_EXE_PATH } else { "dist/$name" }
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
             [ordered]@{
               url = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$id"
@@ -583,7 +591,7 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
-            dist/bridge-sealed-executable/*.exe
+            dist/gift-panel-windows-x64.exe
             dist/ffmpeg-windows-x64.exe
             dist/ffmpeg-component-manifest.json
             dist/bridge-release-evidence.json
@@ -617,7 +625,7 @@ jobs:
         run: |
           gh release create $env:BRIDGE_TAG --draft --verify-tag --title $env:BRIDGE_TAG --latest=false
           if ($LASTEXITCODE -ne 0) { throw 'Bridge GitHub Release draft creation failed.' }
-          gh release upload $env:BRIDGE_TAG "$env:BRIDGE_SEALED_EXE_PATH#gift-panel-windows-x64.exe" dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/ffmpeg-windows-x64.exe dist/gift-panel-changelog.json dist/ffmpeg-component-manifest.json dist/bridge-release-evidence.json dist/SHA256SUMS.txt
+          gh release upload $env:BRIDGE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256 dist/gift-panel-update.json dist/ffmpeg-windows-x64.exe dist/gift-panel-changelog.json dist/ffmpeg-component-manifest.json dist/bridge-release-evidence.json dist/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw 'Bridge asset upload failed; the draft remains unpublished.' }
 
       - name: Read back and verify bridge draft
@@ -640,7 +648,7 @@ jobs:
           foreach ($name in $required) {
             gh release download $env:BRIDGE_TAG --dir dist/bridge-draft-readback --pattern $name
             if ($LASTEXITCODE -ne 0) { throw 'Bridge draft asset readback failed.' }
-            $source = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_SEALED_EXE_PATH } else { "dist/$name" }
+            $source = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_EXPECTED_EXE_PATH } else { "dist/$name" }
             $readback = "dist/bridge-draft-readback/$name"
             $asset = @($release.assets | Where-Object { $_.name -ceq $name })[0]
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()
@@ -704,7 +712,7 @@ jobs:
             if (@($names | Where-Object { $_ -ceq $name }).Count -ne 1) { throw 'Published bridge asset names changed.' }
             gh release download $env:BRIDGE_TAG --dir dist/bridge-published-readback --pattern $name
             if ($LASTEXITCODE -ne 0) { throw 'Published bridge asset readback failed.' }
-            $source = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_SEALED_EXE_PATH } else { "dist/$name" }
+            $source = if ($name -ceq 'gift-panel-windows-x64.exe') { $env:BRIDGE_EXPECTED_EXE_PATH } else { "dist/$name" }
             $readback = "dist/bridge-published-readback/$name"
             $asset = @($release.assets | Where-Object { $_.name -ceq $name })[0]
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant()

@@ -14,6 +14,7 @@ import (
 	"bilibili-live-gift-panel/internal/artifactinspect"
 	"bilibili-live-gift-panel/internal/certidentity"
 	"bilibili-live-gift-panel/internal/ffmpegseal"
+	"bilibili-live-gift-panel/internal/securefile"
 	"bilibili-live-gift-panel/internal/updatepolicy"
 )
 
@@ -49,9 +50,66 @@ func run(args []string, output io.Writer) error {
 		return runVerifyEnrollment(args[1:], output)
 	case "verify-enrollment-policies":
 		return runVerifyEnrollmentPolicies(args[1:], output)
+	case "link-sealed-executable":
+		return runLinkSealedExecutable(args[1:], output)
+	case "verify-enrollment-candidate":
+		return runVerifyEnrollmentCandidate(args[1:], output)
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func runVerifyEnrollmentCandidate(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("verify-enrollment-candidate", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var options artifactinspect.VerifyEnrollmentCandidateOptions
+	flags.StringVar(&options.ArtifactPath, "artifact", "", "content-addressed candidate")
+	flags.StringVar(&options.ExpectedPEContentSHA256, "pe-content-sha256", "", "covered PE digest")
+	flags.StringVar(&options.Version, "version", "", "application version")
+	flags.StringVar(&options.Tag, "tag", "", "stable tag")
+	flags.StringVar(&options.Commit, "commit", "", "release commit")
+	flags.StringVar(&options.RootSPKIPath, "root-spki", "", "reviewed root SPKI")
+	flags.StringVar(&options.ExpectedRootSHA256, "root-sha256", "", "reviewed root digest")
+	flags.StringVar(&options.BootstrapPolicyPath, "bootstrap-policy", "", "embedded bootstrap policy")
+	flags.StringVar(&options.ExpectedBootstrapPolicySHA256, "bootstrap-policy-sha256", "", "bootstrap policy digest")
+	bootstrapEpoch := flags.String("bootstrap-policy-epoch", "", "bootstrap policy epoch")
+	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "sealed FFmpeg archive")
+	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "sealed FFmpeg manifest")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return errors.New("enrollment candidate arguments are invalid")
+	}
+	parsedEpoch, epochErr := strconv.ParseUint(*bootstrapEpoch, 10, 64)
+	if epochErr != nil || parsedEpoch == 0 || options.ArtifactPath == "" || options.RootSPKIPath == "" || options.BootstrapPolicyPath == "" || options.FFmpegArchivePath == "" || options.FFmpegManifestPath == "" {
+		return errors.New("enrollment candidate arguments are invalid")
+	}
+	options.ExpectedBootstrapPolicyEpoch = parsedEpoch
+	options.Now = time.Now().UTC()
+	evidence, err := artifactinspect.VerifyEnrollmentCandidate(options)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(evidence)
+}
+
+func runLinkSealedExecutable(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("link-sealed-executable", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("directory", "", "sealed executable directory")
+	digest := flags.String("sha256", "", "sealed executable SHA-256")
+	expectedName := flags.String("expected-name", "", "expected Release asset name")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *digest == "" || *expectedName == "" {
+		return errors.New("sealed executable link arguments are invalid")
+	}
+	evidence, err := securefile.LinkContentAddressed(*directory, *digest, *expectedName, nil)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(struct {
+		SchemaVersion uint64 `json:"schemaVersion"`
+		Name          string `json:"name"`
+		SHA256        string `json:"sha256"`
+		Size          int64  `json:"size"`
+	}{SchemaVersion: 1, Name: evidence.Name, SHA256: evidence.SHA256, Size: evidence.Size})
 }
 
 func runVerifyEnrollmentPolicies(args []string, output io.Writer) error {
