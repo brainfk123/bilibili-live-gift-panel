@@ -211,6 +211,10 @@ describe('EV Sign signer profile resolution', () => {
       EVSIGN_BRIDGE_CERTIFICATE: ' selector ',
       EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P"}',
     }, /bridge EVSign profile is not configured/],
+    ['default certificate on bridge', 'bridge', {
+      EVSIGN_BRIDGE_CERTIFICATE: 'default',
+      EVSIGN_BRIDGE_PUBLISHER_IDENTITY: '{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P"}',
+    }, /bridge EVSign certificate must be explicit/],
   ])('rejects %s without exposing configuration', (_label, profile, environment, expected) => {
     let error: unknown;
     try {
@@ -268,6 +272,34 @@ describe('closed-profile signing entry point', () => {
     expect(seenHeaders[0]).toMatchObject({ 'X-Cert': 'stable-selector', 'X-Key': 'synthetic-key' });
     expect(JSON.stringify(seenHeaders[0])).not.toContain('bridge');
     expect(readFileSync(outputPath, 'utf8')).toBe('stable-signed-output');
+  });
+
+  it('uses the reviewed default stable certificate without sending X-Cert', async () => {
+    const { inputPath, outputPath } = fixture();
+    const seenHeaders: Record<string, string>[] = [];
+    await signWithProfile({
+      profile: 'stable',
+      environment: {
+        EVSIGN_CERTIFICATE: 'default',
+        EVSIGN_PUBLISHER_IDENTITY: JSON.stringify({
+          country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094',
+        }),
+        EVSIGN_KEY: 'synthetic-key',
+      },
+      inputPath,
+      outputPath,
+    }, {
+      request: async (_source, request) => {
+        seenHeaders.push(request.headers);
+        return Buffer.from('default-stable-signed-output');
+      },
+      sleep: async () => {},
+      log: () => {},
+    });
+    expect(seenHeaders).toHaveLength(1);
+    expect(seenHeaders[0]).toMatchObject({ 'X-Key': 'synthetic-key' });
+    expect(seenHeaders[0]).not.toHaveProperty('X-Cert');
+    expect(readFileSync(outputPath, 'utf8')).toBe('default-stable-signed-output');
   });
 
   it('rejects bridge-only configuration before the stable signing fake runs', async () => {

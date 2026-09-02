@@ -39,6 +39,9 @@ export function resolveEVSignSignerProfile(profileName, environment = process.en
   if (!validProfileString(certificate, 1024) || !validProfileString(identityJSON, 4096)) {
     throw new Error(`${profileName} EVSign profile is not configured.`);
   }
+  if (profileName === 'bridge' && certificate === 'default') {
+    throw new Error('bridge EVSign certificate must be explicit.');
+  }
   let identity;
   try {
     identity = JSON.parse(identityJSON);
@@ -170,8 +173,8 @@ export async function signWithProfile(options, dependencies = {}) {
     'X-File-Name': encodeURIComponent(basename(outputPath)),
     'X-Timestamp': environment.EVSIGN_TIMESTAMP?.trim() || 'auto',
     'X-Append': 'no',
-    'X-Cert': signerProfile.certificate,
   };
+  if (signerProfile.certificate !== 'default') headers['X-Cert'] = signerProfile.certificate;
   if (environment.EVSIGN_PASSWORD?.trim()) headers['X-Password'] = environment.EVSIGN_PASSWORD.trim();
   await signFileWithRetry({
     inputPath,
