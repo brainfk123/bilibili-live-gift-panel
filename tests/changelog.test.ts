@@ -18,23 +18,27 @@ describe('versioned changelog', () => {
     expect(css).toMatch(/\.changelog-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
   });
 
-  it('bundles only the v0.4.10 release with safe gift diagnostics', () => {
+  it('bundles only the v0.4.12 release with gift compatibility and update trust', () => {
     expect(CHANGELOG_RELEASES).toHaveLength(1);
     expect(latestChangelogRelease()).toBe(CHANGELOG_RELEASES[0]);
-    expect(normalizeChangelogVersion(' v0.4.10 ')).toBe('0.4.10');
-    expect(changelogReleaseForVersion('v0.4.10')).toEqual({
-      version: '0.4.10',
-      date: '2026-08-30',
-      title: '增强礼物诊断与加班机摘要',
-      summary: '普通礼物解析失败时，运行日志会记录脱敏后的命令、失败阶段和字段类型，便于继续定位 B 站消息变化；同时修正加班机调整时长后规则卡片仍显示旧分钟数的问题。主程序仍内嵌固定 FFmpeg 9.0，发布页另提供经过签名和校验的 ffmpeg-windows-x64.exe 及 SHA-256 作为可选下载，主程序用户无需另行下载。日志不会记录 UID、昵称、消息内容或原始礼物数据。',
-      highlights: [],
+    expect(normalizeChangelogVersion(' v0.4.12 ')).toBe('0.4.12');
+    expect(changelogReleaseForVersion('v0.4.12')).toEqual({
+      version: '0.4.12',
+      date: '2026-09-02',
+      title: '修复新版礼物消息并升级安全更新',
+      summary: '修复 B 站新版 SEND_GIFT_V2 普通礼物消息未触发属性玩法的问题；自动更新现在通过签名发布者策略、版本通道路由和回滚保护校验下载内容。主程序继续内嵌固定 FFmpeg 9.0，发布包同时提供经过签名和校验的独立 FFmpeg，无需运行时联网下载。',
+      highlights: [
+        { label: '礼物', title: '新版普通礼物恢复响应', description: '兼容 B 站 SEND_GIFT_V2 消息，已配置礼物可以正常触发属性规则。' },
+        { label: '更新', title: '发布者信任与防回滚', description: '更新前会校验签名策略、目标版本、文件哈希和发布者身份。' },
+        { label: 'FFmpeg', title: '固定版本随发布包提供', description: '继续使用经过签名校验的 FFmpeg 9.0，避免国内镜像下载失败。' },
+      ],
       visuals: [],
     });
   });
 
   it('opens once for a known installed version and ignores development builds', () => {
-    expect(shouldShowChangelog('0.4.10', '')).toBe(true);
-    expect(shouldShowChangelog('v0.4.10', '0.4.10')).toBe(false);
+    expect(shouldShowChangelog('0.4.12', '')).toBe(true);
+    expect(shouldShowChangelog('v0.4.12', '0.4.12')).toBe(false);
     expect(shouldShowChangelog('dev', '')).toBe(false);
     expect(shouldShowChangelog('9.9.9', '')).toBe(false);
   });
@@ -50,12 +54,12 @@ describe('versioned changelog', () => {
       ],
     });
     const merged = mergeChangelogReleases(hosted);
-    expect(merged.map((release) => release.version)).toEqual(['0.4.10', '0.1.0']);
+    expect(merged.map((release) => release.version)).toEqual(['0.4.12', '0.1.0']);
     expect(normalizeChangelogReleases({ releases: [{ version: 'broken' }] })).toEqual([]);
   });
 
   it('ignores the removed training visual from bundled and hosted changelogs', () => {
-    expect(changelogReleaseForVersion('0.4.10')?.visuals).toEqual([]);
+    expect(changelogReleaseForVersion('0.4.12')?.visuals).toEqual([]);
     const [hosted] = normalizeChangelogReleases({
       releases: [{
         version: '0.2.5', date: '2026-08-09', title: '测试版本', summary: '测试在线日志。',
