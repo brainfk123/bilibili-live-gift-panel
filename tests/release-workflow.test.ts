@@ -791,6 +791,8 @@ describe('publisher discovery recovery workflow contract', () => {
       'policy.json', 'audit.json', 'commit.json',
     ]) expect(fetch?.run).toContain(name);
     expect(fetch?.run).toContain('scripts/bounded-github-asset.mjs');
+    expect(fetch?.run).toContain('--content-type application/octet-stream');
+    expect(fetch?.run).not.toContain('--content-type application/json');
     expect(fetch?.run).toContain('import-bundle');
     expect(fetch?.env).toEqual({
       GH_TOKEN: '${{ github.token }}',
@@ -844,6 +846,7 @@ describe('exact RushRush bridge release workflow contract', () => {
     const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const build=jobSteps(jobs['bridge-build']);
     const fetch=build[stepIndex(build,'Fetch immutable production trust binding')]?.run??'';
     for(const name of ['gift-panel-publisher-policy.json','gift-panel-publisher-policy.audit.json','gift-panel-publisher-policy.commit.json','policy.json','audit.json','commit.json'])expect(fetch).toContain(name);
+    expect(fetch).toContain('--content-type application/octet-stream');expect(fetch).not.toContain('--content-type application/json');
     expect(fetch).toContain('import-bundle');expect(fetch).toContain('verify-bundle');
     expect(fetch).toContain('BRIDGE_AUTHORIZATION_POLICY_EPOCH');expect(fetch).toContain('BRIDGE_BOOTSTRAP_POLICY_EPOCH');
     expect(fetch).toContain('authorization-evidence.json');expect(fetch).not.toContain('Bootstrap policy bytes do not match');

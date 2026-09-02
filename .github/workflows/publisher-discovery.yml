@@ -89,7 +89,7 @@ jobs:
               --api-url $asset.url `
               --size $asset.size `
               --sha256 ([string]$asset.digest).Substring(7) `
-              --content-type application/json `
+              --content-type application/octet-stream `
               --max-bytes $entry.cap `
               --output "$downloadDirectory/$($entry.local)"
             if ($LASTEXITCODE -ne 0) { throw 'Bounded publisher policy asset download failed.' }

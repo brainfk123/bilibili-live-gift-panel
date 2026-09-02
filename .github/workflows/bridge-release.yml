@@ -278,7 +278,7 @@ jobs:
           foreach ($entry in $contract) {
             $asset=@($assets|Where-Object{$_.name -ceq $entry.remote})[0]
             if ([int64]$asset.size -le 0 -or [int64]$asset.size -gt $entry.cap -or [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.content_type -cne 'application/json' -or [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') { throw 'Immutable authorization policy asset metadata is invalid.' }
-            node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $asset.url --size $asset.size --sha256 ([string]$asset.digest).Substring(7) --content-type application/json --max-bytes $entry.cap --output "$downloadDirectory/$($entry.local)"
+            node $env:BOUNDED_GITHUB_ASSET_SCRIPT_PATH download --api-url $asset.url --size $asset.size --sha256 ([string]$asset.digest).Substring(7) --content-type application/octet-stream --max-bytes $entry.cap --output "$downloadDirectory/$($entry.local)"
             if ($LASTEXITCODE -ne 0) { throw 'Bounded authorization policy asset download failed.' }
           }
           & $env:TRUSTPOLICY_INSPECTOR_PATH import-bundle --policy-source "$downloadDirectory/policy.json" --audit-source "$downloadDirectory/audit.json" --commit-source "$downloadDirectory/commit.json" --bundle-parent $bundleParent
