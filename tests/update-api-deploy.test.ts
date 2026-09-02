@@ -470,6 +470,7 @@ describe('update API deployment assets', () => {
     expect(nginx.match(/client_max_body_size 16k;/g)).toHaveLength(2);
     expect(nginx).toMatch(/location = \/api\/v1\/releases\/latest/);
     expect(nginx).toMatch(/location = \/api\/v1\/changelog/);
+    expect(nginx).toMatch(/location = \/api\/v1\/trust\/publisher-policy/);
     expect(nginx).toMatch(/location = \/healthz[\s\S]*allow 127\.0\.0\.1;[\s\S]*allow ::1;[\s\S]*deny all;/);
     expect(nginx).toContain('error_page 429 = @rate_limited');
     expect(nginx).toContain('default_type application/json;');
@@ -486,10 +487,10 @@ describe('update API deployment assets', () => {
     expect(accessLogFormat).not.toContain('$request_uri');
     expect(accessLogFormat).not.toContain('$args');
 
-    expect(nginx.match(/\$request_method !~ \^\(GET\|HEAD\)\$/g)).toHaveLength(2);
-    expect(nginx.match(/add_header Allow "GET, HEAD" always;/g)).toHaveLength(2);
-    expect(nginx.match(/add_header X-Request-ID \$request_id always;/g)).toHaveLength(4);
-    expect(nginx.match(/return 405 '\{"code":"method_not_allowed","message":"Method not allowed","request_id":"\$request_id"\}';/g)).toHaveLength(2);
+    expect(nginx.match(/\$request_method !~ \^\(GET\|HEAD\)\$/g)).toHaveLength(3);
+    expect(nginx.match(/add_header Allow "GET, HEAD" always;/g)).toHaveLength(3);
+    expect(nginx.match(/add_header X-Request-ID \$request_id always;/g)).toHaveLength(5);
+    expect(nginx.match(/return 405 '\{"code":"method_not_allowed","message":"Method not allowed","request_id":"\$request_id"\}';/g)).toHaveLength(3);
     expect(nginx).toContain(`return 429 '{"code":"rate_limited","message":"Too many requests","request_id":"$request_id"}';`);
     expect(nginx).toContain(`return 404 '{"code":"not_found","message":"Not found","request_id":"$request_id"}';`);
     expect(nginx).toContain('return 301 https://${PUBLIC_DOMAIN}$request_uri;');
