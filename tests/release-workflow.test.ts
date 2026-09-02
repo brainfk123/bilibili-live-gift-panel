@@ -155,6 +155,7 @@ function runCandidateChangelogStep(options: {
   expectedHistorySHA256?: string;
   releaseTag?: string;
   releaseVersion?: string;
+  omitDist?: boolean;
 }) {
   const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
   const steps = jobSteps(jobs['prepare-candidate']);
@@ -163,7 +164,7 @@ function runCandidateChangelogStep(options: {
   try {
     const tooling = join(root, 'tooling');
     mkdirSync(join(root, '.github'), { recursive: true });
-    mkdirSync(join(root, 'dist'));
+    if (!options.omitDist) mkdirSync(join(root, 'dist'));
     mkdirSync(join(tooling, '.github'), { recursive: true });
     writeFileSync(join(root, 'gift-panel-changelog.json'), JSON.stringify({ schemaVersion: 1, releases: options.target }));
     const historyBytes = options.history ?? reviewedChangelogHistory().bytes;
@@ -468,6 +469,12 @@ describe('release workflow supply-chain contract', () => {
 	  expect(versions.slice(0,4)).toEqual(['0.4.12','0.4.10','0.4.9','0.4.7']);
 	  expect(versions.slice(1)).toEqual(reviewed.document.releases.map((release)=>release.version));
 	  expect(versions).not.toContain('0.4.8');
+	});
+
+	it('creates the canonical changelog output directory on a clean candidate checkout', () => {
+	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],omitDist:true});
+	  expect(execution.result.status,execution.result.stderr).toBe(0);
+	  expect(execution.output).toBeDefined();
 	});
 
 	it('keeps later stable history digest-bound without reusing the v0.4.12 sequence invariant', () => {
