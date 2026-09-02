@@ -418,7 +418,7 @@ jobs:
           go -C "$env:RELEASE_TOOL_ROOT/goserver" build -trimpath -o $inspector ./cmd/artifact-inspector
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $inspector -PathType Leaf)) { throw 'Reviewed FFmpeg inspector build failed.' }
           $env:AUTHENTICODE_INSPECTOR_PATH = $inspector
-          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind current --tool-root $env:RELEASE_TOOL_ROOT --input dist/ffmpeg-component --sealed-output dist/release-ffmpeg-sealed
+          node "$env:RELEASE_TOOL_ROOT/scripts/ffmpeg-component-assets.mjs" install --kind fixed --tool-root $env:RELEASE_TOOL_ROOT --input dist/ffmpeg-component --sealed-output dist/release-ffmpeg-sealed
           if ($LASTEXITCODE -ne 0) { throw 'FFmpeg component installation failed.' }
           if ((Get-FileHash dist/release-ffmpeg-sealed/manifest.json -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256) { throw 'Reviewed FFmpeg manifest digest mismatch.' }
       - name: Build stable candidate executable

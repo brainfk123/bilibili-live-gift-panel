@@ -75,6 +75,30 @@ func TestVerifyAndSealUsesRetainedSnapshotsWhenSourcesAreSwappedAfterSnapshot(t 
 	}
 }
 
+func TestVerifyAndSealAcceptsExactImmutableNaisNetDisplaySubjectWithDERIdentity(t *testing.T) {
+	archive, manifest, binaryBytes := closureFixture(t)
+	var document map[string]any
+	if err := json.Unmarshal(manifest, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["signer_subject"] = naisNetFixedSignerSubject
+	manifest, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	sealedDirectory := filepath.Join(root, "sealed")
+	if err := os.Mkdir(sealedDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAndSeal(Options{
+		ArchivePath: writeClosureFile(t, root, "source.zip", archive), ManifestPath: writeClosureFile(t, root, "source.json", manifest), SealedDirectory: sealedDirectory,
+		InspectAuthenticode: exactNaisNetInspector(t, binaryBytes),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestVerifyAndSealRejectsZipBombBeforeInflation(t *testing.T) {
 	archive, manifest, binaryBytes := closureFixture(t)
 	central := bytes.Index(archive, []byte{'P', 'K', 1, 2})

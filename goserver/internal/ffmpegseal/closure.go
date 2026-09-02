@@ -23,6 +23,7 @@ const MaximumUncompressedBytes int64 = 40 << 20
 var naisNetIdentity = certidentity.Identity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"}
 
 const naisNetStructuredSigner = "C=CN;O=NaisNet Technology Co., Ltd.;SERIALNUMBER=91210103MA7CJ3C094"
+const naisNetFixedSignerSubject = `CN="NaisNet Technology Co., Ltd.", O="NaisNet Technology Co., Ltd.", L=Shenyang, S=Liaoning, C=CN, SERIALNUMBER=91210103MA7CJ3C094, OID.1.3.6.1.4.1.311.60.2.1.1=Shenyang, OID.1.3.6.1.4.1.311.60.2.1.2=Liaoning, OID.1.3.6.1.4.1.311.60.2.1.3=CN, OID.2.5.4.15=Private Organization`
 
 type Hooks struct {
 	AfterSnapshots func() error
@@ -185,7 +186,7 @@ func parseManifest(contents, archive []byte) (manifest, error) {
 	if token, err := decoder.Token(); err != io.EOF || token != nil {
 		return manifest{}, errors.New("FFmpeg manifest has trailing data")
 	}
-	if value.Schema != 1 || value.Version != "9.0" || value.Size <= 0 || value.Size > MaximumUncompressedBytes || !value.Authenticode || value.SignerSubject != naisNetStructuredSigner ||
+	if value.Schema != 1 || value.Version != "9.0" || value.Size <= 0 || value.Size > MaximumUncompressedBytes || !value.Authenticode || (value.SignerSubject != naisNetStructuredSigner && value.SignerSubject != naisNetFixedSignerSubject) ||
 		!isLowerHex(value.ComponentFingerprint, 64) || !isLowerHex(value.DescriptorSHA256, 64) || !isLowerHex(value.SHA256, 64) || !isLowerHex(value.ArchiveSHA256, 64) || !isLowerHex(value.ComponentGateSHA256, 64) ||
 		!isLowerHex(value.SourceReleaseCommit, 40) || strings.Trim(value.SourceReleaseCommit, "0") == "" || value.Descriptor == "" || value.ComponentGate == "" {
 		return manifest{}, errors.New("FFmpeg manifest binding is invalid")

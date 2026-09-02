@@ -7,20 +7,35 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"strings"
 
 	"bilibili-live-gift-panel/internal/certidentity"
 )
 
-const inspectAuthenticodeScript = `$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; [pscustomobject]@{status=[string]$signature.Status;certificateDerBase64=if($null -eq $signature.SignerCertificate){''}else{[Convert]::ToBase64String($signature.SignerCertificate.RawData)}} | ConvertTo-Json -Compress`
+const inspectAuthenticodeScript = `$path = [Console]::In.ReadToEnd(); $signature = Get-AuthenticodeSignature -LiteralPath $path; [pscustomobject]@{status=[string]$signature.Status;certificateDerBase64=if($null -eq $signature.SignerCertificate){''}else{[Convert]::ToBase64String($signature.SignerCertificate.RawData)}} | ConvertTo-Json -Compress`
 
 func InspectAuthenticodeFile(path string) (certidentity.Identity, error) {
-	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", inspectAuthenticodeScript, path)
+	command := powershellLiteralPathCommand(inspectAuthenticodeScript, path)
 	output, err := command.Output()
 	if err != nil || len(output) > 16<<10 {
 		return certidentity.Identity{}, errors.New("Authenticode inspection failed")
 	}
 	return parseAuthenticodeOutput(output)
+}
+
+func powershellLiteralPathCommand(script, path string) *exec.Cmd {
+	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	command.Stdin = strings.NewReader(path)
+	for _, entry := range os.Environ() {
+		name, _, present := strings.Cut(entry, "=")
+		if present && strings.EqualFold(name, "PSModulePath") {
+			continue
+		}
+		command.Env = append(command.Env, entry)
+	}
+	return command
 }
 
 func parseAuthenticodeOutput(output []byte) (certidentity.Identity, error) {
