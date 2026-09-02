@@ -122,8 +122,8 @@ func TestHostedCapacitySharesSevenRoomsAcrossTenIsolatedAccounts(t *testing.T) {
 		if queueCapacity != 256 || queueDepth > queueCapacity {
 			t.Fatalf("account %d runtime queue depth/capacity = %d/%d, want a bounded 256-event queue", accountID, queueDepth, queueCapacity)
 		}
-		snapshot, ok := publisher.Latest(accountID)
-		if !ok || snapshot.AccountID != accountID || snapshot.LiveSessionID != accountID || len(snapshot.Viewers) != 1 || snapshot.Viewers[0].Name != "viewer-secret" || snapshot.Viewers[0].Gifts != 100 {
+		snapshot := waitForCapacitySnapshot(t, publisher, accountID)
+		if snapshot.AccountID != accountID || snapshot.LiveSessionID != accountID || len(snapshot.Viewers) != 1 || snapshot.Viewers[0].Name != "viewer-secret" || snapshot.Viewers[0].Gifts != 100 {
 			t.Fatalf("account %d process-local display snapshot missing isolated viewer: %+v", accountID, snapshot)
 		}
 	}
@@ -135,6 +135,25 @@ func TestHostedCapacitySharesSevenRoomsAcrossTenIsolatedAccounts(t *testing.T) {
 	for _, secret := range []string{"viewer-secret", "secret-avatar", "987654321"} {
 		if strings.Contains(string(durable), secret) {
 			t.Fatalf("durable runtime commands captured viewer identity %q", secret)
+		}
+	}
+}
+
+func waitForCapacitySnapshot(t *testing.T, publisher *Publisher, accountID int64) DisplaySnapshot {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot, ok := publisher.Latest(accountID)
+		if ok && len(snapshot.Viewers) == 1 && snapshot.Viewers[0].Gifts == 100 {
+			return snapshot
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("account %d process-local display snapshot did not reach 100 gifts: %+v", accountID, snapshot)
+		case <-ticker.C:
 		}
 	}
 }
