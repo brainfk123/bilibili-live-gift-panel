@@ -479,11 +479,11 @@ func (runtime *RoomRuntime) Shutdown(ctx context.Context) error {
 func (runtime *RoomRuntime) shutdownSequence() {
 	runtime.pollCancel()
 	<-runtime.pollDone
-	runtime.watcher.Close()
-	// Once the producer is closed, no new wake-up can arrive. Cancel the
-	// normal retry loop so permanent ReplayEvents/ApplyRoomEvent failures
-	// cannot prevent the lifecycle join.
+	// Stop the normal consumer before closing its wake-up stream. Otherwise it
+	// can observe the close, enter one last replay, and report the same failure
+	// that the bounded final drain reports below.
 	runtime.consumeCancel()
+	runtime.watcher.Close()
 	<-runtime.consumeDone
 	drainContext, cancelDrain := context.WithTimeout(context.Background(), runtime.options.FinalDrainTimeout)
 	drainErr := runtime.replay(drainContext)
