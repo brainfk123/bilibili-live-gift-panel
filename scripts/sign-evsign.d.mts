@@ -30,5 +30,10 @@ export function signWithProfile(options: {
   inputPath: string;
   outputPath?: string;
 }, dependencies?: SignDependencies): Promise<void>;
+export function runSigningCLI(args: string[], environment?: Record<string, string | undefined>, dependencies?: {
+  signWithProfile?: (options: { profile: string; environment: Record<string, string | undefined>; inputPath: string; outputPath: string }) => Promise<void>;
+  readFile?: (path: string) => Promise<Buffer>;
+  log?: (message: string) => void;
+}): Promise<void>;
 export function requestSignedBytes(source: Buffer, request: { headers: Record<string, string>; attemptTimeoutMs: number; maximumResponseBytes: number; fetchImpl?: typeof fetch }): Promise<Buffer>;
 export function signFileWithRetry(options: SignFileOptions, dependencies?: SignDependencies): Promise<void>;

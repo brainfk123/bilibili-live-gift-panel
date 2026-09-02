@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as evsign from '../scripts/sign-evsign.mjs';
-import { EVSIGN_API_ENDPOINT, requestSignedBytes, signFileWithRetry, signWithProfile } from '../scripts/sign-evsign.mjs';
+import { EVSIGN_API_ENDPOINT, requestSignedBytes, runSigningCLI, signFileWithRetry, signWithProfile } from '../scripts/sign-evsign.mjs';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -231,6 +231,23 @@ describe('EV Sign signer profile resolution', () => {
 });
 
 describe('closed-profile signing entry point', () => {
+	it('reports the explicit CLI output path after signing completes', async () => {
+	  const { inputPath, outputPath }=fixture();
+	  const messages:string[]=[];
+	  await runSigningCLI(['--profile','stable',inputPath,outputPath],{}, {
+		signWithProfile: async (options) => {
+		  expect(options.outputPath).toBe(outputPath);
+		  writeFileSync(outputPath,Buffer.from('signed-output'));
+		},
+		readFile: async (path) => {
+		  expect(path).toBe(outputPath);
+		  return Buffer.from(readFileSync(path));
+		},
+		log: (message) => messages.push(message),
+	  });
+	  expect(messages).toEqual(['Signed output.exe via EV Sign (13 bytes).']);
+	});
+
   it('rejects every endpoint override before any signing request', async () => {
     const { inputPath, outputPath } = fixture();
     let requests = 0;

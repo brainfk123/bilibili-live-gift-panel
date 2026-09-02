@@ -238,12 +238,12 @@ function readRetryDelaysFrom(environment) {
   return value.split(',').map(Number);
 }
 
-async function main() {
-  const args = process.argv.slice(2);
+export async function runSigningCLI(args, environment = process.env, dependencies = {}) {
+  const log = dependencies.log || console.log;
   if (args[0] === '--resolve-profile') {
     if (args.length !== 2) throw new Error('Usage: node scripts/sign-evsign.mjs --resolve-profile stable|bridge');
-    const resolved = resolveEVSignSignerProfile(args[1], process.env);
-    console.log(JSON.stringify({ schema: resolved.schema, profile: resolved.profile, certificateConfigured: true, identity: resolved.identity }));
+    const resolved = resolveEVSignSignerProfile(args[1], environment);
+    log(JSON.stringify({ schema: resolved.schema, profile: resolved.profile, certificateConfigured: true, identity: resolved.identity }));
     return;
   }
   const explicitProfile = args[0] === '--profile';
@@ -252,9 +252,11 @@ async function main() {
   const outputArg = (explicitProfile ? args[3] : args[1]) || inputArg;
   if (explicitProfile && (args.length < 3 || args.length > 4)) throw new Error('Usage: node scripts/sign-evsign.mjs --profile stable|bridge <input.exe> [output.exe]');
   if (!inputArg) throw new Error('Usage: node scripts/sign-evsign.mjs <input.exe> [output.exe]');
-  await signWithProfile({ profile: profileName, environment: process.env, inputPath: inputArg, outputPath: outputArg });
-  const signed = await readFile(outputPath);
-  console.log(`Signed ${basename(outputPath)} via EV Sign (${signed.length} bytes).`);
+  const sign = dependencies.signWithProfile || signWithProfile;
+  const read = dependencies.readFile || readFile;
+  await sign({ profile: profileName, environment, inputPath: inputArg, outputPath: outputArg });
+  const signed = await read(outputArg);
+  log(`Signed ${basename(outputArg)} via EV Sign (${signed.length} bytes).`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runSigningCLI(process.argv.slice(2));
