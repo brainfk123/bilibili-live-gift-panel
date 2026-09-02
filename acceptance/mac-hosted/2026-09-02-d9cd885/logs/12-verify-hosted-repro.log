@@ -1,0 +1,280 @@
+
+> bilibili-live-gift-panel@0.4.10 verify:hosted-server-repro
+> node scripts/build-hosted.mjs --verify-reproducible
+
+#0 building with "colima" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.35kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#2 DONE 0.0s
+
+#3 docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#3 resolve docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/debian:bookworm-20260713-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+#4 DONE 0.0s
+
+#5 [internal] load metadata for docker.io/library/node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+#5 DONE 0.0s
+
+#6 [internal] load metadata for docker.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+#6 DONE 0.0s
+
+#7 [internal] load .dockerignore
+#7 transferring context: 2B done
+#7 DONE 0.0s
+
+#8 [stage-2 1/5] FROM docker.io/library/debian:bookworm-20260713-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+#8 resolve docker.io/library/debian:bookworm-20260713-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e done
+#8 CACHED
+
+#9 [ui-build 1/7] FROM docker.io/library/node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+#9 resolve docker.io/library/node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d done
+#9 DONE 0.0s
+
+#10 [ui-build 2/7] WORKDIR /build
+#10 CACHED
+
+#11 [server-build 1/7] FROM docker.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+#11 resolve docker.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd done
+#11 DONE 0.0s
+
+#12 [server-build 2/7] WORKDIR /build/goserver
+#12 CACHED
+
+#13 [internal] load build context
+#13 transferring context: 1.40MB 0.0s done
+#13 DONE 0.0s
+
+#14 [server-build 3/7] COPY goserver/go.mod goserver/go.sum ./
+#14 DONE 0.0s
+
+#15 [ui-build 3/7] COPY package.json package-lock.json ./
+#15 DONE 0.0s
+
+#16 [ui-build 4/7] COPY hosted.html obs.html vite.hosted.config.ts ./
+#16 DONE 0.0s
+
+#17 [ui-build 5/7] COPY src/hosted ./src/hosted
+#17 DONE 0.0s
+
+#18 [ui-build 6/7] COPY src/gameplay-templates.ts src/display-themes.ts src/format.ts src/types.ts src/duration.ts src/gift-rule-operations.ts ./src/
+#18 DONE 0.0s
+
+#19 [ui-build 7/7] RUN npm ci && npm run build:hosted
+#19 10.04 
+#19 10.04 added 58 packages in 10s
+#19 ...
+
+#20 [server-build 4/7] RUN go mod download
+#20 ...
+
+#19 [ui-build 7/7] RUN npm ci && npm run build:hosted
+#19 10.04 npm warn allow-scripts 1 package has install scripts not yet covered by allowScripts:
+#19 10.04 npm warn allow-scripts   esbuild@0.21.5 (postinstall: node install.js)
+#19 10.04 npm warn allow-scripts
+#19 10.04 npm warn allow-scripts Run `npm approve-scripts --allow-scripts-pending` to review, or `npm approve-scripts <pkg>` to allow.
+#19 10.04 npm notice
+#19 10.04 npm notice New major version of npm available! 11.16.0 -> 12.0.2
+#19 10.04 npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+#19 10.04 npm notice To update run: npm install -g npm@12.0.2
+#19 10.04 npm notice
+#19 10.09 
+#19 10.09 > bilibili-live-gift-panel@0.4.10 build:hosted
+#19 10.09 > vite build --config vite.hosted.config.ts
+#19 10.09 
+#19 10.15 vite v5.4.21 building for production...
+#19 10.17 transforming...
+#19 10.33 ✓ 49 modules transformed.
+#19 10.34 rendering chunks...
+#19 10.36 computing gzip size...
+#19 10.36 goserver/cmd/hosted/dist/hosted.html                                  0.55 kB │ gzip:  0.35 kB
+#19 10.36 goserver/cmd/hosted/dist/obs.html                                     0.55 kB │ gzip:  0.36 kB
+#19 10.36 goserver/cmd/hosted/dist/.vite/manifest.json                          0.64 kB │ gzip:  0.24 kB
+#19 10.36 goserver/cmd/hosted/dist/assets/obs-EyHP4izQ.css                      1.52 kB │ gzip:  0.66 kB
+#19 10.36 goserver/cmd/hosted/dist/assets/hosted-ClGctFpf.css                  32.14 kB │ gzip:  6.54 kB
+#19 10.36 goserver/cmd/hosted/dist/assets/modulepreload-polyfill-B5Qt9EMX.js    0.71 kB │ gzip:  0.40 kB
+#19 10.36 goserver/cmd/hosted/dist/assets/obs-CuIrv7Hs.js                       8.07 kB │ gzip:  3.51 kB
+#19 10.36 goserver/cmd/hosted/dist/assets/hosted-Htp4TBX1.js                  128.05 kB │ gzip: 39.56 kB
+#19 10.36 ✓ built in 203ms
+#19 DONE 10.4s
+
+#20 [server-build 4/7] RUN go mod download
+#20 DONE 10.5s
+
+#21 [server-build 5/7] COPY goserver/cmd/hosted/main.go ./cmd/hosted/
+#21 DONE 0.0s
+
+#22 [server-build 6/7] COPY goserver/internal ./internal
+#22 DONE 0.0s
+
+#23 [server-build 7/7] RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/gift-panel-hosted ./cmd/hosted
+#23 DONE 3.7s
+
+#24 [stage-2 2/5] COPY --from=server-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+#24 DONE 0.0s
+
+#25 [stage-2 3/5] COPY --from=server-build /out/gift-panel-hosted /usr/local/bin/gift-panel-hosted
+#25 DONE 0.0s
+
+#26 [stage-2 4/5] COPY --from=ui-build /build/goserver/cmd/hosted/dist /srv/gift-panel-hosted/ui
+#26 DONE 0.0s
+
+#27 [stage-2 5/5] RUN <<'EOF' (set -eu...)
+#27 DONE 0.1s
+
+#28 exporting to docker image format
+#28 exporting layers
+#28 exporting layers 0.2s done
+#28 rewriting layers with source-date-epoch 0 (1970-01-01 00:00:00 +0000 UTC)
+#28 rewriting layers with source-date-epoch 0 (1970-01-01 00:00:00 +0000 UTC) 0.2s done
+#28 exporting manifest sha256:84674161fb6d8aede870da170359ddaa696f6247ae865fd35496f3d3ad02f814 done
+#28 exporting config sha256:57ab2dc69bd791d48302e5a5752e7190050e56f21f88bd7c28082a6aea692d0f done
+#28 sending tarball
+#28 sending tarball 0.3s done
+#28 DONE 0.7s
+Loaded image: gift-panel-hosted:repro-0d68fdbf-5f5e-44dd-aff1-87be9a657b25-a
+#0 building with "colima" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.35kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#2 DONE 0.0s
+
+#3 docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#3 resolve docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e done
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/library/debian:bookworm-20260713-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+#4 DONE 0.0s
+
+#5 [internal] load metadata for docker.io/library/node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+#5 DONE 0.0s
+
+#6 [internal] load metadata for docker.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+#6 DONE 0.0s
+
+#7 [internal] load .dockerignore
+#7 transferring context: 2B done
+#7 DONE 0.0s
+
+#8 [stage-2 1/5] FROM docker.io/library/debian:bookworm-20260713-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+#8 resolve docker.io/library/debian:bookworm-20260713-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e done
+#8 CACHED
+
+#9 [server-build 1/7] FROM docker.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+#9 resolve docker.io/library/golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd done
+#9 DONE 0.0s
+
+#10 [server-build 2/7] WORKDIR /build/goserver
+#10 CACHED
+
+#11 [ui-build 1/7] FROM docker.io/library/node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+#11 resolve docker.io/library/node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d done
+#11 DONE 0.0s
+
+#12 [ui-build 2/7] WORKDIR /build
+#12 CACHED
+
+#13 [internal] load build context
+#13 transferring context: 1.40MB 0.0s done
+#13 DONE 0.0s
+
+#14 [ui-build 3/7] COPY package.json package-lock.json ./
+#14 DONE 0.0s
+
+#15 [server-build 3/7] COPY goserver/go.mod goserver/go.sum ./
+#15 DONE 0.0s
+
+#16 [ui-build 4/7] COPY hosted.html obs.html vite.hosted.config.ts ./
+#16 DONE 0.0s
+
+#17 [server-build 4/7] RUN go mod download
+#17 ...
+
+#18 [ui-build 5/7] COPY src/hosted ./src/hosted
+#18 DONE 0.0s
+
+#19 [ui-build 6/7] COPY src/gameplay-templates.ts src/display-themes.ts src/format.ts src/types.ts src/duration.ts src/gift-rule-operations.ts ./src/
+#19 DONE 0.0s
+
+#20 [ui-build 7/7] RUN npm ci && npm run build:hosted
+#20 ...
+
+#17 [server-build 4/7] RUN go mod download
+#17 DONE 10.0s
+
+#21 [server-build 5/7] COPY goserver/cmd/hosted/main.go ./cmd/hosted/
+#21 DONE 0.0s
+
+#22 [server-build 6/7] COPY goserver/internal ./internal
+#22 DONE 0.0s
+
+#23 [server-build 7/7] RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/gift-panel-hosted ./cmd/hosted
+#23 ...
+
+#20 [ui-build 7/7] RUN npm ci && npm run build:hosted
+#20 11.51 
+#20 11.51 added 58 packages in 11s
+#20 11.51 npm warn allow-scripts 1 package has install scripts not yet covered by allowScripts:
+#20 11.51 npm warn allow-scripts   esbuild@0.21.5 (postinstall: node install.js)
+#20 11.51 npm warn allow-scripts
+#20 11.51 npm warn allow-scripts Run `npm approve-scripts --allow-scripts-pending` to review, or `npm approve-scripts <pkg>` to allow.
+#20 11.51 npm notice
+#20 11.51 npm notice New major version of npm available! 11.16.0 -> 12.0.2
+#20 11.51 npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+#20 11.51 npm notice To update run: npm install -g npm@12.0.2
+#20 11.51 npm notice
+#20 11.57 
+#20 11.57 > bilibili-live-gift-panel@0.4.10 build:hosted
+#20 11.57 > vite build --config vite.hosted.config.ts
+#20 11.57 
+#20 11.65 vite v5.4.21 building for production...
+#20 11.67 transforming...
+#20 11.97 ✓ 49 modules transformed.
+#20 12.01 rendering chunks...
+#20 12.04 computing gzip size...
+#20 12.04 goserver/cmd/hosted/dist/hosted.html                                  0.55 kB │ gzip:  0.35 kB
+#20 12.04 goserver/cmd/hosted/dist/obs.html                                     0.55 kB │ gzip:  0.36 kB
+#20 12.04 goserver/cmd/hosted/dist/.vite/manifest.json                          0.64 kB │ gzip:  0.24 kB
+#20 12.04 goserver/cmd/hosted/dist/assets/obs-EyHP4izQ.css                      1.52 kB │ gzip:  0.66 kB
+#20 12.04 goserver/cmd/hosted/dist/assets/hosted-ClGctFpf.css                  32.14 kB │ gzip:  6.54 kB
+#20 12.04 goserver/cmd/hosted/dist/assets/modulepreload-polyfill-B5Qt9EMX.js    0.71 kB │ gzip:  0.40 kB
+#20 12.04 goserver/cmd/hosted/dist/assets/obs-CuIrv7Hs.js                       8.07 kB │ gzip:  3.51 kB
+#20 12.04 goserver/cmd/hosted/dist/assets/hosted-Htp4TBX1.js                  128.05 kB │ gzip: 39.56 kB
+#20 12.04 ✓ built in 381ms
+#20 DONE 12.1s
+
+#23 [server-build 7/7] RUN mkdir -p /out && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /out/gift-panel-hosted ./cmd/hosted
+#23 DONE 3.8s
+
+#24 [stage-2 2/5] COPY --from=server-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+#24 DONE 0.0s
+
+#25 [stage-2 3/5] COPY --from=server-build /out/gift-panel-hosted /usr/local/bin/gift-panel-hosted
+#25 DONE 0.0s
+
+#26 [stage-2 4/5] COPY --from=ui-build /build/goserver/cmd/hosted/dist /srv/gift-panel-hosted/ui
+#26 DONE 0.0s
+
+#27 [stage-2 5/5] RUN <<'EOF' (set -eu...)
+#27 DONE 0.1s
+
+#28 exporting to docker image format
+#28 exporting layers
+#28 exporting layers 0.2s done
+#28 rewriting layers with source-date-epoch 0 (1970-01-01 00:00:00 +0000 UTC)
+#28 rewriting layers with source-date-epoch 0 (1970-01-01 00:00:00 +0000 UTC) 0.2s done
+#28 exporting manifest sha256:84674161fb6d8aede870da170359ddaa696f6247ae865fd35496f3d3ad02f814 done
+#28 exporting config sha256:57ab2dc69bd791d48302e5a5752e7190050e56f21f88bd7c28082a6aea692d0f done
+#28 sending tarball
+#28 sending tarball 0.2s done
+#28 DONE 0.7s
+Loaded image: gift-panel-hosted:repro-0d68fdbf-5f5e-44dd-aff1-87be9a657b25-b
+Hosted image reproducibility verified: sha256:84674161fb6d8aede870da170359ddaa696f6247ae865fd35496f3d3ad02f814

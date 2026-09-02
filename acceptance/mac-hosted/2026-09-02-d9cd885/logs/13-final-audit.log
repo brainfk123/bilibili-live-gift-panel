@@ -1,0 +1,5 @@
+## codex/mac-hosted-windows-compat...origin/codex/mac-hosted-windows-compat
+playwright_package=<ACCEPTANCE_ROOT>/checkout/node_modules/playwright/package.json
+artifact_sensitive_scan=PASS
+artifact_cache_scan=PASS
+OS=linux Architecture=amd64 User=65532:65532 Entrypoint=["/usr/local/bin/hosted-entrypoint"]

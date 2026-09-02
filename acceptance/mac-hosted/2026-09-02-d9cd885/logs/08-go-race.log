@@ -1,0 +1,27 @@
+go: downloading github.com/go-sql-driver/mysql v1.9.3
+go: downloading github.com/DATA-DOG/go-sqlmock v1.5.2
+go: downloading github.com/pquerna/otp v1.5.0
+go: downloading golang.org/x/crypto v0.55.0
+go: downloading github.com/andybalholm/brotli v1.1.1
+go: downloading golang.org/x/sync v0.22.0
+go: downloading github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc
+go: downloading filippo.io/edwards25519 v1.1.0
+ok  	bilibili-live-gift-panel/cmd/hosted	2.464s
+ok  	bilibili-live-gift-panel/internal/gameplay	3.607s
+ok  	bilibili-live-gift-panel/internal/hosted/adminconsole	4.454s
+ok  	bilibili-live-gift-panel/internal/hosted/adminidentity	8.265s
+ok  	bilibili-live-gift-panel/internal/hosted/adminsettings	3.242s
+ok  	bilibili-live-gift-panel/internal/hosted/app	6.021s
+ok  	bilibili-live-gift-panel/internal/hosted/biligateway	2.638s
+ok  	bilibili-live-gift-panel/internal/hosted/configuration	5.676s
+ok  	bilibili-live-gift-panel/internal/hosted/identity	5.304s
+ok  	bilibili-live-gift-panel/internal/hosted/identity/biliqr	4.876s
+ok  	bilibili-live-gift-panel/internal/hosted/invitation	4.023s
+ok  	bilibili-live-gift-panel/internal/hosted/migration	7.404s
+ok  	bilibili-live-gift-panel/internal/hosted/obs	6.856s
+ok  	bilibili-live-gift-panel/internal/hosted/platform	2.054s
+ok  	bilibili-live-gift-panel/internal/hosted/roomsource	8.265s
+ok  	bilibili-live-gift-panel/internal/hosted/roomwatcher	7.655s
+ok  	bilibili-live-gift-panel/internal/hosted/runtime	9.395s
+ok  	bilibili-live-gift-panel/internal/hosted/security	8.017s
+ok  	bilibili-live-gift-panel/internal/hosted/store/mysqlstore	7.231s

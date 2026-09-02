@@ -1,0 +1,228 @@
+
+> bilibili-live-gift-panel@0.4.10 test
+> vitest run
+
+
+ RUN  v2.1.9 <ACCEPTANCE_ROOT>/checkout
+
+ ✓ tests/backend.test.ts (37 tests) 13ms
+ ✓ tests/gift-clip-crop.test.ts (54 tests) 6ms
+ ✓ tests/attribute-edit-lease.test.ts (20 tests) 19ms
+ ✓ tests/migration.test.ts (86 tests) 22ms
+ ✓ tests/hosted-configuration.test.ts (17 tests) 66ms
+ ✓ tests/attribute-edit-api.test.ts (54 tests) 73ms
+ ✓ tests/hosted-runtime.test.ts (9 tests) 6ms
+ ✓ tests/gift-clip-export-api.test.ts (23 tests) 17ms
+ ✓ tests/hosted-invitations.test.ts (14 tests) 113ms
+ ✓ tests/hosted-bili-service-view.test.ts (22 tests) 229ms
+ ✓ tests/hosted-admin-settings-view.test.ts (7 tests) 16ms
+ ✓ tests/gift-clip-media.test.ts (13 tests) 63ms
+ ✓ tests/hosted-bili-challenge-poller.test.ts (15 tests) 5ms
+ ✓ tests/simple-play.test.ts (8 tests) 9ms
+ ✓ tests/hosted-obs.test.ts (12 tests) 14ms
+ ✓ tests/smoke-windows-exe.test.ts (14 tests) 235ms
+ ✓ tests/hosted-migration.test.ts (17 tests) 478ms
+ ✓ tests/ci-workflow.test.ts (7 tests) 29ms
+ ✓ tests/hosted-admin-login.test.ts (12 tests) 373ms
+ ✓ tests/blind-box-display-scroll.test.ts (6 tests) 10ms
+ ✓ tests/storage.test.ts (51 tests) 546ms
+ ✓ tests/sign-evsign.test.ts (26 tests) 87ms
+ ✓ tests/gift-clip-studio-view.test.ts (2 tests) 3ms
+ ✓ tests/gameplay-templates.test.ts (8 tests) 8ms
+ ✓ tests/hosted-admin-account-detail-view.test.ts (3 tests) 5ms
+ ✓ tests/hosted-admin-invitation-view.test.ts (8 tests) 4ms
+ ✓ tests/ffmpeg-component-assets.test.ts (8 tests) 92ms
+ ✓ tests/ci-scope.test.ts (37 tests) 324ms
+ ✓ tests/hosted-admin-shell.test.ts (4 tests) 106ms
+ ✓ tests/migration-gameplay-units.test.ts (6 tests) 6ms
+ ✓ tests/hosted-verification-code.test.ts (5 tests) 4ms
+ ✓ tests/bootstrap.test.ts (7 tests) 5ms
+ ✓ tests/quick-gift-rules.test.ts (34 tests) 3ms
+ ✓ tests/hosted-admin-interactions.test.ts (4 tests) 2ms
+ ✓ tests/client.test.ts (8 tests) 116ms
+ ✓ tests/blind-box-leaderboard-resource.test.ts (6 tests) 3ms
+ ✓ tests/hosted-auth.test.ts (41 tests) 859ms
+ ✓ tests/hosted-admin-settings.test.ts (5 tests) 7ms
+ ✓ tests/build-go.test.ts (35 tests) 8ms
+ ✓ tests/hosted-admin-view.test.ts (16 tests) 947ms
+ ✓ tests/gift-clip-renderer.test.ts (4 tests) 4ms
+ ✓ tests/gift-clip-export-layers.test.ts (6 tests) 3ms
+ ✓ tests/ui-assets.test.ts (2 tests) 164ms
+ ✓ tests/hosted-main.test.ts (1 test) 15ms
+ ✓ tests/hosted-bili-service-admin.test.ts (6 tests) 7ms
+ ✓ tests/display-layout.test.ts (15 tests) 3ms
+ ✓ tests/exe-retirement-contract.test.ts (7 tests) 5ms
+ ✓ tests/catalog.test.ts (9 tests) 2ms
+ ✓ tests/development-workflow.test.ts (4 tests) 2ms
+ ✓ tests/formula-presets.test.ts (5 tests) 5ms
+ ✓ tests/hosted-build.test.ts (7 tests) 1054ms
+   ✓ hosted web build contract > includes the hosted Vite config in the TypeScript program 647ms
+   ✓ hosted web build contract > builds a multi-file hosted asset graph with a manifest and no desktop artifacts 403ms
+ ✓ tests/obs-outputs.test.ts (3 tests) 12ms
+ ✓ tests/ffmpeg-policy.test.ts (10 tests) 4ms
+ ✓ tests/changelog.test.ts (5 tests) 9ms
+ ✓ tests/hosted-view-host.test.ts (3 tests) 109ms
+ ✓ tests/hosted-auth-layout-browser.test.ts (5 tests) 1286ms
+   ✓ ordinary Hosted Bilibili login layout in real Chromium > mounts production DOM for every state at desktop and phone widths without overflow or console errors 417ms
+ ✓ tests/ci-gate.test.ts (13 tests) 125ms
+ ✓ tests/gift-clip-test-tools.test.ts (4 tests) 7ms
+ ✓ tests/ui-parity-requirements.test.ts (11 tests) 8ms
+ ✓ tests/ffmpeg-package-manifest.test.ts (3 tests) 2ms
+ ✓ tests/activities.test.ts (3 tests) 2ms
+ ✓ tests/output-config.test.ts (2 tests) 2ms
+ ✓ tests/hosted-admin-invitations.test.ts (5 tests) 7ms
+ ✓ tests/messages.test.ts (9 tests) 11ms
+ ✓ tests/gift-rule-conditions.test.ts (7 tests) 2ms
+ ✓ tests/website.test.ts (6 tests) 2ms
+ ✓ tests/sign-evsign-cli.test.ts (2 tests) 9ms
+ ✓ tests/display-scenes.test.ts (4 tests) 2ms
+ ✓ tests/server-continuity.test.ts (5 tests) 2ms
+stdout | tests/single-file.test.ts > single-file production output
+[plugin vite:singlefile] 
+
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/modulepreload-polyfill-B5Qt9EMX.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/main-pH0iYCSb.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/display/display-C8Qo-pcr.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/brand-DcmA5Mit.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/runtime/bootstrap-tbXA3BTW.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/storage-DmcLyYfq.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/backend-CBWJCFQJ.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/server-continuity-BJNEw_k3.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/config-entry-C61OK9Bc.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/preload-helper-1kueVrz7.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/assets/brand.svg-Bxd9Yqtk.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/obs-outputs-DanYShUz.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/config.css-DYSk_NVI.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/config-Db_GwMFo.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/changelog-ByQ0YlC2.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/types-DKpUgom-.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/display-themes-qguGll-T.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/display-scenes-Biqe16XK.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/activities-_hrzS3S6.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/training-D1PvfnBW.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/output-config-BdNXbCvN.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gift-targets-BjgcyI56.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-crop-DYFVdkip.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/format-19plKjjc.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gifts/catalog-D3i-41Je.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/common-h3n1fWSn.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/display/broadcast-queue-C8kDcx0v.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/display/display-host-D8-1mgjn.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/display/blind-box-display-BQPlK2fG.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/display/gift-kpi-display-Tfx4KcAP.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gift-panel-changelog.json-NRtYUVga.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/data/gift-catalog.json-CTh7OA18.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gifts/special-events-Bs3y0zoF.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/blind-box-leaderboard-resource-dnq0SkL5.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/currency-Bf1kUPLO.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/migration-FIS5gLWt.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/package.json-Kp72lkf7.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/formula-presets-0LYqYst6.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/attribute-time-value-5Dqa6512.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gift-rule-conditions-BnsWtjR7.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/wizard-23-JdBI2.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/spotlight-guide-BDZByTTy.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/attribute-workspace-BDEK0p9S.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/attribute-edit-api-BRuiqUg2.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/template-wizard-B8tW14Bv.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/activity-workspace-DsyBawAf.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/training-center-DB3g935v.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/changelog-dialog-BWaD3Ocf.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/two-step-delete-DgCQH64c.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/config-route-CHWHrYYM.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/config-shell-C9BZU_9G.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-picker-BRyC0zO9.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/simple-play-C_H-DchS.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/simple-mode-Ns1kneYn.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/attribute-edit-lease-CdwL9E4y.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-animation-key-5Twua3ur.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-studio-controller-BkR6XeyS.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gift-rule-operations-DDrXAEkH.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/gameplay-templates-DwLXsZsG.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/duration-D-YWoYDn.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/migration-gameplay-units-BruA404r.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/formula/index-BCSGDyX9.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/formula/parser-CetFlNDj.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/formula/errors-BiLAtgDB.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-crop-editor-B4N-V6ls.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-download-CeOk_zgt.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-export-api-DouznzzO.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-export-layers-ePqfjoJK.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-media-CmxD15Z1.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-renderer-BAy3v4zX.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-studio-view-DTJo-cko.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/ui/config/gift-clip-info-bar-QA8ZiuJb.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/formula/tokenizer-C70hF6LH.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/node_modules/gifuct-js/lib/index-hFuj1vf2.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/node_modules/js-binary-schema-parser/lib/schemas/gif-GNiiqw48.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/node_modules/js-binary-schema-parser/lib/index-CldPJPSX.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/node_modules/js-binary-schema-parser/lib/parsers/uint8-BojI3Ccz.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/node_modules/gifuct-js/lib/deinterlace-D6p0bRek.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/node_modules/gifuct-js/lib/lzw-BjBPQ71Y.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/index-i4wlh1Me.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/gif-i4wlh1Me.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/index-SOLkZPqH.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/uint8-i4wlh1Me.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/deinterlace-LDixhT4u.js
+[plugin vite:singlefile] NOTE: asset not inlined: modules/_virtual/lzw-i4wlh1Me.js
+[plugin vite:singlefile] Inlining: assets/style-q6472e_2.css
+[plugin vite:singlefile] NOTE: asset not inlined: assets/rpg-forged-texture-BcMyEjBB.webp
+
+ ✓ tests/hosted-admin-layout-browser.test.ts (5 tests) 692ms
+   ✓ administrator layout in a real browser > keeps every resource card neutral until pointer hover 323ms
+ ✓ tests/broadcast-queue.test.ts (3 tests) 3ms
+ ✓ tests/config-route.test.ts (6 tests) 2ms
+ ✓ tests/gift-targets.test.ts (3 tests) 2ms
+ ✓ tests/attribute-time-value.test.ts (17 tests) 3ms
+ ✓ tests/hosted-admin-accounts.test.ts (3 tests) 6ms
+ ✓ tests/protocol.test.ts (4 tests) 8ms
+ ✓ tests/training.test.ts (3 tests) 3ms
+ ✓ tests/gift-clip-download.test.ts (2 tests) 3ms
+ ✓ tests/display-themes.test.ts (4 tests) 1ms
+ ✓ tests/hosted-admin-overview.test.ts (2 tests) 5ms
+ ✓ tests/gift-picker.test.ts (2 tests) 2ms
+ ✓ tests/display-currency.test.ts (4 tests) 2ms
+ ✓ tests/config-gift-history.test.ts (2 tests) 1ms
+ ✓ tests/formula.test.ts (3 tests) 3ms
+ ✓ tests/gift-clip-export-contract.test.ts (2 tests) 4ms
+ ✓ tests/hosted-admin-operation-authorization.test.ts (2 tests) 2ms
+ ✓ tests/duration.test.ts (4 tests) 1ms
+ ✓ tests/single-file.test.ts (5 tests) 1026ms
+   ✓ single-file production output > keeps every configuration chunk dependency executable in the emitted graph 321ms
+ ✓ tests/verify-ffmpeg-cli.test.ts (1 test) 56ms
+ ✓ tests/gift-clip-studio.test.ts (24 tests) 2047ms
+ ✓ tests/hosted-deploy.test.ts (1 test) 6064ms
+   ✓ hosted deployment Linux contract > passes in the pinned Linux contract-test image 6064ms
+ ✓ tests/release-workflow.test.ts (33 tests) 8567ms
+   ✓ release workflow supply-chain contract > accepts the exact typed fallback update manifest contract 710ms
+   ✓ release workflow supply-chain contract > validates a separately downloadable signed FFmpeg during release repair 729ms
+   ✓ release workflow supply-chain contract > rejects a standalone FFmpeg whose checksum does not match 679ms
+   ✓ release workflow supply-chain contract > rejects a self-consistent standalone FFmpeg that differs from the fixed component manifest 526ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'an array tag_name' during GitHub Release repair 492ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'numeric draft false' during GitHub Release repair 549ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'numeric prerelease false' during GitHub Release repair 494ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'a non-array assets value' during GitHub Release repair 494ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'an array asset name' during GitHub Release repair 495ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'an array asset download URL' during GitHub Release repair 513ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'an array asset digest' during GitHub Release repair 517ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'a string asset size' during GitHub Release repair 690ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'a decimal-form asset size' during GitHub Release repair 565ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'an array root' during GitHub Release repair 536ms
+   ✓ release workflow supply-chain contract > rejects fallback manifests with 'an unknown root property' during GitHub Release repair 527ms
+ ✓ tests/update-api-deploy.test.ts (36 tests) 9309ms
+   ✓ update API deployment assets > builds both Linux amd64 binaries from a reviewed clean commit 5719ms
+   ✓ update API deployment assets > refuses deployment builds without a clean reviewed identity but permits explicit local builds 387ms
+   ✓ update API deployment assets > rejects tracked source changes and excludes untracked Go files from a deployment artifact 596ms
+   ✓ update API deployment assets > fails deployment publication when HEAD changes after its snapshot is taken 559ms
+   ✓ update API deployment assets > archives a reviewed checkout larger than Node default command buffering 575ms
+   ✓ update API deployment assets > executes the install dry-run across exact start, cleanup, signal, and publication boundaries 517ms
+   ✓ update API deployment assets > executes the rollback dry-run across exact start, cleanup, and signal boundaries 483ms
+ ✓ tests/wizard.test.ts (211 tests | 31 skipped) 12164ms
+   ✓ single-page configuration rendering > uses the current simulation draft for ordinary gift and timer previews without advancing it 361ms
+   ✓ single-page configuration rendering > atomic attribute edit save > keeps recovery retryable across repeated settings rejections and releases once when dismissed 313ms
+
+ Test Files  94 passed (94)
+      Tests  1278 passed | 31 skipped (1309)
+   Start at  15:21:11
+   Duration  12.91s (transform 3.26s, setup 0ms, collect 7.19s, tests 47.77s, environment 7ms, prepare 2.83s)
+

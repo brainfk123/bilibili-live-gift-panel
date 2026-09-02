@@ -1,0 +1,8 @@
+mysql_health=healthy
+healthz={"status":"ok"}
+route=/hosted.html status=200
+route=/obs/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA status=200
+metrics_identity_scan=PASS
+image_architecture=linux/amd64
+image_user=65532:65532
+cleanup_complete=true

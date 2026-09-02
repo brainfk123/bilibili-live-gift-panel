@@ -1,0 +1,14 @@
+.git
+node_modules
+dist
+goserver/dist
+goserver/cmd/hosted/dist
+artifacts
+.superpowers
+.worktrees
+.tmp
+.gift-panel-*
+*.local
+.env
+.env.*
+acceptance/exe-hosted-ui/captures

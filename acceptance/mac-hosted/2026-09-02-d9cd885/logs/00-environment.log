@@ -1,0 +1,22 @@
+arm64
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+/Applications/Xcode.app/Contents/Developer
+git version 2.50.1 (Apple Git-155)
+v22.23.2
+10.9.8
+go version go1.26.7 darwin/arm64
+GNU bash, version 5.3.15(1)-release (aarch64-apple-darwin25.4.0)
+PowerShell 7.6.5
+time="2026-09-02T15:19:06+08:00" level=info msg="colima is running using macOS Virtualization.Framework"
+time="2026-09-02T15:19:06+08:00" level=info msg="arch: aarch64"
+time="2026-09-02T15:19:06+08:00" level=info msg="runtime: docker"
+time="2026-09-02T15:19:06+08:00" level=info msg="mountType: virtiofs"
+time="2026-09-02T15:19:06+08:00" level=info msg="docker socket: unix://<USER_HOME>/.colima/default/docker.sock"
+time="2026-09-02T15:19:06+08:00" level=info msg="containerd socket: unix://<USER_HOME>/.colima/default/containerd.sock"
+client=29.7.2 server=29.5.2
+Docker Compose version 5.5.0
+github.com/docker/buildx v0.36.1 Homebrew
+npm error npx canceled due to missing packages and no YES option: ["playwright@1.62.1"]
+npm error A complete log of this run can be found in: <USER_HOME>/.npm/_logs/2026-09-02T07_19_06_878Z-debug-0.log
