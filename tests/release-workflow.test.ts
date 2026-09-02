@@ -163,8 +163,11 @@ function runCandidateChangelogStep(options: {
   const root = mkdtempSync(join(tmpdir(), 'canonical-changelog-'));
   try {
     const tooling = join(root, 'tooling');
+    const runnerTemp = join(root, 'runner-temp');
+    const githubEnv = join(root, 'github-env.txt');
     mkdirSync(join(root, '.github'), { recursive: true });
     if (!options.omitDist) mkdirSync(join(root, 'dist'));
+    mkdirSync(runnerTemp);
     mkdirSync(join(tooling, '.github'), { recursive: true });
     writeFileSync(join(root, 'gift-panel-changelog.json'), JSON.stringify({ schemaVersion: 1, releases: options.target }));
     const historyBytes = options.history ?? reviewedChangelogHistory().bytes;
@@ -173,7 +176,7 @@ function runCandidateChangelogStep(options: {
       schemaVersion: 1,
       releases: options.sourceHistory ?? [changelogRelease('0.3.0')],
     }));
-    const outputPath = join(root, 'dist', 'canonical-gift-panel-changelog.json');
+    const outputPath = join(runnerTemp, 'canonical-gift-panel-changelog.json');
     const githubOutput = join(root, 'github-output.txt');
     const expectedHistorySHA256 = options.expectedHistorySHA256
       ?? createHash('sha256').update(historyBytes).digest('hex');
@@ -182,7 +185,9 @@ function runCandidateChangelogStep(options: {
       encoding: 'utf8',
       env: {
         ...process.env,
+        GITHUB_ENV: githubEnv,
         GITHUB_OUTPUT: githubOutput,
+        RUNNER_TEMP: runnerTemp,
         RELEASE_TAG: options.releaseTag ?? 'v0.4.12',
         RELEASE_VERSION: options.releaseVersion ?? '0.4.12',
         RELEASE_TOOL_ROOT: tooling,
@@ -195,6 +200,8 @@ function runCandidateChangelogStep(options: {
     return {
       result,
       output: existsSync(outputPath) ? readFileSync(outputPath) : undefined,
+      outputPath,
+      githubEnv: existsSync(githubEnv) ? readFileSync(githubEnv, 'utf8') : undefined,
       githubOutput: existsSync(githubOutput) ? readFileSync(githubOutput, 'utf8') : undefined,
     };
   } finally {
@@ -490,10 +497,11 @@ describe('release workflow supply-chain contract', () => {
 	  expect(versions).not.toContain('0.4.8');
 	});
 
-	it('creates the canonical changelog output directory on a clean candidate checkout', () => {
+	it('keeps the canonical changelog outside a clean candidate dist directory', () => {
 	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],omitDist:true});
 	  expect(execution.result.status,execution.result.stderr).toBe(0);
 	  expect(execution.output).toBeDefined();
+	  expect(execution.githubEnv?.trim()).toBe(`CANDIDATE_CHANGELOG_PATH=${execution.outputPath}`);
 	});
 
 	it('keeps later stable history digest-bound without reusing the v0.4.12 sequence invariant', () => {

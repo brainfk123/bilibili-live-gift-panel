@@ -373,8 +373,9 @@ jobs:
           $canonicalJSON=[ordered]@{schemaVersion=1;releases=$merged}|ConvertTo-Json -Depth 12
           $canonicalBytes=[Text.UTF8Encoding]::new($false).GetBytes($canonicalJSON)
           if($canonicalBytes.Length -le 0 -or $canonicalBytes.Length -gt $maximum){throw 'Canonical changelog exceeds 262144 bytes'}
-          New-Item -ItemType Directory -Path (Join-Path (Get-Location) 'dist') -Force -ErrorAction Stop | Out-Null
-          [IO.File]::WriteAllBytes((Join-Path (Get-Location) 'dist/canonical-gift-panel-changelog.json'),$canonicalBytes)
+          $canonicalPath=Join-Path $env:RUNNER_TEMP 'canonical-gift-panel-changelog.json'
+          [IO.File]::WriteAllBytes($canonicalPath,$canonicalBytes)
+          "CANDIDATE_CHANGELOG_PATH=$canonicalPath"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           $canonicalHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($canonicalBytes)).ToLowerInvariant()
           "sha256=$canonicalHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "history_sha256=$historyHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -448,7 +449,7 @@ jobs:
           Copy-Item -LiteralPath dist/gift-panel.exe -Destination "$handoff/$unsignedHash.exe"
           Copy-Item -LiteralPath "$env:CANDIDATE_TRUST_ROOT/root-spki.der" -Destination "$handoff/root-spki.der"
           Copy-Item -LiteralPath "$env:CANDIDATE_TRUST_ROOT/bootstrap-policy.json" -Destination "$handoff/bootstrap-policy.json"
-          Copy-Item -LiteralPath dist/canonical-gift-panel-changelog.json -Destination "$handoff/gift-panel-changelog.json"
+          Copy-Item -LiteralPath $env:CANDIDATE_CHANGELOG_PATH -Destination "$handoff/gift-panel-changelog.json"
           Copy-Item -LiteralPath dist/release-ffmpeg-sealed/ffmpeg.zip -Destination "$handoff/ffmpeg.zip"
           Copy-Item -LiteralPath dist/release-ffmpeg-sealed/manifest.json -Destination "$handoff/manifest.json"
           Expand-Archive -LiteralPath dist/release-ffmpeg-sealed/ffmpeg.zip -DestinationPath dist/stable-unsigned-ffmpeg
