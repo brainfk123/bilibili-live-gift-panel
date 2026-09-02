@@ -1,0 +1,5 @@
+
+> bilibili-live-gift-panel@0.4.10 prepare:go-assets
+> node scripts/prepare-go-assets.mjs
+
+Prepared 87 embedded UI assets.
