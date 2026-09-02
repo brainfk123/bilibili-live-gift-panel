@@ -7,9 +7,11 @@
 `codex/mac-hosted-windows-compat`.
 
 This record covers the Mac daily Hosted loop, the Linux deployment contract
-container, the final `linux/amd64` Hosted image build, and image
-reproducibility. It does not claim Windows x64, GPU, OBS, driver, hardware
-encoding, production Hosted, real MySQL, or EXE/Hosted visual parity evidence.
+container, the final `linux/amd64` Hosted image build, image reproducibility,
+the real MySQL integration gate, a live final-image health smoke, and automated
+Windows x64 CI/EXE startup smoke. It does not claim real Windows GPU, OBS,
+driver, hardware encoding, production Hosted, or EXE/Hosted visual parity
+evidence.
 
 ## Fresh-checkout conditions
 
@@ -65,6 +67,11 @@ Commands ran in the documented Daily Hosted loop order with
 | 11 | `npm run build:hosted-server` | PASS | `logs/11-build-hosted-server.log` |
 | 12 | `npm run verify:hosted-server-repro` | PASS | `logs/12-verify-hosted-repro.log` |
 | 13 | Tracked-worktree, artifact, cache, and image metadata audit | PASS | `logs/13-final-audit.log` |
+| 14 | `npm run test:hosted-mysql` | PASS; real MySQL integration tests completed in 28.433 seconds | `logs/14-test-hosted-mysql.log` |
+| 15 | MySQL test container, volume, and network cleanup audit | PASS; no resources remained | `logs/15-mysql-cleanup.log` |
+| 16 | Final `gift-panel-hosted:test` image startup smoke | PASS; MySQL healthy, `/healthz` OK, Hosted and OBS pages 200, identity-free metrics | `logs/16-hosted-image-smoke.log` |
+| 17 | Final-image smoke Docker, port, and host-secret cleanup audit | PASS; no resources remained | `logs/17-hosted-image-cleanup.log` |
+| 18 | PR CI and downloaded Windows artifact integrity summary | PASS | `logs/18-remote-ci-artifact.log` |
 
 The final image was verified as `linux/amd64`, running as `65532:65532`, with
 entrypoint `/usr/local/bin/hosted-entrypoint`. Two independent image builds
@@ -76,6 +83,26 @@ The final tracked worktree was clean. Generated outputs contained no detected
 local absolute paths, GitHub credential patterns, private-key markers, or cache
 directories covered by the acceptance scan.
 
+## Remote CI and Windows artifact
+
+The evidence-only follow-up commit `188fca7b9be2c218019d90eb09bf23cbe285d1a5`
+was tested by [PR #4](https://github.com/brainfk123/bilibili-live-gift-panel/pull/4)
+in [Mainline CI run 33604159570](https://github.com/brainfk123/bilibili-live-gift-panel/actions/runs/33604159570).
+
+- `scope`: SUCCESS
+- `hosted`: SUCCESS
+- `hosted-mysql`: SKIPPED by scope; the real local MySQL gate above passed
+- `windows-compat`: SUCCESS
+- `ci-gate`: SUCCESS
+
+The Windows job built and started the unsigned CI EXE, validated the config,
+display, and config API routes, checked artifact closure, and uploaded
+`windows-compat-5b5ad1accff47f822dda02d6439cd98c4777c366`.
+
+- EXE SHA-256: `071e31a170c289b6606847c875946b83ba60a52e23bca05346eb10337fcae4e6`
+- Smoke evidence SHA-256: `6faa60309d62c59230e3ba756e3f3ad437312f75600b54ac0c8f16556f3a2cfc`
+- Smoke interval: `2026-09-02T07:43:31.254Z` through `2026-09-02T07:43:31.524Z`
+
 ## Residual findings and boundaries
 
 - `npm ci` reported 7 dependency audit findings: 4 moderate, 2 high, and 1
@@ -84,9 +111,12 @@ directories covered by the acceptance scan.
 - The first pre-install Playwright inventory probe failed because the package
   had not yet been installed. The post-`npm ci` probe passed and is recorded
   separately.
-- Real MySQL integration remains a separate local/CI gate.
-- Windows x64 smoke, EXE startup, GPU/OBS/driver/hardware encoding, and
-  EXE/Hosted screenshot parity require their documented Windows evidence.
+- The pinned MySQL 8.4.11 image is `linux/amd64`; Colima ran it through
+  foreign-architecture emulation on this ARM host. The database integration
+  test passed, but this is not native ARM performance evidence.
+- Automated Windows x64 EXE startup smoke passed. Real GPU, OBS, driver,
+  hardware encoding, and EXE/Hosted screenshot parity still require their
+  documented target evidence.
 
 ## Evidence integrity
 
