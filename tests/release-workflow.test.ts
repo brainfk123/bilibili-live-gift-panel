@@ -29,6 +29,7 @@ interface WorkflowJob {
 interface PublisherRotationWorkflow {
   on?: Record<string, { inputs?: Record<string, Record<string, unknown>> }>;
   permissions?: Record<string, string>;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
   jobs?: Record<string, WorkflowJob>;
 }
 
@@ -60,6 +61,13 @@ function releaseWorkflow() {
 
 function publisherRotationWorkflow(): PublisherRotationWorkflow {
   const source = readFileSync(new URL('../.github/workflows/publisher-rotation.yml', import.meta.url), 'utf8');
+  const document = parseDocument(source);
+  expect(document.errors).toEqual([]);
+  return document.toJS() as PublisherRotationWorkflow;
+}
+
+function publisherDiscoveryWorkflow(): PublisherRotationWorkflow {
+  const source = readFileSync(new URL('../.github/workflows/publisher-discovery.yml', import.meta.url), 'utf8');
   const document = parseDocument(source);
   expect(document.errors).toEqual([]);
   return document.toJS() as PublisherRotationWorkflow;
@@ -753,6 +761,53 @@ describe('publisher rotation workflow contract', () => {
       expect(step.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');
       expect(step.env?.PUBLISHER_ROTATION_SPKI_PATH).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_PATH }}');
     }
+  });
+});
+
+describe('publisher discovery recovery workflow contract', () => {
+  it('resumes from one exact immutable epoch without signing a new policy', () => {
+    const workflow = publisherDiscoveryWorkflow();
+    expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
+    expect(workflow.on?.workflow_dispatch?.inputs).toEqual({
+      candidate_epoch: expect.objectContaining({ required: true, type: 'number' }),
+      expected_previous_epoch: expect.objectContaining({ required: true, type: 'number' }),
+    });
+    expect(workflow.permissions).toEqual({ contents: 'read' });
+    expect(workflow.concurrency).toEqual({ group: 'publisher-policy-rotation', 'cancel-in-progress': false });
+    expect(Object.keys(workflow.jobs ?? {})).toEqual(['advance-existing']);
+
+    const job = workflow.jobs?.['advance-existing'];
+    expect(job?.environment).toBe('publisher-rotation');
+    expect(job?.permissions).toEqual({ contents: 'write' });
+    const commands = semanticCommands(job).join('\n');
+    expect(commands).not.toMatch(/trustpolicy.*\bsign\b|PUBLISHER_ROTATION_PRIVATE_KEY_PEM/);
+  });
+
+  it('downloads the exact three-asset release into a verified local bundle before advancing both pointers', () => {
+    const steps = jobSteps(publisherDiscoveryWorkflow().jobs?.['advance-existing']);
+    const fetch = steps[stepIndex(steps, 'Fetch immutable publisher bundle')];
+    for (const name of [
+      'gift-panel-publisher-policy.json', 'gift-panel-publisher-policy.audit.json', 'gift-panel-publisher-policy.commit.json',
+      'policy.json', 'audit.json', 'commit.json',
+    ]) expect(fetch?.run).toContain(name);
+    expect(fetch?.run).toContain('scripts/bounded-github-asset.mjs');
+    expect(fetch?.run).toContain('import-bundle');
+    expect(fetch?.env).toEqual({
+      GH_TOKEN: '${{ github.token }}',
+      PUBLISHER_CANDIDATE_EPOCH: '${{ inputs.candidate_epoch }}',
+    });
+
+    const advance = steps[stepIndex(steps, 'Advance discovery from immutable bundle')];
+    expect(advance?.env).toMatchObject({
+      GH_TOKEN: '${{ github.token }}',
+      TENCENTCLOUD_SECRET_ID: '${{ secrets.TENCENT_CLOUD_SECRET_ID }}',
+      TENCENTCLOUD_SECRET_KEY: '${{ secrets.TENCENT_CLOUD_SECRET_KEY }}',
+      PUBLISHER_MODE: 'advance-discovery',
+      PUBLISHER_EXPECTED_PREVIOUS_EPOCH: '${{ inputs.expected_previous_epoch }}',
+      PUBLISHER_ADVANCE_DISCOVERY: 'true',
+    });
+    expect(advance?.env).not.toHaveProperty('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
+    expect(advance?.run).toBe('node scripts/publish-trust-policy.mjs run');
   });
 });
 

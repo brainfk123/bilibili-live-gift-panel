@@ -1,0 +1,119 @@
+name: Publisher policy discovery advancement
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_epoch:
+        description: Exact already-published publisher-policy epoch
+        required: true
+        type: number
+      expected_previous_epoch:
+        description: Exact previously discovered publisher-policy epoch
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publisher-policy-rotation
+  cancel-in-progress: false
+
+jobs:
+  advance-existing:
+    runs-on: ubuntu-latest
+    environment: publisher-rotation
+    permissions:
+      contents: write
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: updateapi/go.mod
+          cache-dependency-path: updateapi/go.sum
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+      - name: Fetch immutable publisher bundle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHER_CANDIDATE_EPOCH: ${{ inputs.candidate_epoch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [uint64]$epoch = 0
+          if (-not [uint64]::TryParse($env:PUBLISHER_CANDIDATE_EPOCH, [ref]$epoch) -or $epoch -eq 0 -or $epoch -gt 99999999) {
+            throw 'Publisher policy epoch is invalid.'
+          }
+          $tag = 'publisher-policy-epoch-' + $epoch.ToString('00000000')
+          $downloadDirectory = "$env:RUNNER_TEMP/publisher-existing-download"
+          $bundleParent = "$env:RUNNER_TEMP/publisher-existing"
+          New-Item -ItemType Directory -Path $downloadDirectory | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          try {
+            $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers
+            $latest = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
+          } catch {
+            throw 'Immutable publisher policy Release metadata is unavailable.'
+          }
+          $assets = @($release.assets)
+          if ($release.tag_name -cne $tag -or $release.draft -or $release.prerelease -or -not $release.published_at -or
+              [int64]$release.id -le 0 -or [string]$release.target_commitish -cnotmatch '^[0-9a-f]{40}$' -or
+              [int64]$latest.id -eq [int64]$release.id -or $assets.Count -ne 3) {
+            throw 'Immutable publisher policy Release metadata is invalid.'
+          }
+          $contract = @(
+            [pscustomobject]@{ remote = 'gift-panel-publisher-policy.json'; local = 'policy.json'; cap = 262144 },
+            [pscustomobject]@{ remote = 'gift-panel-publisher-policy.audit.json'; local = 'audit.json'; cap = 65536 },
+            [pscustomobject]@{ remote = 'gift-panel-publisher-policy.commit.json'; local = 'commit.json'; cap = 4096 }
+          )
+          foreach ($entry in $contract) {
+            if (@($assets | Where-Object { $_.name -ceq $entry.remote }).Count -ne 1) {
+              throw 'Immutable publisher policy asset closure is invalid.'
+            }
+          }
+          foreach ($entry in $contract) {
+            $asset = @($assets | Where-Object { $_.name -ceq $entry.remote })[0]
+            if ([int64]$asset.size -le 0 -or [int64]$asset.size -gt $entry.cap -or
+                [string]$asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or [string]$asset.content_type -cne 'application/json' -or
+                [string]$asset.state -cne 'uploaded' -or
+                [string]$asset.url -cnotmatch '^https://api\.github\.com/repos/brainfk123/bilibili-live-gift-panel/releases/assets/[1-9][0-9]*$') {
+              throw 'Immutable publisher policy asset metadata is invalid.'
+            }
+            node scripts/bounded-github-asset.mjs download `
+              --api-url $asset.url `
+              --size $asset.size `
+              --sha256 ([string]$asset.digest).Substring(7) `
+              --content-type application/json `
+              --max-bytes $entry.cap `
+              --output "$downloadDirectory/$($entry.local)"
+            if ($LASTEXITCODE -ne 0) { throw 'Bounded publisher policy asset download failed.' }
+          }
+          go -C updateapi run ./cmd/trustpolicy import-bundle `
+            --policy-source "$downloadDirectory/policy.json" `
+            --audit-source "$downloadDirectory/audit.json" `
+            --commit-source "$downloadDirectory/commit.json" `
+            --bundle-parent $bundleParent
+          if ($LASTEXITCODE -ne 0) { throw 'Private publisher bundle import failed.' }
+      - name: Advance discovery from immutable bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          COS_BUCKET: ${{ vars.PUBLISHER_COS_BUCKET }}
+          COS_REGION: ${{ vars.PUBLISHER_COS_REGION }}
+          TENCENTCLOUD_SECRET_ID: ${{ secrets.TENCENT_CLOUD_SECRET_ID }}
+          TENCENTCLOUD_SECRET_KEY: ${{ secrets.TENCENT_CLOUD_SECRET_KEY }}
+          PUBLISHER_MODE: advance-discovery
+          PUBLISHER_POLICY_PATH: ${{ runner.temp }}/publisher-existing/bundle/policy.json
+          PUBLISHER_AUDIT_PATH: ${{ runner.temp }}/publisher-existing/bundle/audit.json
+          PUBLISHER_ROTATION_SPKI_PATH: ${{ vars.PUBLISHER_ROTATION_SPKI_PATH }}
+          PUBLISHER_ROTATION_SPKI_SHA256: ${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}
+          PUBLISHER_EXPECTED_PREVIOUS_EPOCH: ${{ inputs.expected_previous_epoch }}
+          PUBLISHER_ADVANCE_DISCOVERY: 'true'
+        run: node scripts/publish-trust-policy.mjs run
