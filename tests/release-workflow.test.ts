@@ -397,14 +397,14 @@ describe('release workflow supply-chain contract', () => {
 	  for(const key of Object.keys(build?.env??{})) expect(key).not.toMatch(/^EVSIGN_/);
 	  expect(build?.run).toContain('npm run build:exe');
 	  expect(build?.run).not.toContain('sign-evsign');
-	  expect(sign?.env).toMatchObject({EVSIGN_CERTIFICATE:'${{ vars.EVSIGN_CERTIFICATE }}',EVSIGN_PUBLISHER_IDENTITY:'${{ vars.EVSIGN_PUBLISHER_IDENTITY }}',EVSIGN_KEY:'${{ secrets.EVSIGN_KEY }}',EVSIGN_PASSWORD:'${{ secrets.EVSIGN_PASSWORD }}'});
+	  expect(sign?.env).toMatchObject({EVSIGN_ATTEMPT_TIMEOUT_MS:'1200000',EVSIGN_CERTIFICATE:'${{ vars.EVSIGN_CERTIFICATE }}',EVSIGN_PUBLISHER_IDENTITY:'${{ vars.EVSIGN_PUBLISHER_IDENTITY }}',EVSIGN_KEY:'${{ secrets.EVSIGN_KEY }}',EVSIGN_PASSWORD:'${{ secrets.EVSIGN_PASSWORD }}'});
 	  expect(sign?.run).toContain('$env:EVSIGN_SCRIPT_PATH --profile stable');
 	  expect(sign?.run).not.toMatch(/npm|go\s+-C/);
 	  const root=mkdtempSync(join(tmpdir(),'candidate-env-isolation-'));try{
 		const dumper=join(root,'dump-env.mjs');writeFileSync(dumper,"process.stdout.write(JSON.stringify(Object.keys(process.env).filter((name)=>name.startsWith('EVSIGN_')).sort()))");
 		const run=(environment:Record<string,string>)=>spawnSync(process.execPath,[dumper],{encoding:'utf8',env:environment});
 		const buildDump=run(Object.fromEntries(Object.keys(build?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(buildDump.stdout)).toEqual([]);
-		const signDump=run(Object.fromEntries(Object.keys(sign?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(signDump.stdout)).toEqual(['EVSIGN_CERTIFICATE','EVSIGN_KEY','EVSIGN_PASSWORD','EVSIGN_PUBLISHER_IDENTITY']);
+		const signDump=run(Object.fromEntries(Object.keys(sign?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(signDump.stdout)).toEqual(['EVSIGN_ATTEMPT_TIMEOUT_MS','EVSIGN_CERTIFICATE','EVSIGN_KEY','EVSIGN_PASSWORD','EVSIGN_PUBLISHER_IDENTITY']);
 	  }finally{rmSync(root,{recursive:true,force:true});}
 	});
 
