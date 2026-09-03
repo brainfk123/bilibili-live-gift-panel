@@ -26,6 +26,7 @@ func TestChannelRouter(t *testing.T) {
 		{name: "stable 0.4.10", values: []string{"bilibili-live-gift-panel/0.4.10"}, want: release.ChannelStable},
 		{name: "stable 0.4.11", values: []string{"bilibili-live-gift-panel/0.4.11"}, want: release.ChannelStable},
 		{name: "stable 0.4.12", values: []string{"bilibili-live-gift-panel/0.4.12"}, want: release.ChannelStable},
+		{name: "stable 0.4.13", values: []string{"bilibili-live-gift-panel/0.4.13"}, want: release.ChannelStable},
 		{name: "missing", wantErr: service.ErrClientVersionInvalid},
 		{name: "duplicate", values: []string{"bilibili-live-gift-panel/0.4.12", "bilibili-live-gift-panel/0.4.12"}, wantErr: service.ErrClientVersionInvalid},
 		{name: "wrong product", values: []string{"other/0.4.12"}, wantErr: service.ErrClientVersionInvalid},
@@ -35,7 +36,7 @@ func TestChannelRouter(t *testing.T) {
 		{name: "prerelease", values: []string{"bilibili-live-gift-panel/0.4.12-rc.1"}, wantErr: service.ErrClientVersionInvalid},
 		{name: "development", values: []string{"bilibili-live-gift-panel/dev"}, wantErr: service.ErrClientVersionInvalid},
 		{name: "unreviewed gap", values: []string{"bilibili-live-gift-panel/0.4.8"}, wantErr: service.ErrClientVersionInvalid},
-		{name: "later unreviewed", values: []string{"bilibili-live-gift-panel/0.4.13"}, wantErr: service.ErrClientVersionInvalid},
+		{name: "later unreviewed", values: []string{"bilibili-live-gift-panel/0.4.14"}, wantErr: service.ErrClientVersionInvalid},
 		{name: "unknown major", values: []string{"bilibili-live-gift-panel/1.0.0"}, wantErr: service.ErrClientVersionInvalid},
 	}
 
@@ -64,5 +65,16 @@ func TestChannelRouter(t *testing.T) {
 				t.Fatalf("Select() leaked activation detail: %v", err)
 			}
 		})
+	}
+}
+
+func TestVersionBucketForUserAgentIncludesExactV0413(t *testing.T) {
+	if got := service.VersionBucketForUserAgent([]string{"bilibili-live-gift-panel/0.4.13"}); got != service.Version0413 {
+		t.Fatalf("VersionBucketForUserAgent() = %q, want %q", got, service.Version0413)
+	}
+	for _, values := range [][]string{{"bilibili-live-gift-panel/0.4.14"}, {"bilibili-live-gift-panel/0.4.13-rc.1"}, {"bilibili-live-gift-panel/0.4.13", "bilibili-live-gift-panel/0.4.13"}} {
+		if got := service.VersionBucketForUserAgent(values); got != service.VersionInvalid {
+			t.Fatalf("VersionBucketForUserAgent(%q) = %q, want invalid", values, got)
+		}
 	}
 }

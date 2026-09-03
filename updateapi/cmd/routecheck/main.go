@@ -89,6 +89,7 @@ func run(output io.Writer) error {
 		{name: "stable-0.4.10", userAgents: []string{"bilibili-live-gift-panel/0.4.10"}, wantStatus: 200, wantChannel: "stable", wantOutcome: "ok"},
 		{name: "stable-0.4.11", userAgents: []string{"bilibili-live-gift-panel/0.4.11"}, wantStatus: 200, wantChannel: "stable", wantOutcome: "ok"},
 		{name: "stable-0.4.12", userAgents: []string{"bilibili-live-gift-panel/0.4.12"}, wantStatus: 200, wantChannel: "stable", wantOutcome: "ok"},
+		{name: "stable-0.4.13", userAgents: []string{"bilibili-live-gift-panel/0.4.13"}, wantStatus: 200, wantChannel: "stable", wantOutcome: "ok"},
 		{name: "legacy-inactive", userAgents: []string{"bilibili-live-gift-panel/0.4.7"}, legacyBody: legacy, legacyPresent: true, wantStatus: 503, wantOutcome: "legacy_channel_unavailable"},
 		{name: "legacy-active-missing", userAgents: []string{"bilibili-live-gift-panel/0.4.7"}, legacyActive: true, wantStatus: 503, wantChannel: "legacy-rushrush", wantOutcome: "release_unavailable"},
 		{name: "legacy-active-malformed", userAgents: []string{"bilibili-live-gift-panel/0.4.7"}, legacyActive: true, legacyBody: []byte(`{"schemaVersion":2}`), legacyPresent: true, wantStatus: 503, wantChannel: "legacy-rushrush", wantOutcome: "release_invalid"},
@@ -96,7 +97,7 @@ func run(output io.Writer) error {
 		{name: "ua-missing", wantStatus: 400, wantOutcome: "client_version_invalid"},
 		{name: "ua-duplicate", userAgents: []string{"bilibili-live-gift-panel/0.4.12", "bilibili-live-gift-panel/0.4.12"}, wantStatus: 400, wantOutcome: "client_version_invalid"},
 		{name: "ua-malformed", userAgents: []string{"bilibili-live-gift-panel/0.4.12-rc.1"}, wantStatus: 400, wantOutcome: "client_version_invalid"},
-		{name: "ua-unknown", userAgents: []string{"bilibili-live-gift-panel/0.4.13"}, wantStatus: 400, wantOutcome: "client_version_invalid"},
+		{name: "ua-unknown", userAgents: []string{"bilibili-live-gift-panel/0.4.14"}, wantStatus: 400, wantOutcome: "client_version_invalid"},
 	}
 
 	var result bytes.Buffer
@@ -111,7 +112,7 @@ func run(output io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(&result, "case=publisher-policy status=200 channel=- outcome=policy_verified")
-	fmt.Fprintln(&result, "routecheck=ok cases=13")
+	fmt.Fprintln(&result, "routecheck=ok cases=14")
 	_, err = io.Copy(output, &result)
 	return err
 }

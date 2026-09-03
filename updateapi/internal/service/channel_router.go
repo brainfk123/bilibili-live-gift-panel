@@ -21,6 +21,7 @@ const (
 	Version0410    VersionBucket = "0.4.10"
 	Version0411    VersionBucket = "0.4.11"
 	Version0412    VersionBucket = "0.4.12"
+	Version0413    VersionBucket = "0.4.13"
 )
 
 type reviewedClient struct {
@@ -34,6 +35,7 @@ var reviewedUserAgents = map[string]reviewedClient{
 	"bilibili-live-gift-panel/0.4.10": {version: Version0410, channel: release.ChannelStable},
 	"bilibili-live-gift-panel/0.4.11": {version: Version0411, channel: release.ChannelStable},
 	"bilibili-live-gift-panel/0.4.12": {version: Version0412, channel: release.ChannelStable},
+	"bilibili-live-gift-panel/0.4.13": {version: Version0413, channel: release.ChannelStable},
 }
 
 // ChannelRouter maps one exact, reviewed User-Agent value to a closed channel.

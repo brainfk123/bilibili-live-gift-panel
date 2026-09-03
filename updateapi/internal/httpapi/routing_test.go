@@ -62,6 +62,7 @@ func TestLatestRoutesByUserAgent(t *testing.T) {
 		{name: "stable 0.4.10", values: []string{"bilibili-live-gift-panel/0.4.10"}, wantStatus: 200, wantChannel: release.ChannelStable, wantCall: true},
 		{name: "stable 0.4.11", values: []string{"bilibili-live-gift-panel/0.4.11"}, wantStatus: 200, wantChannel: release.ChannelStable, wantCall: true},
 		{name: "stable 0.4.12", values: []string{"bilibili-live-gift-panel/0.4.12"}, wantStatus: 200, wantChannel: release.ChannelStable, wantCall: true},
+		{name: "stable 0.4.13", values: []string{"bilibili-live-gift-panel/0.4.13"}, wantStatus: 200, wantChannel: release.ChannelStable, wantCall: true},
 		{name: "missing", wantStatus: 400, wantCode: "client_version_invalid"},
 		{name: "duplicate", values: []string{"bilibili-live-gift-panel/0.4.12", "bilibili-live-gift-panel/0.4.12"}, wantStatus: 400, wantCode: "client_version_invalid"},
 		{name: "whitespace", values: []string{" bilibili-live-gift-panel/0.4.12"}, wantStatus: 400, wantCode: "client_version_invalid"},
@@ -69,7 +70,7 @@ func TestLatestRoutesByUserAgent(t *testing.T) {
 		{name: "prerelease", values: []string{"bilibili-live-gift-panel/0.4.12-rc.1"}, wantStatus: 400, wantCode: "client_version_invalid"},
 		{name: "development", values: []string{"bilibili-live-gift-panel/dev"}, wantStatus: 400, wantCode: "client_version_invalid"},
 		{name: "gap 0.4.8", values: []string{"bilibili-live-gift-panel/0.4.8"}, wantStatus: 400, wantCode: "client_version_invalid"},
-		{name: "later unreviewed", values: []string{"bilibili-live-gift-panel/0.4.13"}, wantStatus: 400, wantCode: "client_version_invalid"},
+		{name: "later unreviewed", values: []string{"bilibili-live-gift-panel/0.4.14"}, wantStatus: 400, wantCode: "client_version_invalid"},
 	}
 
 	for _, test := range tests {
