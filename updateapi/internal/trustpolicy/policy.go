@@ -30,8 +30,9 @@ const (
 	maxPolicyBytes    = 256 << 10
 	clientAlgorithm   = "ecdsa-p256-sha256"
 
-	stableChannel = "stable"
-	bridgeChannel = "legacy-rushrush"
+	stableChannel         = "stable"
+	bridgeChannel         = "legacy-rushrush"
+	maxPrimaryAllowedTags = 32
 )
 
 const canonicalNumericPrereleaseIdentifier = `(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)`
@@ -339,7 +340,7 @@ func validateCandidate(candidate Candidate, expectedPrevious uint64, now time.Ti
 func validateNaisNetPublisher(publisher Publisher) error {
 	if publisher.ID != "naisnet-primary" || publisher.Role != "primary" || publisher.Country != "CN" ||
 		publisher.Organization != "NaisNet Technology Co., Ltd." || publisher.OrganizationID != "91210103MA7CJ3C094" ||
-		publisher.AllowedChannel != stableChannel || len(publisher.AllowedTags) == 0 || !validManifestHash(publisher.ManifestSHA256) {
+		publisher.AllowedChannel != stableChannel || len(publisher.AllowedTags) == 0 || len(publisher.AllowedTags) > maxPrimaryAllowedTags || !validManifestHash(publisher.ManifestSHA256) {
 		return errCandidateInvalid
 	}
 	if !sort.StringsAreSorted(publisher.AllowedTags) {

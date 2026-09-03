@@ -14,6 +14,7 @@ const MAX_MACHINE_ENVELOPE_BYTES = 512 << 10;
 const MAX_POLICY_BYTES = 256 << 10;
 const MAX_AUDIT_BYTES = 64 << 10;
 const MAX_REMOTE_JSON_BYTES = 512 << 10;
+const MAX_PRIMARY_ALLOWED_TAGS = 32;
 const POLICY_ASSET = policyReleaseAssetForRole('policy').remoteName;
 const AUDIT_ASSET = policyReleaseAssetForRole('audit').remoteName;
 const COMMIT_ASSET = policyReleaseAssetForRole('commit').remoteName;
@@ -159,6 +160,7 @@ function validatePublisher(publisher, index) {
   const required = ['id', 'role', 'country', 'organization', 'organizationId', 'allowedChannel', 'allowedTags'];
   const allowed = publisher && Object.hasOwn(publisher, 'manifestSha256') ? [...required, 'manifestSha256'] : required;
   if (!exactKeys(publisher, allowed) || !Array.isArray(publisher.allowedTags) || publisher.allowedTags.length === 0 ||
+    (index === 0 && publisher.allowedTags.length > MAX_PRIMARY_ALLOWED_TAGS) ||
     publisher.allowedTags.some((tag) => typeof tag !== 'string' || !CANONICAL_TAG.test(tag)) ||
     publisher.allowedTags.some((tag, tagIndex) => tagIndex > 0 && tag <= publisher.allowedTags[tagIndex - 1])) {
     throw new ValidationFailure();

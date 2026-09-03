@@ -60,14 +60,14 @@ async function verifiedEnvelope(overrides: { policy?: Buffer; spki?: Buffer; exp
   };
 }
 
-function makeSignedPolicy(privateKey: KeyObject, epoch: number, expiresAt: string) {
+function makeSignedPolicy(privateKey: KeyObject, epoch: number, expiresAt: string, allowedTags = ['v0.4.12']) {
   const signed = {
     epoch,
     expiresAt,
     publishers: [{
       id: 'naisnet-primary', role: 'primary', country: 'CN',
       organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094',
-      allowedChannel: 'stable', allowedTags: ['v0.4.12'],
+      allowedChannel: 'stable', allowedTags,
     }],
   };
   const signature = signBytes('sha256', Buffer.from(JSON.stringify(signed)), privateKey).toString('base64');
@@ -885,6 +885,34 @@ describe('real publisher remote adapters', () => {
 });
 
 describe('protected publisher-policy transaction', () => {
+  it('keeps the epoch-3 candidate canonical and bounded to v0.4.13 through v0.4.32', async () => {
+    const bytes = await readFile(new URL('../publisher/policy-candidates/epoch-00000003.json', import.meta.url));
+    const text = bytes.toString('utf8').trimEnd();
+    const candidate = JSON.parse(text) as { epoch: number; publishers: Array<{ allowedTags: string[]; manifestSha256?: string }> };
+
+    expect(JSON.stringify(candidate)).toBe(text);
+    expect(candidate.epoch).toBe(3);
+    expect(candidate.publishers[0]?.allowedTags).toEqual(Array.from({ length: 20 }, (_, index) => `v0.4.${index + 13}`));
+    expect(candidate.publishers[0]).not.toHaveProperty('manifestSha256');
+    expect(candidate.publishers[1]).not.toHaveProperty('manifestSha256');
+  });
+
+  it('rejects a signed primary policy with more than 32 stable tags', async () => {
+    const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const spki = publicKey.export({ format: 'der', type: 'spki' });
+    const tags = Array.from({ length: 33 }, (_, index) => `v0.4.${index + 13}`);
+    const policy = makeSignedPolicy(privateKey, 2, '2030-01-01T00:00:00Z', tags);
+    const envelope = await verifiedEnvelope({ policy, spki, expectedPreviousEpoch: 1 });
+    const { adapters } = await fakeAdapters(envelope);
+    adapters.files.readFile = async () => spki;
+
+    await expect(publishTrustPolicy(await testOptions({
+      reviewedSPKIPath: 'bounded-window/root.der',
+      expectedSPKISHA256: sha256(spki),
+      expectedPreviousEpoch: 1,
+    }), adapters)).rejects.toThrow('publisher policy validation failed');
+  });
+
   it('publishes and reads back the exact three-asset immutable policy Release closure', async () => {
     const envelope = await verifiedEnvelope();
     const { adapters, githubAssets } = await fakeAdapters(envelope);

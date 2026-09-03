@@ -3,6 +3,7 @@ package trustpolicy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,76 @@ import (
 )
 
 var candidateValidationTime = time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func TestCandidateAcceptsBoundedHashlessStableWindow(t *testing.T) {
+	tags := stableTagWindow(13, 32)
+	candidate := primaryCandidateJSON(t, Candidate{
+		Epoch: 3, ExpiresAt: "2030-01-01T00:00:00Z",
+		Publishers: []Publisher{{
+			ID: "naisnet-primary", Role: "primary", Country: "CN",
+			Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094",
+			AllowedChannel: stableChannel, AllowedTags: tags,
+		}},
+	})
+	if _, err := ParseCandidate(candidate, CandidateOptions{ExpectedPreviousEpoch: 2, Now: candidateValidationTime}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCandidateRejectsUnboundedOrInvalidStableTags(t *testing.T) {
+	validPublisher := Publisher{
+		ID: "naisnet-primary", Role: "primary", Country: "CN",
+		Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094",
+		AllowedChannel: stableChannel, AllowedTags: stableTagWindow(13, 32),
+	}
+	tests := []struct {
+		name      string
+		publisher Publisher
+	}{
+		{name: "33 tags", publisher: func() Publisher { value := validPublisher; value.AllowedTags = stableTagWindow(13, 45); return value }()},
+		{name: "duplicate tags", publisher: func() Publisher {
+			value := validPublisher
+			value.AllowedTags = []string{"v0.4.13", "v0.4.13"}
+			return value
+		}()},
+		{name: "reordered tags", publisher: func() Publisher {
+			value := validPublisher
+			value.AllowedTags = []string{"v0.4.14", "v0.4.13"}
+			return value
+		}()},
+		{name: "reserved bridge tag", publisher: func() Publisher { value := validPublisher; value.AllowedTags = []string{"v0.4.11"}; return value }()},
+		{name: "hashless RushRush primary", publisher: Publisher{
+			ID: "naisnet-primary", Role: "primary", Country: "CN",
+			Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P",
+			AllowedChannel: stableChannel, AllowedTags: []string{"v0.4.13"},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := primaryCandidateJSON(t, Candidate{Epoch: 3, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []Publisher{test.publisher}})
+			if _, err := ParseCandidate(candidate, CandidateOptions{ExpectedPreviousEpoch: 2, Now: candidateValidationTime}); err == nil {
+				t.Fatal("ParseCandidate() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func primaryCandidateJSON(t testing.TB, candidate Candidate) []byte {
+	t.Helper()
+	data, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func stableTagWindow(first, last int) []string {
+	tags := make([]string, 0, last-first+1)
+	for patch := first; patch <= last; patch++ {
+		tags = append(tags, fmt.Sprintf("v0.4.%d", patch))
+	}
+	return tags
+}
 
 func TestPolicyCandidateCanonicalBytesMatchClientGolden(t *testing.T) {
 	// Mutation caught: changing a field name, field order, or algorithm-specific
