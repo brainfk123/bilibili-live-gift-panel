@@ -56,11 +56,15 @@ describe('embedded UI asset mirroring', () => {
     mkdirSync(join(source, 'ffmpeg-component-download'), { recursive: true });
     mkdirSync(join(source, 'ffmpeg-component-published'), { recursive: true });
     mkdirSync(join(source, 'ffmpeg-component-publish'), { recursive: true });
+    mkdirSync(join(source, 'ffmpeg-component'), { recursive: true });
+    mkdirSync(join(source, 'release-ffmpeg-sealed'), { recursive: true });
     mkdirSync(join(source, 'standalone-ffmpeg'), { recursive: true });
     writeFileSync(join(source, 'index.html'), '<main>gift panel</main>');
     writeFileSync(join(source, 'ffmpeg-component-download', 'ffmpeg.zip'), 'signed component');
     writeFileSync(join(source, 'ffmpeg-component-published', 'ffmpeg.zip'), 'new component');
     writeFileSync(join(source, 'ffmpeg-component-publish', 'ffmpeg.zip'), 'component staging');
+    writeFileSync(join(source, 'ffmpeg-component', 'ffmpeg-9.0.tar.xz'), 'reviewed component source');
+    writeFileSync(join(source, 'release-ffmpeg-sealed', 'ffmpeg.zip'), 'sealed runtime payload');
     writeFileSync(join(source, 'standalone-ffmpeg', 'ffmpeg.exe'), 'standalone executable');
     writeFileSync(join(source, 'ffmpeg-component-release.json'), '{}');
     writeFileSync(join(source, 'ffmpeg-windows-x64.exe'), 'release executable');
