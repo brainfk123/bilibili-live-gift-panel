@@ -60,14 +60,14 @@ async function verifiedEnvelope(overrides: { policy?: Buffer; spki?: Buffer; exp
   };
 }
 
-function makeSignedPolicy(privateKey: KeyObject, epoch: number, expiresAt: string, allowedTags = ['v0.4.12']) {
+function makeSignedPolicy(privateKey: KeyObject, epoch: number, expiresAt: string, allowedTags = ['v0.4.12'], publisherOverrides: Record<string, unknown> = {}) {
   const signed = {
     epoch,
     expiresAt,
     publishers: [{
       id: 'naisnet-primary', role: 'primary', country: 'CN',
       organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094',
-      allowedChannel: 'stable', allowedTags,
+      allowedChannel: 'stable', allowedTags, ...publisherOverrides,
     }],
   };
   const signature = signBytes('sha256', Buffer.from(JSON.stringify(signed)), privateKey).toString('base64');
@@ -190,6 +190,21 @@ async function epochTwoFixture() {
     now: new Date('2029-01-02T03:04:05Z'),
   });
   return { ...state, candidate, envelope, options, previous, privateKey, spki };
+}
+
+async function reviewedPrimaryPolicy(publisherOverrides: Record<string, unknown>) {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const spki = publicKey.export({ format: 'der', type: 'spki' });
+  const policy = makeSignedPolicy(privateKey, 4, '2030-01-01T00:00:00Z', ['v0.4.33'], publisherOverrides);
+  const envelope = await verifiedEnvelope({ policy, spki, expectedPreviousEpoch: 3 });
+  const { adapters } = await fakeAdapters(envelope);
+  adapters.files.readFile = async () => spki;
+  const options = await testOptions({
+    reviewedSPKIPath: 'future-primary/root.der',
+    expectedSPKISHA256: sha256(spki),
+    expectedPreviousEpoch: 3,
+  });
+  return publishTrustPolicy(options, adapters);
 }
 
 const remoteEnvironment = {
@@ -885,6 +900,27 @@ describe('real publisher remote adapters', () => {
 });
 
 describe('protected publisher-policy transaction', () => {
+  it('accepts one explicitly reviewed future primary legal identity', async () => {
+    await expect(reviewedPrimaryPolicy({
+      id: 'futureco-primary',
+      organization: 'FutureCo Technology Co., Ltd.',
+      organizationId: '91110000EXAMPLE01',
+      manifestSha256: 'a'.repeat(64),
+    })).resolves.toMatchObject({ epoch: 4, expectedPreviousEpoch: 3 });
+  });
+
+  it.each([
+    ['malformed publisher ID', { id: 'FutureCo-primary' }],
+    ['non-CN country', { id: 'futureco-primary', country: 'US', organization: 'FutureCo Technology Co., Ltd.', organizationId: '91110000EXAMPLE01' }],
+    ['empty organization', { id: 'futureco-primary', organization: '', organizationId: '91110000EXAMPLE01' }],
+    ['control character organization', { id: 'futureco-primary', organization: 'FutureCo\nInjected', organizationId: '91110000EXAMPLE01' }],
+    ['lowercase organization ID', { id: 'futureco-primary', organization: 'FutureCo Technology Co., Ltd.', organizationId: '91110000example01' }],
+    ['NaisNet identity under another ID', { id: 'futureco-primary' }],
+    ['RushRush promoted to primary', { id: 'futureco-primary', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P' }],
+  ])('rejects %s', async (_name, publisherOverrides) => {
+    await expect(reviewedPrimaryPolicy(publisherOverrides)).rejects.toThrow('publisher policy validation failed');
+  });
+
   it('keeps the epoch-3 candidate canonical and bounded to v0.4.13 through v0.4.32', async () => {
     const bytes = await readFile(new URL('../publisher/policy-candidates/epoch-00000003.json', import.meta.url));
     const text = bytes.toString('utf8').trimEnd();

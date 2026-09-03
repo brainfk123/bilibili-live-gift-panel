@@ -66,6 +66,66 @@ func TestCandidateRejectsUnboundedOrInvalidStableTags(t *testing.T) {
 	}
 }
 
+func TestCandidateAcceptsReviewedFuturePrimary(t *testing.T) {
+	candidate := primaryCandidateJSON(t, Candidate{
+		Epoch: 4, ExpiresAt: "2030-01-01T00:00:00Z",
+		Publishers: []Publisher{{
+			ID: "futureco-primary", Role: "primary", Country: "CN",
+			Organization: "FutureCo Technology Co., Ltd.", OrganizationID: "91110000EXAMPLE01",
+			AllowedChannel: stableChannel, AllowedTags: []string{"v0.4.33"}, ManifestSHA256: strings.Repeat("a", 64),
+		}},
+	})
+	if _, err := ParseCandidate(candidate, CandidateOptions{ExpectedPreviousEpoch: 3, Now: candidateValidationTime}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCandidateRejectsInvalidPrimaryPublisher(t *testing.T) {
+	valid := Publisher{
+		ID: "futureco-primary", Role: "primary", Country: "CN",
+		Organization: "FutureCo Technology Co., Ltd.", OrganizationID: "91110000EXAMPLE01",
+		AllowedChannel: stableChannel, AllowedTags: []string{"v0.4.33"},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Publisher)
+	}{
+		{name: "malformed publisher ID", mutate: func(value *Publisher) { value.ID = "FutureCo-primary" }},
+		{name: "non-CN country", mutate: func(value *Publisher) { value.Country = "US" }},
+		{name: "empty organization", mutate: func(value *Publisher) { value.Organization = "" }},
+		{name: "untrimmed organization", mutate: func(value *Publisher) { value.Organization = " FutureCo" }},
+		{name: "controlled organization", mutate: func(value *Publisher) { value.Organization = "FutureCo\nInjected" }},
+		{name: "lowercase organization ID", mutate: func(value *Publisher) { value.OrganizationID = "91110000example01" }},
+		{name: "NaisNet identity under another ID", mutate: func(value *Publisher) {
+			value.Organization = "NaisNet Technology Co., Ltd."
+			value.OrganizationID = "91210103MA7CJ3C094"
+		}},
+		{name: "RushRush identity promoted to primary", mutate: func(value *Publisher) {
+			value.Organization = "RushRush Network Technology Ltd"
+			value.OrganizationID = "91450900MADM3GLG5P"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			publisher := valid
+			test.mutate(&publisher)
+			candidate := primaryCandidateJSON(t, Candidate{Epoch: 4, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []Publisher{publisher}})
+			if _, err := ParseCandidate(candidate, CandidateOptions{ExpectedPreviousEpoch: 3, Now: candidateValidationTime}); err == nil {
+				t.Fatal("ParseCandidate() error = nil, want rejection")
+			}
+		})
+	}
+
+	secondPrimary := valid
+	secondPrimary.ID = "another-primary"
+	secondPrimary.Organization = "Another Technology Co., Ltd."
+	secondPrimary.OrganizationID = "91110000ANOTHER01"
+	candidate := primaryCandidateJSON(t, Candidate{Epoch: 4, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []Publisher{valid, secondPrimary}})
+	if _, err := ParseCandidate(candidate, CandidateOptions{ExpectedPreviousEpoch: 3, Now: candidateValidationTime}); err == nil {
+		t.Fatal("second primary publisher accepted")
+	}
+}
+
 func primaryCandidateJSON(t testing.TB, candidate Candidate) []byte {
 	t.Helper()
 	data, err := json.Marshal(candidate)

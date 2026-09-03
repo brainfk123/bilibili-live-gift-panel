@@ -76,6 +76,20 @@ The candidate path is derived only as `publisher/policy-candidates/epoch-%08d.js
 
 `trustpolicy verify-bundle` validates the policy, audit, commit marker, filesystem identity, canonical signature, reviewed SPKI, epoch transition, and audit cross-binding. The publisher consumes only that captured machine envelope and never reopens raw policy/audit paths.
 
+## Unexpected stable publisher procedure
+
+If EVSign returns a signed executable whose structured legal identity does not match the active primary rule, stop the stable release before creating or publishing a draft. Preserve the bounded `publisher-change-request-<tag>-<artifactSha256>` artifact produced by the release workflow; it contains only the exact tag, artifact and certificate DER hashes, structured identity, current policy epoch, and GitHub run identity.
+
+Before authorizing that identity:
+
+1. Compare every structured identity field and the certificate DER SHA-256 in the request with the actual EVSign account and certificate order. Neither a public CA chain, an EVSign certificate selector, nor a display Subject is authorization.
+2. Create a new candidate file for exactly the next epoch. Enter the reviewed primary identity manually, bind the transition release to its exact tag and artifact SHA-256, and keep the primary tag list within the validator's finite bound.
+3. Review the public candidate diff independently. Do not copy, transform, or automatically promote the request artifact into a candidate or signed policy.
+4. Run the public-only candidate validation before protected signing.
+5. Separately confirm the protected root-signing, immutable publication, and discovery-advancement run. A request artifact alone must never invoke or authorize any of these stages.
+
+If any request field cannot be reconciled with the EVSign account, keep release and discovery paused. Existing signed policies and immutable objects are never edited; correction requires another explicitly reviewed higher epoch.
+
 ## Immutable targets
 
 For epoch `N`:

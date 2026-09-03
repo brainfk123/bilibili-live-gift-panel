@@ -26,6 +26,8 @@ const CANONICAL_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)
 const KEY_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const REQUEST_ID = /^[A-Za-z0-9_.:@/-]{1,256}$/;
 const CI_ACTOR = /^[A-Za-z0-9_.\[\]-]{1,100}$/;
+const PRIMARY_PUBLISHER_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*-primary$/;
+const ORGANIZATION_ID = /^[0-9A-Z]{8,32}$/;
 const RFC3339_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const GITHUB_RELEASE_ASSET_HOST = 'release-assets.githubusercontent.com';
 const execFileAsync = promisify(execFile);
@@ -167,8 +169,13 @@ function validatePublisher(publisher, index) {
   }
   if (Object.hasOwn(publisher, 'manifestSha256') && !SHA256.test(publisher.manifestSha256)) throw new ValidationFailure();
   if (index === 0) {
-    if (publisher.id !== 'naisnet-primary' || publisher.role !== 'primary' || publisher.country !== 'CN' ||
-      publisher.organization !== 'NaisNet Technology Co., Ltd.' || publisher.organizationId !== '91210103MA7CJ3C094' ||
+    const isNaisNet = publisher.organization === 'NaisNet Technology Co., Ltd.' && publisher.organizationId === '91210103MA7CJ3C094';
+    const isRushRush = publisher.organization === 'RushRush Network Technology Ltd' && publisher.organizationId === '91450900MADM3GLG5P';
+    if (typeof publisher.id !== 'string' || !PRIMARY_PUBLISHER_ID.test(publisher.id) || publisher.role !== 'primary' || publisher.country !== 'CN' ||
+      typeof publisher.organization !== 'string' || publisher.organization.length === 0 || publisher.organization !== publisher.organization.trim() ||
+      Buffer.byteLength(publisher.organization, 'utf8') > 256 || /\p{C}/u.test(publisher.organization) ||
+      typeof publisher.organizationId !== 'string' || !ORGANIZATION_ID.test(publisher.organizationId) || isRushRush ||
+      ((publisher.id === 'naisnet-primary') !== isNaisNet) ||
       publisher.allowedChannel !== 'stable' || publisher.allowedTags.includes('v0.4.11')) {
       throw new ValidationFailure();
     }

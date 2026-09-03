@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -38,11 +40,13 @@ const (
 const canonicalNumericPrereleaseIdentifier = `(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)`
 
 var (
-	canonicalTag = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-` + canonicalNumericPrereleaseIdentifier + `(?:\.` + canonicalNumericPrereleaseIdentifier + `)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
-	sha256Hex    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	keyIDValue   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
-	ciActor      = regexp.MustCompile(`^[A-Za-z0-9_.\[\]-]{1,100}$`)
-	requestID    = regexp.MustCompile(`^[A-Za-z0-9_.:@/-]{1,256}$`)
+	canonicalTag   = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-` + canonicalNumericPrereleaseIdentifier + `(?:\.` + canonicalNumericPrereleaseIdentifier + `)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+	sha256Hex      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	keyIDValue     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	ciActor        = regexp.MustCompile(`^[A-Za-z0-9_.\[\]-]{1,100}$`)
+	requestID      = regexp.MustCompile(`^[A-Za-z0-9_.:@/-]{1,256}$`)
+	primaryID      = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*-primary$`)
+	organizationID = regexp.MustCompile(`^[0-9A-Z]{8,32}$`)
 )
 
 // Candidate is exactly the signed object understood by the Task 1 client.
@@ -326,7 +330,7 @@ func validateCandidate(candidate Candidate, expectedPrevious uint64, now time.Ti
 	if len(candidate.Publishers) < 1 || len(candidate.Publishers) > 2 {
 		return errCandidateInvalid
 	}
-	if err := validateNaisNetPublisher(candidate.Publishers[0]); err != nil {
+	if err := validatePrimaryPublisher(candidate.Publishers[0]); err != nil {
 		return errCandidateInvalid
 	}
 	if len(candidate.Publishers) == 2 {
@@ -337,10 +341,15 @@ func validateCandidate(candidate Candidate, expectedPrevious uint64, now time.Ti
 	return nil
 }
 
-func validateNaisNetPublisher(publisher Publisher) error {
-	if publisher.ID != "naisnet-primary" || publisher.Role != "primary" || publisher.Country != "CN" ||
-		publisher.Organization != "NaisNet Technology Co., Ltd." || publisher.OrganizationID != "91210103MA7CJ3C094" ||
+func validatePrimaryPublisher(publisher Publisher) error {
+	if !primaryID.MatchString(publisher.ID) || publisher.Role != "primary" || publisher.Country != "CN" ||
+		!validOrganization(publisher.Organization) || !organizationID.MatchString(publisher.OrganizationID) ||
 		publisher.AllowedChannel != stableChannel || len(publisher.AllowedTags) == 0 || len(publisher.AllowedTags) > maxPrimaryAllowedTags || !validManifestHash(publisher.ManifestSHA256) {
+		return errCandidateInvalid
+	}
+	isNaisNet := publisher.Organization == "NaisNet Technology Co., Ltd." && publisher.OrganizationID == "91210103MA7CJ3C094"
+	isRushRush := publisher.Organization == "RushRush Network Technology Ltd" && publisher.OrganizationID == "91450900MADM3GLG5P"
+	if isRushRush || (publisher.ID == "naisnet-primary") != isNaisNet {
 		return errCandidateInvalid
 	}
 	if !sort.StringsAreSorted(publisher.AllowedTags) {
@@ -354,6 +363,18 @@ func validateNaisNetPublisher(publisher Publisher) error {
 		previous = tag
 	}
 	return nil
+}
+
+func validOrganization(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 256 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.Is(unicode.Categories["C"], character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRushRushPublisher(publisher Publisher) error {
