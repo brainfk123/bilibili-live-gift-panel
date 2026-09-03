@@ -2,6 +2,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -34,6 +36,8 @@ func run(args []string, output io.Writer) error {
 		return runCertificate(args[1:], output, false)
 	case "authenticode":
 		return runCertificate(args[1:], output, true)
+	case "inspect-authenticode":
+		return runInspectAuthenticode(args[1:], output, artifactinspect.InspectAuthenticodeCertificate)
 	case "pe-content-digest":
 		return runPEDigest(args[1:], output)
 	case "verify-artifact":
@@ -57,6 +61,29 @@ func run(args []string, output io.Writer) error {
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func runInspectAuthenticode(args []string, output io.Writer, inspect func(string) (certidentity.Certificate, error)) error {
+	flags := flag.NewFlagSet("inspect-authenticode", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("file", "", "signed executable")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *path == "" || inspect == nil {
+		return errors.New("Authenticode inspection arguments are invalid")
+	}
+	certificate, err := inspect(*path)
+	if err != nil {
+		return errors.New("Authenticode inspection failed")
+	}
+	parsed, err := certidentity.ParseCertificateDER(certificate.DER)
+	if err != nil || parsed.Identity != certificate.Identity {
+		return errors.New("Authenticode certificate is invalid")
+	}
+	digest := sha256.Sum256(certificate.DER)
+	return json.NewEncoder(output).Encode(struct {
+		Status               string                `json:"status"`
+		CertificateDERSHA256 string                `json:"certificateDerSha256"`
+		Identity             certidentity.Identity `json:"identity"`
+	}{Status: "Valid", CertificateDERSHA256: hex.EncodeToString(digest[:]), Identity: certificate.Identity})
 }
 
 func runVerifyEnrollmentCandidate(args []string, output io.Writer) error {

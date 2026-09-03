@@ -5,15 +5,20 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"bilibili-live-gift-panel/internal/certidentity"
 )
 
 func TestFFmpegClosureCommandsFailClosedOnMissingExplicitPaths(t *testing.T) {
@@ -27,6 +32,7 @@ func TestFFmpegClosureCommandsFailClosedOnMissingExplicitPaths(t *testing.T) {
 		{command: "verify-enrollment-policies", want: "enrollment policy arguments"},
 		{command: "link-sealed-executable", want: "sealed executable link arguments"},
 		{command: "verify-enrollment-candidate", want: "enrollment candidate arguments"},
+		{command: "inspect-authenticode", want: "Authenticode inspection arguments"},
 	} {
 		t.Run(test.command, func(t *testing.T) {
 			err := run([]string{test.command}, &bytes.Buffer{})
@@ -60,6 +66,29 @@ func TestCertificateCommandRejectsOrganizationIdentifierOIDDecoy(t *testing.T) {
 	}
 	if err := run([]string{"certificate", "--der", path, "--country", "CN", "--organization", "RushRush Network Technology Ltd", "--organization-id", "91450900MADM3GLG5P"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("2.5.4.97 decoy accepted")
+	}
+}
+
+func TestInspectAuthenticodeCommandEmitsOnlyHashAndStructuredIdentity(t *testing.T) {
+	der := commandCertificate(t, false)
+	identity := certidentity.Identity{Country: "CN", Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P"}
+	var output bytes.Buffer
+	err := runInspectAuthenticode([]string{"--file", `C:\release path\signed.exe`}, &output, func(path string) (certidentity.Certificate, error) {
+		if path != `C:\release path\signed.exe` {
+			t.Fatalf("path = %q", path)
+		}
+		return certidentity.Certificate{DER: der, Identity: identity}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(der)
+	want := fmt.Sprintf(`{"status":"Valid","certificateDerSha256":"%x","identity":{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P"}}`+"\n", digest)
+	if output.String() != want {
+		t.Fatalf("output = %s, want %s", output.String(), want)
+	}
+	if bytes.Contains(output.Bytes(), []byte(base64.StdEncoding.EncodeToString(der))) || bytes.Contains(output.Bytes(), []byte(`C:\release path`)) {
+		t.Fatalf("output leaked DER or path: %s", output.Bytes())
 	}
 }
 
