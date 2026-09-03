@@ -343,6 +343,16 @@ describe('release workflow supply-chain contract', () => {
 	  expect(jobs['publish-candidate']?.environment).toBe('stable-publish');
 	});
 
+	it('binds every gh release operation without relying on workspace git metadata', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const publish=jobs['publish-candidate'];
+	  expect(publish?.env).toMatchObject({GH_REPO:'${{ github.repository }}'});
+	  const releaseCommands=jobSteps(publish).filter((step)=>step.run?.includes('gh release'));
+	  expect(releaseCommands.map((step)=>step.name)).toEqual([
+		'Create immutable-shaped stable draft','Read back exact stable draft','Publish stable as latest','Verify final published stable closure',
+	  ]);
+	});
+
 	it('binds candidate retrieval to the successful reviewed push run and exact artifact lifetime', () => {
 	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
 	  const steps=jobSteps(jobs['publish-candidate']);

@@ -656,6 +656,7 @@ jobs:
       id-token: write
       attestations: write
     env:
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.classify.outputs.tag }}
       RELEASE_VERSION: ${{ needs.classify.outputs.version }}
     steps:
