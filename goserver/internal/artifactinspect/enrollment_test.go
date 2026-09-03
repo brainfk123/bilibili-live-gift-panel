@@ -259,7 +259,7 @@ func enrollmentArtifactFixtureForVersion(t testing.TB, version string, exactHash
 	if err != nil {
 		t.Fatal(err)
 	}
-	bootstrap := signedEnrollmentPolicy(t, key, 1, "v"+version, "")
+	bootstrap := signedEnrollmentPolicy(t, key, 1, "v0.4.12", "")
 	ffmpeg := []byte("synthetic NaisNet FFmpeg enrollment fixture")
 	archive, manifest := testFFmpegArchive(t, ffmpeg)
 	commit := strings.Repeat("c", 40)

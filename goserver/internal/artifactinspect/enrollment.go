@@ -36,6 +36,7 @@ type VerifyEnrollmentOptions struct {
 type AuthorizationScope string
 
 const (
+	enrollmentBootstrapTag                                 = "v0.4.12"
 	AuthorizationScopeArtifactSHA256    AuthorizationScope = "artifact-sha256"
 	AuthorizationScopePublisherIdentity AuthorizationScope = "publisher-identity"
 )
@@ -124,7 +125,7 @@ func VerifyEnrollmentPolicies(options VerifyEnrollmentPoliciesOptions) (Enrollme
 	if err != nil || bootstrap.Epoch != options.ExpectedBootstrapPolicyEpoch {
 		return EnrollmentPolicyEvidence{}, errors.New("bootstrap policy signature or epoch is invalid")
 	}
-	identity := updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}
+	identity := updatepolicy.ArtifactIdentity{Tag: enrollmentBootstrapTag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}
 	if err := bootstrap.AuthorizeAt(identity, options.Now); err != nil {
 		return EnrollmentPolicyEvidence{}, errors.New("bootstrap policy NaisNet stable authorization is invalid")
 	}
@@ -206,7 +207,7 @@ func VerifyEnrollmentArtifact(options VerifyEnrollmentOptions) (EnrollmentEviden
 	if err != nil || bootstrap.Epoch != options.ExpectedBootstrapPolicyEpoch {
 		return EnrollmentEvidence{}, errors.New("bootstrap policy signature or epoch is invalid")
 	}
-	bootstrapIdentity := updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}
+	bootstrapIdentity := updatepolicy.ArtifactIdentity{Tag: enrollmentBootstrapTag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}
 	if err := bootstrap.AuthorizeAt(bootstrapIdentity, options.Now); err != nil {
 		return EnrollmentEvidence{}, errors.New("bootstrap policy NaisNet stable authorization is invalid")
 	}

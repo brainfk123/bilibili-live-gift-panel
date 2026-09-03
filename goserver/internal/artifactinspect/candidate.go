@@ -106,7 +106,7 @@ func VerifyEnrollmentCandidate(options VerifyEnrollmentCandidateOptions) (Enroll
 	if err != nil || bootstrap.Epoch != options.ExpectedBootstrapPolicyEpoch {
 		return EnrollmentCandidateEvidence{}, errors.New("bootstrap policy signature or epoch is invalid")
 	}
-	if err := bootstrap.AuthorizeAt(updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}, options.Now); err != nil {
+	if err := bootstrap.AuthorizeAt(updatepolicy.ArtifactIdentity{Tag: enrollmentBootstrapTag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}, options.Now); err != nil {
 		return EnrollmentCandidateEvidence{}, errors.New("bootstrap policy NaisNet stable authorization is invalid")
 	}
 	archive, err := securefile.ReadBoundedRegular(options.FFmpegArchivePath, 40<<20, nil)
