@@ -1,9 +1,6 @@
 name: Stable Release lifecycle
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       operation:
@@ -11,7 +8,7 @@ on:
         required: true
         type: choice
         options:
-          - publish-candidate
+          - release
           - verify-existing
       tag:
         description: Exact canonical stable tag
@@ -34,6 +31,8 @@ jobs:
       mode: ${{ steps.classify.outputs.mode }}
       tag: ${{ steps.classify.outputs.tag }}
       version: ${{ steps.classify.outputs.version }}
+      commit: ${{ steps.classify.outputs.commit }}
+      tag-object: ${{ steps.classify.outputs.tag-object }}
     steps:
       - name: Classify verified stable lifecycle state
         id: classify
@@ -41,7 +40,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_OPERATION: ${{ inputs.operation || '' }}
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -51,6 +50,24 @@ jobs:
           if [[ "$RELEASE_TAG" == 'v0.4.11' ]]; then
             echo 'bridge workflow alone owns v0.4.11' >&2
             exit 1
+          fi
+          encoded_tag="$(node -p 'encodeURIComponent(process.argv[1])' "$RELEASE_TAG")"
+          ref_status="$(curl --silent --show-error --output tag-ref.json --write-out '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$encoded_tag")"
+          if [[ "$ref_status" != 200 ]]; then echo 'stable tag does not exist' >&2; exit 1; fi
+          raw_object="$(jq -er --arg ref "refs/tags/$RELEASE_TAG" 'select(.ref == $ref) | .object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' tag-ref.json)"
+          object_type="$(jq -er '.object.type | select(. == "commit" or . == "tag")' tag-ref.json)"
+          if [[ "$object_type" == tag ]]; then
+            tag_status="$(curl --silent --show-error --output tag-object.json --write-out '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/tags/$raw_object")"
+            if [[ "$tag_status" != 200 ]]; then echo 'annotated stable tag lookup failed' >&2; exit 1; fi
+            commit="$(jq -er '.object | select(.type == "commit") | .sha | select(type == "string" and test("^[0-9a-f]{40}$"))' tag-object.json)"
+          else
+            commit="$raw_object"
           fi
           version="${RELEASE_TAG#v}"
           IFS=. read -r major minor patch <<<"$version"
@@ -62,37 +79,34 @@ jobs:
               *) echo 'unsupported historical stable tag' >&2; exit 1 ;;
             esac
           fi
-          encoded_tag="$(node -p 'encodeURIComponent(process.argv[1])' "$RELEASE_TAG")"
-          status="$(curl --silent --show-error --output release.json --write-out '%{http_code}' \
-            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag")"
-          if [[ "$status" == 200 ]]; then
-            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and (.draft == false) and (.prerelease == false) and (.published_at | type == "string")' release.json >/dev/null
-            release_exists=true
-          elif [[ "$status" == 404 ]]; then
-            release_exists=false
-          else
-            echo 'GitHub Release lookup failed' >&2
-            exit 1
-          fi
-          if [[ "$release_exists" == true && "$enrollment" == true ]]; then
-            echo 'Existing enrollment stable Releases are immutable and require a separate audited recovery.' >&2
-            exit 1
-          fi
-          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
-            if [[ "$release_exists" == true ]]; then mode=historical-verify
-            elif [[ "$enrollment" == true ]]; then mode=prepare-candidate
-            else
-              echo 'Historical stable tags are verification-only and cannot be recreated.' >&2
-              exit 1
+          : > matching-releases.jsonl
+          for page in 1 2 3 4 5; do
+            status="$(curl --silent --show-error --output "releases-$page.json" --write-out '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page")"
+            if [[ "$status" != 200 ]]; then echo 'GitHub Release listing failed' >&2; exit 1; fi
+            count="$(jq -er 'select(type == "array" and length <= 100) | length' "releases-$page.json")"
+            jq -c --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag)' "releases-$page.json" >>matching-releases.jsonl
+            if (( count < 100 )); then break; fi
+            if (( page == 5 )); then echo 'GitHub Release listing exceeded its bound' >&2; exit 1; fi
+          done
+          matches="$(grep -c '^' matching-releases.jsonl || true)"
+          if (( matches > 1 )); then echo 'Duplicate stable Release tag state' >&2; exit 1; fi
+          release_exists=false
+          if (( matches == 1 )); then
+            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and (.draft | type == "boolean") and (.prerelease | type == "boolean")' matching-releases.jsonl >/dev/null
+            if [[ "$(jq -r '.draft' matching-releases.jsonl)" == false ]]; then
+              jq -e '(.prerelease == false) and (.published_at | type == "string")' matching-releases.jsonl >/dev/null
+              release_exists=true
             fi
-          elif [[ "$REQUESTED_OPERATION" == publish-candidate ]]; then
+          fi
+          if [[ "$REQUESTED_OPERATION" == release ]]; then
             if [[ "$enrollment" != true || "$release_exists" == true ]]; then
-              echo 'Publish requires an absent v0.4.12+ Release.' >&2
+              echo 'Release requires an absent v0.4.12+ published Release.' >&2
               exit 1
             fi
-            mode=publish-candidate
+            mode=release
           elif [[ "$REQUESTED_OPERATION" == verify-existing ]]; then
             if [[ "$enrollment" == true || "$release_exists" != true ]]; then
               echo 'Historical verification requires a verified existing pre-v0.4.12 Release.' >&2
@@ -103,7 +117,7 @@ jobs:
             echo 'unsupported stable operation' >&2
             exit 1
           fi
-          printf 'mode=%s\ntag=%s\nversion=%s\n' "$mode" "$RELEASE_TAG" "$version" >>"$GITHUB_OUTPUT"
+          printf 'mode=%s\ntag=%s\nversion=%s\ncommit=%s\ntag-object=%s\n' "$mode" "$RELEASE_TAG" "$version" "$commit" "$raw_object" >>"$GITHUB_OUTPUT"
 
   historical-verify:
     needs: classify
@@ -239,7 +253,7 @@ jobs:
 
   prepare-candidate:
     needs: classify
-    if: needs.classify.outputs.mode == 'prepare-candidate'
+    if: needs.classify.outputs.mode == 'release'
     runs-on: windows-latest
     permissions:
       contents: read
@@ -287,8 +301,8 @@ jobs:
         working-directory: source
         shell: pwsh
         env:
-          STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
-          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
+          STABLE_REVIEWED_COMMIT_SHA: ${{ needs.classify.outputs.commit }}
+          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ needs.classify.outputs.tag-object }}
           STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
@@ -428,7 +442,7 @@ jobs:
         shell: pwsh
         env:
           APP_VERSION: ${{ needs.classify.outputs.tag }}
-          APP_COMMIT: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
+          APP_COMMIT: ${{ needs.classify.outputs.commit }}
           APP_UPDATE_API_URL: ${{ vars.UPDATE_API_BASE_URL }}
           APP_UPDATE_PUBLISHER: NaisNet Technology Co., Ltd.
           APP_UPDATE_TRUST_REQUIRED: '1'
@@ -490,8 +504,8 @@ jobs:
           foreach($relative in $source){ $left=Join-Path $sourceRoot $relative; $right=Join-Path $readbackRoot $relative; if((Get-FileHash $left -Algorithm SHA256).Hash -cne (Get-FileHash $right -Algorithm SHA256).Hash -or (Get-Item $left).Length -ne (Get-Item $right).Length){ throw 'Unsigned handoff bytes changed during Actions artifact upload/readback.' } }
 
   sign-candidate:
-    needs: prepare-candidate
-    if: needs.prepare-candidate.result == 'success'
+    needs: [classify, prepare-candidate]
+    if: needs.classify.outputs.mode == 'release' && needs.prepare-candidate.result == 'success'
     runs-on: windows-latest
     environment: stable-sign
     permissions:
@@ -502,6 +516,8 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
       artifact-name: ${{ steps.candidate.outputs.artifact-name }}
+      inspector-sha256: ${{ steps.candidate.outputs.inspector-sha256 }}
+      verifier-sha256: ${{ steps.candidate.outputs.verifier-sha256 }}
     steps:
       - name: Download exact unsigned stable handoff
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -513,7 +529,7 @@ jobs:
         env:
           EXPECTED_UNSIGNED_SHA256: ${{ needs.prepare-candidate.outputs.unsigned-sha256 }}
           EXPECTED_UNSIGNED_SIZE: ${{ needs.prepare-candidate.outputs.unsigned-size }}
-          STABLE_REVIEWED_COMMIT_SHA: ${{ vars.STABLE_REVIEWED_COMMIT_SHA }}
+          STABLE_REVIEWED_COMMIT_SHA: ${{ needs.classify.outputs.commit }}
         run: |
           if($env:EXPECTED_UNSIGNED_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:EXPECTED_UNSIGNED_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_REVIEWED_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$'){throw 'Unsigned stable handoff binding is malformed.'}
           $root=(Resolve-Path handoff).Path
@@ -566,9 +582,11 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'Reviewed stable inspector build failed.'}
           Copy-Item -LiteralPath signing-tools-source/scripts/sign-evsign.mjs -Destination "$tools/sign-evsign.mjs"
           Copy-Item -LiteralPath signing-tools-source/scripts/verify-enrollment-build.mjs -Destination "$tools/verify-enrollment-build.mjs"
+          Copy-Item -LiteralPath signing-tools-source/scripts/publisher-change-request.mjs -Destination "$tools/publisher-change-request.mjs"
           "AUTHENTICODE_INSPECTOR_PATH=$tools/artifact-inspector.exe"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "EVSIGN_SCRIPT_PATH=$tools/sign-evsign.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "ENROLLMENT_VERIFIER_PATH=$tools/verify-enrollment-build.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PUBLISHER_CHANGE_REQUEST_PATH=$tools/publisher-change-request.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Resolve protected stable signer
         shell: pwsh
         env:
@@ -588,6 +606,36 @@ jobs:
         run: |
           node $env:EVSIGN_SCRIPT_PATH --profile stable "$env:STABLE_HANDOFF_ROOT/${{ needs.prepare-candidate.outputs.unsigned-sha256 }}.exe" "$env:RUNNER_TEMP/stable-signed.exe"
           if($LASTEXITCODE -ne 0){throw 'Stable candidate signing failed.'}
+      - name: Inspect actual stable publisher
+        id: publisher
+        shell: pwsh
+        env:
+          STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
+        run: |
+          $inspectionPath=Join-Path $env:RUNNER_TEMP 'stable-publisher-inspection.json'
+          & $env:AUTHENTICODE_INSPECTOR_PATH inspect-authenticode --file "$env:RUNNER_TEMP/stable-signed.exe"|Set-Content -NoNewline -Encoding utf8 $inspectionPath
+          if($LASTEXITCODE -ne 0){throw 'Signed stable publisher inspection failed.'}
+          $inspection=Get-Content -LiteralPath $inspectionPath -Raw|ConvertFrom-Json
+          $artifactHash=(Get-FileHash -LiteralPath "$env:RUNNER_TEMP/stable-signed.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($inspection.status -cne 'Valid' -or $inspection.certificateDerSha256 -cnotmatch '^[0-9a-f]{64}$' -or $artifactHash -cnotmatch '^[0-9a-f]{64}$'){throw 'Signed stable publisher evidence is invalid.'}
+          if($inspection.identity.country -ceq 'CN' -and $inspection.identity.organization -ceq 'NaisNet Technology Co., Ltd.' -and $inspection.identity.organizationId -ceq '91210103MA7CJ3C094'){
+            'unexpected=false'|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            exit 0
+          }
+          $requestName="publisher-change-request-$env:RELEASE_TAG-$artifactHash"
+          $requestPath=Join-Path $env:RUNNER_TEMP "$requestName.json"
+          node $env:PUBLISHER_CHANGE_REQUEST_PATH write --output $requestPath --tag $env:RELEASE_TAG --artifact-sha256 $artifactHash --certificate-der-sha256 $inspection.certificateDerSha256 --country $inspection.identity.country --organization $inspection.identity.organization --organization-id $inspection.identity.organizationId --current-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --run-id '${{ github.run_id }}' --run-attempt '${{ github.run_attempt }}'
+          if($LASTEXITCODE -ne 0){throw 'Publisher change request generation failed.'}
+          "unexpected=true`nrequest-name=$requestName`nrequest-path=$requestPath"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          throw 'Stable publisher identity requires explicit authorization.'
+      - name: Upload unexpected publisher change request
+        if: failure() && steps.publisher.outputs.request-name != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.publisher.outputs.request-name }}
+          path: ${{ steps.publisher.outputs.request-path }}
+          if-no-files-found: error
+          retention-days: 30
       - name: Seal and close signed stable candidate
         id: candidate
         shell: pwsh
@@ -616,12 +664,16 @@ jobs:
           Copy-Item -LiteralPath $env:AUTHENTICODE_INSPECTOR_PATH -Destination "$candidate/tools/artifact-inspector.exe"
           Copy-Item -LiteralPath $env:ENROLLMENT_VERIFIER_PATH -Destination "$candidate/tools/verify-enrollment-build.mjs"
           foreach($name in @('artifact-inspector.exe','verify-enrollment-build.mjs')){$hash=(Get-FileHash -Algorithm SHA256 -LiteralPath "$candidate/tools/$name").Hash.ToLowerInvariant();"$hash  $name"|Set-Content -NoNewline -Encoding ascii "$candidate/tools/$name.sha256"}
+          $inspectorHash=(Get-FileHash -Algorithm SHA256 -LiteralPath "$candidate/tools/artifact-inspector.exe").Hash.ToLowerInvariant()
+          $verifierHash=(Get-FileHash -Algorithm SHA256 -LiteralPath "$candidate/tools/verify-enrollment-build.mjs").Hash.ToLowerInvariant()
           $allowed=@("sealed/$($inspection.signedFileSha256).exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
           $root=(Resolve-Path $candidate).Path;$actual=@(Get-ChildItem $root -File -Recurse|ForEach-Object{$_.FullName.Substring($root.Length+1).Replace('\','/')}|Sort-Object)
           if(Compare-Object $allowed $actual){throw 'Signed stable candidate closure is invalid.'}
           "sha256=$($inspection.signedFileSha256)"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "size=$($inspection.signedFileSize)"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "artifact-name=stable-candidate-$env:RELEASE_TAG-$($inspection.signedFileSha256)"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "inspector-sha256=$inspectorHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "verifier-sha256=$verifierHash"|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Upload exact signed stable candidate
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -646,8 +698,8 @@ jobs:
           foreach($relative in $files){if((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $left $relative)).Hash -cne (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $right $relative)).Hash){throw 'Signed stable candidate readback bytes changed.'}}
 
   publish-candidate:
-    needs: classify
-    if: needs.classify.outputs.mode == 'publish-candidate'
+    needs: [classify, prepare-candidate, sign-candidate]
+    if: needs.classify.outputs.mode == 'release' && needs.sign-candidate.result == 'success'
     runs-on: windows-latest
     environment: stable-publish
     permissions:
@@ -659,49 +711,27 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.classify.outputs.tag }}
       RELEASE_VERSION: ${{ needs.classify.outputs.version }}
+      STABLE_CANDIDATE_RUN_ID: ${{ github.run_id }}
+      STABLE_CANDIDATE_RUN_ATTEMPT: ${{ github.run_attempt }}
+      STABLE_CANDIDATE_ARTIFACT_ID: ${{ needs.sign-candidate.outputs.artifact-id }}
+      STABLE_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.sign-candidate.outputs.artifact-digest }}
+      STABLE_CANDIDATE_ARTIFACT_NAME: ${{ needs.sign-candidate.outputs.artifact-name }}
+      STABLE_CANDIDATE_SHA256: ${{ needs.sign-candidate.outputs.candidate-sha256 }}
+      STABLE_CANDIDATE_SIZE: ${{ needs.sign-candidate.outputs.candidate-size }}
+      STABLE_CANDIDATE_COMMIT_SHA: ${{ needs.classify.outputs.commit }}
     steps:
-      - name: Validate reviewed publish inputs
+      - name: Validate same-run public publish metadata
         shell: pwsh
         env:
-          STABLE_CANDIDATE_RUN_ID: ${{ vars.STABLE_CANDIDATE_RUN_ID }}
-          STABLE_CANDIDATE_WORKFLOW_ID: ${{ vars.STABLE_CANDIDATE_WORKFLOW_ID }}
-          STABLE_CANDIDATE_RUN_ATTEMPT: ${{ vars.STABLE_CANDIDATE_RUN_ATTEMPT }}
-          STABLE_CANDIDATE_ARTIFACT_ID: ${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}
-          STABLE_CANDIDATE_ARTIFACT_DIGEST: ${{ vars.STABLE_CANDIDATE_ARTIFACT_DIGEST }}
-          STABLE_CANDIDATE_ARTIFACT_CREATED_AT: ${{ vars.STABLE_CANDIDATE_ARTIFACT_CREATED_AT }}
-          STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT: ${{ vars.STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT }}
-          STABLE_CANDIDATE_SHA256: ${{ vars.STABLE_CANDIDATE_SHA256 }}
-          STABLE_CANDIDATE_SIZE: ${{ vars.STABLE_CANDIDATE_SIZE }}
-          STABLE_CANDIDATE_TAG: ${{ vars.STABLE_CANDIDATE_TAG }}
-          STABLE_CANDIDATE_COMMIT_SHA: ${{ vars.STABLE_CANDIDATE_COMMIT_SHA }}
-          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
-          STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ vars.STABLE_CANDIDATE_INSPECTOR_SHA256 }}
-          STABLE_CANDIDATE_VERIFIER_SHA256: ${{ vars.STABLE_CANDIDATE_VERIFIER_SHA256 }}
+          STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ needs.sign-candidate.outputs.inspector-sha256 }}
+          STABLE_CANDIDATE_VERIFIER_SHA256: ${{ needs.sign-candidate.outputs.verifier-sha256 }}
+          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ needs.classify.outputs.tag-object }}
           STABLE_PUBLISH_VERIFIER_COMMIT_SHA: ${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}
           STABLE_PUBLISH_VERIFIER_SHA256: ${{ vars.STABLE_PUBLISH_VERIFIER_SHA256 }}
-          STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
-          STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
-          STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
-          STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
-          STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
-          STABLE_AUTHORIZATION_POLICY_B64: ${{ vars.STABLE_AUTHORIZATION_POLICY_B64 }}
-          STABLE_AUTHORIZATION_POLICY_SHA256: ${{ vars.STABLE_AUTHORIZATION_POLICY_SHA256 }}
-          STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
-          STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
           RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
           STABLE_CHANGELOG_HISTORY_SHA256: ${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}
         run: |
-          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_PUBLISH_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Reviewed candidate publication input is missing or malformed.' }
-          "STABLE_CANDIDATE_RUN_ID=$env:STABLE_CANDIDATE_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_WORKFLOW_ID=$env:STABLE_CANDIDATE_WORKFLOW_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_RUN_ATTEMPT=$env:STABLE_CANDIDATE_RUN_ATTEMPT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_ARTIFACT_ID=$env:STABLE_CANDIDATE_ARTIFACT_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_ARTIFACT_DIGEST=$env:STABLE_CANDIDATE_ARTIFACT_DIGEST" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_ARTIFACT_CREATED_AT=$env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT=$env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_SHA256=$env:STABLE_CANDIDATE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_SIZE=$env:STABLE_CANDIDATE_SIZE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "STABLE_CANDIDATE_COMMIT_SHA=$env:STABLE_CANDIDATE_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_NAME -cne "stable-candidate-$env:RELEASE_TAG-$env:STABLE_CANDIDATE_SHA256" -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_PUBLISH_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Same-run candidate publication metadata is missing or malformed.' }
           "STABLE_PUBLISH_VERIFIER_COMMIT_SHA=$env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_PUBLISH_VERIFIER_SHA256=$env:STABLE_PUBLISH_VERIFIER_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TOOLING_COMMIT_SHA=$env:RELEASE_TOOLING_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -715,40 +745,44 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts/verify-enrollment-build.mjs
+            scripts/stable-release-transaction.mjs
+            publisher/rotation-root-spki.der
+            updateapi
           sparse-checkout-cone-mode: false
       - name: Validate reviewed stable publish verifier
         shell: pwsh
         run: |
           $source=Get-Item -LiteralPath publish-verifier-source -Force
           $verifier=Get-Item -LiteralPath publish-verifier-source/scripts/verify-enrollment-build.mjs -Force
-          if (-not $source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $verifier.PSIsContainer -or ($verifier.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $verifier.Length -le 0 -or $verifier.Length -gt 262144) { throw 'Reviewed stable publish verifier path is invalid.' }
+          $transaction=Get-Item -LiteralPath publish-verifier-source/scripts/stable-release-transaction.mjs -Force
+          $spki=Get-Item -LiteralPath publish-verifier-source/publisher/rotation-root-spki.der -Force
+          if (-not $source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $verifier.PSIsContainer -or ($verifier.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $verifier.Length -le 0 -or $verifier.Length -gt 262144 -or $transaction.PSIsContainer -or ($transaction.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $transaction.Length -le 0 -or $transaction.Length -gt 262144 -or $spki.PSIsContainer -or ($spki.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $spki.Length -le 0 -or $spki.Length -gt 4096) { throw 'Reviewed stable publish verifier path is invalid.' }
           $commit=(git -C publish-verifier-source rev-parse HEAD).Trim().ToLowerInvariant()
           if ($LASTEXITCODE -ne 0 -or $commit -cne $env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA -or (Get-FileHash -LiteralPath $verifier.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_PUBLISH_VERIFIER_SHA256) { throw 'Reviewed stable publish verifier binding mismatch.' }
           "STABLE_PUBLISH_VERIFIER_PATH=$($verifier.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_RELEASE_TRANSACTION_PATH=$($transaction.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PUBLISHER_ROTATION_SPKI_PATH=$($spki.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Set up publish verifier runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Verify exact candidate run and artifact provenance
+      - name: Set up publisher policy verifier runtime
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: publish-verifier-source/updateapi/go.mod
+          cache-dependency-path: publish-verifier-source/updateapi/go.sum
+      - name: Verify exact same-run candidate artifact provenance
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
-          $run=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:STABLE_CANDIDATE_RUN_ID" -Headers $headers
-          if([string]$run.id -cne $env:STABLE_CANDIDATE_RUN_ID -or [string]$run.repository.full_name -cne $env:GITHUB_REPOSITORY -or [string]$run.head_repository.full_name -cne $env:GITHUB_REPOSITORY -or [string]$run.path -cne '.github/workflows/release.yml' -or [string]$run.workflow_id -cne $env:STABLE_CANDIDATE_WORKFLOW_ID -or [string]$run.event -cne 'push' -or [string]$run.status -cne 'completed' -or [string]$run.conclusion -cne 'success' -or [string]$run.head_sha -cne $env:STABLE_CANDIDATE_COMMIT_SHA -or [string]$run.head_branch -cne $env:RELEASE_TAG -or [string]$run.run_attempt -cne $env:STABLE_CANDIDATE_RUN_ATTEMPT -or @($run.pull_requests).Count -ne 0){throw 'Reviewed candidate workflow run provenance mismatch.'}
           $artifact=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$env:STABLE_CANDIDATE_ARTIFACT_ID" -Headers $headers
-          $expectedName="stable-candidate-$env:RELEASE_TAG-$env:STABLE_CANDIDATE_SHA256"
-          try{$created=[DateTimeOffset]$artifact.created_at;$expires=[DateTimeOffset]$artifact.expires_at}catch{throw 'Reviewed Actions candidate artifact timestamps are invalid.'}
-          $createdRFC3339=$created.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ');$expiresRFC3339=$expires.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
-          if ([string]$artifact.id -cne $env:STABLE_CANDIDATE_ARTIFACT_ID -or [string]$artifact.workflow_run.id -cne $env:STABLE_CANDIDATE_RUN_ID -or [string]$artifact.name -cne $expectedName -or $artifact.expired -ne $false -or [string]$artifact.digest -cne "sha256:$env:STABLE_CANDIDATE_ARTIFACT_DIGEST" -or $createdRFC3339 -cne $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -or $expiresRFC3339 -cne $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT) { throw 'Reviewed Actions candidate artifact metadata mismatch.' }
-          if([DateTimeOffset]::UtcNow -ge $expires){throw 'Reviewed Actions candidate artifact is expired.'}
+          if ([string]$artifact.id -cne $env:STABLE_CANDIDATE_ARTIFACT_ID -or [string]$artifact.workflow_run.id -cne '${{ github.run_id }}' -or [string]$artifact.name -cne $env:STABLE_CANDIDATE_ARTIFACT_NAME -or $artifact.expired -ne $false -or [string]$artifact.digest -cne "sha256:$env:STABLE_CANDIDATE_ARTIFACT_DIGEST") { throw 'Same-run Actions candidate artifact metadata mismatch.' }
       - name: Download exact reviewed stable candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          artifact-ids: ${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}
-          run-id: ${{ vars.STABLE_CANDIDATE_RUN_ID }}
-          github-token: ${{ github.token }}
+          artifact-ids: ${{ needs.sign-candidate.outputs.artifact-id }}
           path: candidate
           merge-multiple: true
       - name: Validate extracted candidate tree
@@ -770,18 +804,49 @@ jobs:
           foreach($directory in $allowedDirectories){if(-not $seenDirectories.ContainsKey($directory)){throw 'missing candidate directory'}}
           $allowedFiles=@("sealed/$env:STABLE_CANDIDATE_SHA256.exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
           if(Compare-Object $allowedFiles @($files|Sort-Object)){throw 'unexpected candidate file'}
+      - name: Load reusable publisher authorization policy
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
+          STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
+        run: |
+          if($env:STABLE_AUTHORIZATION_POLICY_EPOCH -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_TRUST_ROOT_SPKI_SHA256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Publisher authorization policy selector is invalid.'}
+          [int64]$epoch=$env:STABLE_AUTHORIZATION_POLICY_EPOCH
+          if($epoch -lt 3){throw 'Publisher authorization policy epoch is stale.'}
+          $tag='publisher-policy-epoch-{0:D8}' -f $epoch
+          $download=Join-Path $env:RUNNER_TEMP 'publisher-policy-download'
+          New-Item -ItemType Directory -Path $download -ErrorAction Stop|Out-Null
+          foreach($name in @('gift-panel-publisher-policy.json','gift-panel-publisher-policy.audit.json','gift-panel-publisher-policy.commit.json')){
+            gh release download $tag --dir $download --pattern $name
+            if($LASTEXITCODE -ne 0){throw 'Publisher authorization policy download failed.'}
+          }
+          $spkiHash=(Get-FileHash -LiteralPath $env:PUBLISHER_ROTATION_SPKI_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($spkiHash -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256){throw 'Publisher authorization root binding failed.'}
+          $cli=Join-Path $env:RUNNER_TEMP 'trustpolicy.exe'
+          go -C publish-verifier-source/updateapi build -trimpath -o $cli ./cmd/trustpolicy
+          if($LASTEXITCODE -ne 0){throw 'Publisher authorization verifier build failed.'}
+          $parent=Join-Path $env:RUNNER_TEMP 'publisher-policy-private'
+          & $cli import-bundle --policy-source "$download/gift-panel-publisher-policy.json" --audit-source "$download/gift-panel-publisher-policy.audit.json" --commit-source "$download/gift-panel-publisher-policy.commit.json" --bundle-parent $parent
+          if($LASTEXITCODE -ne 0){throw 'Publisher authorization bundle import failed.'}
+          $previous=$epoch-1
+          & $cli verify-bundle --policy "$parent/bundle/policy.json" --audit "$parent/bundle/audit.json" --reviewed-spki $env:PUBLISHER_ROTATION_SPKI_PATH --expected-spki-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --expected-previous-epoch $previous|Set-Content -NoNewline -Encoding utf8 "$parent/verification.json"
+          if($LASTEXITCODE -ne 0){throw 'Publisher authorization bundle verification failed.'}
+          $verification=Get-Content -LiteralPath "$parent/verification.json" -Raw|ConvertFrom-Json
+          if([int64]$verification.verification.epoch -ne $epoch -or [int64]$verification.verification.expectedPreviousEpoch -ne $previous -or $verification.verification.spkiSha256 -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256){throw 'Publisher authorization verification evidence mismatch.'}
+          $policyHash=(Get-FileHash -LiteralPath "$parent/bundle/policy.json" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "STABLE_AUTHORIZATION_POLICY_PATH=$parent/bundle/policy.json"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_AUTHORIZATION_POLICY_SHA256=$policyHash"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Revalidate reviewed stable candidate
         shell: pwsh
         env:
-          STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ vars.STABLE_CANDIDATE_INSPECTOR_SHA256 }}
-          STABLE_CANDIDATE_VERIFIER_SHA256: ${{ vars.STABLE_CANDIDATE_VERIFIER_SHA256 }}
+          STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ needs.sign-candidate.outputs.inspector-sha256 }}
+          STABLE_CANDIDATE_VERIFIER_SHA256: ${{ needs.sign-candidate.outputs.verifier-sha256 }}
           STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
           STABLE_BOOTSTRAP_POLICY_SHA256: ${{ vars.STABLE_BOOTSTRAP_POLICY_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_EPOCH: ${{ vars.STABLE_BOOTSTRAP_POLICY_EPOCH }}
-          STABLE_AUTHORIZATION_POLICY_B64: ${{ vars.STABLE_AUTHORIZATION_POLICY_B64 }}
-          STABLE_AUTHORIZATION_POLICY_SHA256: ${{ vars.STABLE_AUTHORIZATION_POLICY_SHA256 }}
           STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
           STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
@@ -797,11 +862,11 @@ jobs:
           $allowed=@("sealed/$env:STABLE_CANDIDATE_SHA256.exe",'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256')|Sort-Object
           $actual=@(Get-ChildItem $candidateRoot -File -Recurse|ForEach-Object{$_.FullName.Substring($candidateRoot.Length+1).Replace('\','/')}|Sort-Object)
           if(Compare-Object $allowed $actual){throw 'Downloaded artifact contains an unexpected candidate file.'}
-          try { $root=[Convert]::FromBase64String($env:STABLE_TRUST_ROOT_SPKI_B64); $bootstrap=[Convert]::FromBase64String($env:STABLE_BOOTSTRAP_POLICY_B64); $authorization=[Convert]::FromBase64String($env:STABLE_AUTHORIZATION_POLICY_B64) } catch { throw 'Publish trust Base64 is invalid.' }
+          try { $root=[Convert]::FromBase64String($env:STABLE_TRUST_ROOT_SPKI_B64); $bootstrap=[Convert]::FromBase64String($env:STABLE_BOOTSTRAP_POLICY_B64) } catch { throw 'Publish trust Base64 is invalid.' }
           $trust="$env:RUNNER_TEMP/publish-trust"; New-Item -ItemType Directory -Path $trust -ErrorAction Stop | Out-Null
-          [IO.File]::WriteAllBytes("$trust/root.der",$root); [IO.File]::WriteAllBytes("$trust/bootstrap.json",$bootstrap); [IO.File]::WriteAllBytes("$trust/authorization.json",$authorization)
-          if ((Get-FileHash "$trust/root.der" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or (Get-FileHash "$trust/bootstrap.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or (Get-FileHash "$trust/authorization.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_AUTHORIZATION_POLICY_SHA256) { throw 'Publish trust digest mismatch.' }
-          node $verifier --inspector $inspector --artifact $candidate --artifact-inspection candidate/stable-artifact-inspection.json --artifact-sidecar candidate/gift-panel-windows-x64.exe.sha256 --standalone-ffmpeg candidate/ffmpeg-windows-x64.exe --ffmpeg-sidecar candidate/ffmpeg-windows-x64.exe.sha256 --ffmpeg-archive candidate/ffmpeg.zip --ffmpeg-manifest candidate/manifest.json --ffmpeg-manifest-sha256 $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 --root-spki "$trust/root.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$trust/bootstrap.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --authorization-policy "$trust/authorization.json" --authorization-policy-sha256 $env:STABLE_AUTHORIZATION_POLICY_SHA256 --authorization-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:STABLE_CANDIDATE_COMMIT_SHA --output candidate/stable-release-evidence.json
+          [IO.File]::WriteAllBytes("$trust/root.der",$root); [IO.File]::WriteAllBytes("$trust/bootstrap.json",$bootstrap)
+          if ((Get-FileHash "$trust/root.der" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256 -or (Get-FileHash "$trust/bootstrap.json" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_BOOTSTRAP_POLICY_SHA256 -or (Get-FileHash $env:STABLE_AUTHORIZATION_POLICY_PATH -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_AUTHORIZATION_POLICY_SHA256) { throw 'Publish trust digest mismatch.' }
+          node $verifier --inspector $inspector --artifact $candidate --artifact-inspection candidate/stable-artifact-inspection.json --artifact-sidecar candidate/gift-panel-windows-x64.exe.sha256 --standalone-ffmpeg candidate/ffmpeg-windows-x64.exe --ffmpeg-sidecar candidate/ffmpeg-windows-x64.exe.sha256 --ffmpeg-archive candidate/ffmpeg.zip --ffmpeg-manifest candidate/manifest.json --ffmpeg-manifest-sha256 $env:STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 --root-spki "$trust/root.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$trust/bootstrap.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --authorization-policy $env:STABLE_AUTHORIZATION_POLICY_PATH --authorization-policy-sha256 $env:STABLE_AUTHORIZATION_POLICY_SHA256 --authorization-policy-epoch $env:STABLE_AUTHORIZATION_POLICY_EPOCH --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:STABLE_CANDIDATE_COMMIT_SHA --output candidate/stable-release-evidence.json
           if ($LASTEXITCODE -ne 0) { throw 'Final candidate authorization verification failed.' }
           $releaseEvidence=Get-Content candidate/stable-release-evidence.json -Raw|ConvertFrom-Json
           if($null -ne $releaseEvidence.changelog){throw 'Final evidence changelog field already exists.'}
@@ -810,13 +875,29 @@ jobs:
           $releaseEvidence=Get-Content candidate/stable-release-evidence.json -Raw|ConvertFrom-Json
           if($releaseEvidence.changelog.sha256 -cne $candidateChangelogHash -or $releaseEvidence.changelog.historySha256 -cne $env:STABLE_CHANGELOG_HISTORY_SHA256 -or $releaseEvidence.changelog.toolingCommit -cne $env:RELEASE_TOOLING_COMMIT_SHA){throw 'Final evidence changelog binding failed.'}
           "PUBLISH_INSPECTOR=$inspector" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Create expected-name stable asset
+      - name: Prepare closed stable Release assets
         shell: pwsh
         run: |
           & $env:PUBLISH_INSPECTOR link-sealed-executable --directory candidate/sealed --sha256 $env:STABLE_CANDIDATE_SHA256 --expected-name gift-panel-windows-x64.exe | Set-Content -NoNewline -Encoding utf8 candidate/expected-name-link.json
           if ($LASTEXITCODE -ne 0) { throw 'Expected-name stable hard link failed.' }
           $link=Get-Content candidate/expected-name-link.json -Raw | ConvertFrom-Json
           if ($link.name -cne 'gift-panel-windows-x64.exe' -or $link.sha256 -cne $env:STABLE_CANDIDATE_SHA256 -or (Get-FileHash candidate/sealed/gift-panel-windows-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_SHA256) { throw 'Expected-name stable hard link evidence mismatch.' }
+          $assetRoot=Join-Path $env:RUNNER_TEMP 'stable-release-assets'
+          New-Item -ItemType Directory -Path $assetRoot -ErrorAction Stop|Out-Null
+          $required=@('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','stable-release-evidence.json','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256')
+          $assets=@()
+          foreach($name in $required){
+            $source=if($name -ceq 'gift-panel-windows-x64.exe'){'candidate/sealed/gift-panel-windows-x64.exe'}else{"candidate/$name"}
+            Copy-Item -LiteralPath $source -Destination "$assetRoot/$name" -ErrorAction Stop
+            $item=Get-Item -LiteralPath "$assetRoot/$name" -Force
+            if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0 -or $item.Length -gt 134217728){throw 'Stable Release asset is invalid.'}
+            $assets+=[ordered]@{name=$name;size=[int64]$item.Length;sha256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
+          }
+          $descriptor=[ordered]@{schemaVersion=1;assets=$assets}|ConvertTo-Json -Depth 5 -Compress
+          $descriptorPath=Join-Path $env:RUNNER_TEMP 'stable-release-assets.json'
+          Set-Content -LiteralPath $descriptorPath -Value $descriptor -NoNewline -Encoding utf8
+          "STABLE_RELEASE_ASSET_ROOT=$assetRoot"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_RELEASE_ASSET_DESCRIPTOR=$descriptorPath"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Attest reviewed stable assets
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -824,11 +905,11 @@ jobs:
             candidate/sealed/gift-panel-windows-x64.exe
             candidate/ffmpeg-windows-x64.exe
             candidate/stable-release-evidence.json
-      - name: Recheck reviewed tag before stable draft
+      - name: Recheck reviewed tag before stable transaction
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
+          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ needs.classify.outputs.tag-object }}
         run: |
           $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
           $encoded=[Uri]::EscapeDataString($env:RELEASE_TAG)
@@ -839,74 +920,12 @@ jobs:
             if([string]$tagObject.object.type -cne 'commit' -or [string]$tagObject.object.sha -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable peeled tag commit changed.'}
           } elseif([string]$ref.object.type -cne 'commit' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable lightweight tag binding changed.'}
 
-      - name: Create immutable-shaped stable draft
+      - name: Run resumable stable Release transaction
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:RELEASE_TAG --draft --verify-tag --title $env:RELEASE_TAG --latest=false
-          if ($LASTEXITCODE -ne 0) { throw 'Stable draft creation failed.' }
-          gh release upload $env:RELEASE_TAG candidate/sealed/gift-panel-windows-x64.exe candidate/gift-panel-windows-x64.exe.sha256 candidate/gift-panel-update.json candidate/gift-panel-changelog.json candidate/stable-release-evidence.json candidate/ffmpeg-9.0.tar.xz candidate/ffmpeg-9.0.tar.xz.asc candidate/ffmpeg-build-config.txt candidate/ffmpeg-component-gate.txt candidate/toolchain-lock.json candidate/NOTICE.md candidate/COPYING.LGPLv2.1 candidate/ffmpeg-windows-x64.exe candidate/ffmpeg-windows-x64.exe.sha256
-          if ($LASTEXITCODE -ne 0) { throw 'Stable draft upload failed.' }
-      - name: Read back exact stable draft
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
-          $tag=[Uri]::EscapeDataString($env:RELEASE_TAG); $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers
-          $required=@('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','stable-release-evidence.json','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256')
-          $names=@($release.assets|ForEach-Object{[string]$_.name}); if(-not $release.draft -or $names.Count -ne $required.Count){throw 'Stable draft closure mismatch.'}
-          New-Item -ItemType Directory -Path draft-readback -ErrorAction Stop|Out-Null
-          foreach($name in $required){if(@($names|Where-Object{$_ -ceq $name}).Count -ne 1){throw 'Stable draft name mismatch.'};gh release download $env:RELEASE_TAG --dir draft-readback --pattern $name;if($LASTEXITCODE -ne 0){throw 'Stable draft readback failed.'};$source=if($name -ceq 'gift-panel-windows-x64.exe'){'candidate/sealed/gift-panel-windows-x64.exe'}else{"candidate/$name"};$hash=(Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant();$asset=@($release.assets|Where-Object{$_.name -ceq $name})[0];if((Get-FileHash "draft-readback/$name" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash -or [string]$asset.digest -cne "sha256:$hash"){throw 'Stable draft bytes or API asset name mismatch.'}}
-      - name: Recheck reviewed tag before stable publication
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
-        run: |
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'}
-          $encoded=[Uri]::EscapeDataString($env:RELEASE_TAG)
-          $ref=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$encoded" -Headers $headers
-          if([string]$ref.object.sha -cne $env:STABLE_REVIEWED_TAG_OBJECT_SHA){throw 'Reviewed stable raw tag object changed.'}
-          if([string]$ref.object.type -ceq 'tag'){
-            $tagObject=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/tags/$env:STABLE_REVIEWED_TAG_OBJECT_SHA" -Headers $headers
-            if([string]$tagObject.object.type -cne 'commit' -or [string]$tagObject.object.sha -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable peeled tag commit changed.'}
-          } elseif([string]$ref.object.type -cne 'commit' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cne $env:STABLE_CANDIDATE_COMMIT_SHA){throw 'Reviewed stable lightweight tag binding changed.'}
-
-      - name: Publish stable as latest
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release edit $env:RELEASE_TAG --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Stable publication failed.' }
-      - name: Verify final published stable closure
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $headers=@{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'};$tag=[Uri]::EscapeDataString($env:RELEASE_TAG)
-          $release=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers
-          if($release.draft -or $release.prerelease -or -not $release.published_at){throw 'Published stable state is invalid.'}
-          $required=@('gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','stable-release-evidence.json','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256')
-          $names=@($release.assets|ForEach-Object{[string]$_.name})
-          if($names.Count -ne $required.Count){throw 'The exact published asset closure changed after draft readback.'}
-          New-Item -ItemType Directory -Path published-readback -ErrorAction Stop|Out-Null
-          foreach($name in $required){
-            if(@($names|Where-Object{$_ -ceq $name}).Count -ne 1){throw 'The exact published asset closure changed after draft readback.'}
-            gh release download $env:RELEASE_TAG --dir published-readback --pattern $name
-            if($LASTEXITCODE -ne 0){throw 'The exact published asset closure changed after draft readback.'}
-            $source=if($name -ceq 'gift-panel-windows-x64.exe'){'candidate/sealed/gift-panel-windows-x64.exe'}else{"candidate/$name"}
-            $hash=(Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant();$size=(Get-Item $source).Length;$asset=@($release.assets|Where-Object{$_.name -ceq $name})[0]
-            if((Get-FileHash "published-readback/$name" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash -or (Get-Item "published-readback/$name").Length -ne $size -or [string]$asset.digest -cne "sha256:$hash" -or [int64]$asset.size -ne $size){throw 'The exact published asset closure changed after draft readback.'}
-          }
-          $latest=Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
-          if($latest.id -ne $release.id -or $latest.tag_name -cne $env:RELEASE_TAG -or $latest.draft -or $latest.prerelease -or -not $latest.published_at){throw 'Published stable is not exact latest.'}
-          $latestNames=@($latest.assets|ForEach-Object{[string]$_.name})
-          if($latestNames.Count -ne $required.Count){throw 'The latest asset closure changed after published readback.'}
-          foreach($name in $required){
-            if(@($latestNames|Where-Object{$_ -ceq $name}).Count -ne 1){throw 'The latest asset closure changed after published readback.'}
-            $releaseAsset=@($release.assets|Where-Object{$_.name -ceq $name})[0];$latestAsset=@($latest.assets|Where-Object{$_.name -ceq $name})[0]
-            if([string]$latestAsset.id -cne [string]$releaseAsset.id -or [string]$latestAsset.digest -cne [string]$releaseAsset.digest -or [int64]$latestAsset.size -ne [int64]$releaseAsset.size){throw 'The latest asset closure changed after published readback.'}
-          }
+          node $env:STABLE_RELEASE_TRANSACTION_PATH run --repository $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG --target-commit $env:STABLE_CANDIDATE_COMMIT_SHA --title $env:RELEASE_TAG --asset-directory $env:STABLE_RELEASE_ASSET_ROOT --assets $env:STABLE_RELEASE_ASSET_DESCRIPTOR|Set-Content -NoNewline -Encoding utf8 "$env:RUNNER_TEMP/stable-release-result.json"
+          if($LASTEXITCODE -ne 0){throw 'Stable Release transaction failed.'}
+          $result=Get-Content -LiteralPath "$env:RUNNER_TEMP/stable-release-result.json" -Raw|ConvertFrom-Json
+          if($result.schemaVersion -ne 1 -or $result.releaseId -notmatch '^[1-9][0-9]*$' -or $result.tag -cne $env:RELEASE_TAG -or @($result.verifiedAssets).Count -ne 14){throw 'Stable Release transaction evidence is invalid.'}

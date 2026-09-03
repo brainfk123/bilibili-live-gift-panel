@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, realpath } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
@@ -146,6 +147,9 @@ export async function runStableReleaseTransaction(input) {
 
 async function readBounded(response, maximum) {
   if (!response.body) failed();
+  const contentEncoding = (response.headers.get('content-encoding') ?? '').trim().toLowerCase();
+  const compressed = ['gzip', 'deflate', 'br'].includes(contentEncoding);
+  if (contentEncoding !== '' && contentEncoding !== 'identity' && !compressed) failed();
   const declared = response.headers.get('content-length');
   if (declared !== null && (!/^(?:0|[1-9][0-9]*)$/.test(declared) || Number(declared) > maximum)) failed();
   const chunks = [];
@@ -158,7 +162,7 @@ async function readBounded(response, maximum) {
     if (size > maximum) { await reader.cancel(); failed(); }
     chunks.push(Buffer.from(value));
   }
-  if (declared !== null && Number(declared) !== size) failed();
+  if (!compressed && declared !== null && Number(declared) !== size) failed();
   return Buffer.concat(chunks, size);
 }
 
@@ -212,4 +216,38 @@ export function createGitHubStableReleaseAdapter(environment, fetchImpl = fetch)
       return readBounded(response, maximumBytes);
     },
   };
+}
+
+function cliArgument(arguments_, name) {
+  const positions = arguments_.flatMap((value, index) => value === name ? [index] : []);
+  if (positions.length !== 1 || positions[0] + 1 >= arguments_.length || arguments_[positions[0] + 1].startsWith('--')) invalid();
+  return arguments_[positions[0] + 1];
+}
+
+async function main() {
+  const arguments_ = process.argv.slice(2);
+  if (arguments_.length !== 13 || arguments_[0] !== 'run') invalid();
+  const descriptorPath = cliArgument(arguments_, '--assets');
+  let descriptor;
+  try {
+    descriptor = JSON.parse(await readFile(resolve(descriptorPath), 'utf8'));
+  } catch { invalid(); }
+  if (!descriptor || Object.getPrototypeOf(descriptor) !== Object.prototype || Object.keys(descriptor).sort().join(',') !== 'assets,schemaVersion' || descriptor.schemaVersion !== 1) invalid();
+  const result = await runStableReleaseTransaction({
+    github: createGitHubStableReleaseAdapter(process.env),
+    repository: cliArgument(arguments_, '--repository'),
+    tag: cliArgument(arguments_, '--tag'),
+    targetCommit: cliArgument(arguments_, '--target-commit'),
+    title: cliArgument(arguments_, '--title'),
+    assetDirectory: cliArgument(arguments_, '--asset-directory'),
+    requiredAssets: descriptor.assets,
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(() => {
+    console.error('stable release transaction failed');
+    process.exitCode = 1;
+  });
 }

@@ -1,4 +1,6 @@
 import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const CANONICAL_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -54,4 +56,30 @@ export async function writePublisherChangeRequest(path, input) {
   } catch {
     throw new Error('publisher change request could not be created');
   }
+}
+
+function argument(name) {
+  const positions = process.argv.flatMap((value, index) => value === name ? [index] : []);
+  if (positions.length !== 1 || positions[0] + 1 >= process.argv.length || process.argv[positions[0] + 1].startsWith('--')) invalid();
+  return process.argv[positions[0] + 1];
+}
+
+async function main() {
+  if (process.argv.length !== 23 || process.argv[2] !== 'write') invalid();
+  await writePublisherChangeRequest(resolve(argument('--output')), {
+    tag: argument('--tag'),
+    artifactSha256: argument('--artifact-sha256'),
+    certificateDerSha256: argument('--certificate-der-sha256'),
+    identity: { country: argument('--country'), organization: argument('--organization'), organizationId: argument('--organization-id') },
+    currentPolicyEpoch: Number(argument('--current-policy-epoch')),
+    runId: argument('--run-id'),
+    runAttempt: Number(argument('--run-attempt')),
+  });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(() => {
+    console.error('publisher change request could not be created');
+    process.exitCode = 1;
+  });
 }

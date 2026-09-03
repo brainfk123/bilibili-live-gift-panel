@@ -7,10 +7,11 @@ update pointers.
 
 ## New stable Releases
 
-The stable lifecycle is deliberately split across three fresh capabilities. A
-push of a new canonical `v0.4.12` or later tag may enter **unprivileged
-candidate build only**. Its raw tag
-object and peeled commit must match protected reviewed values. Before build or
+The stable lifecycle is split across three fresh capabilities inside one manual
+workflow run. Dispatch `.github/workflows/release.yml` with `operation=release`
+and one existing canonical `v0.4.12` or later tag. The classifier resolves the
+raw tag object and peeled commit from GitHub, rejects an existing published
+Release, and passes those public bindings to the remaining jobs. Before build or
 signing, preparation requires:
 
 - canonical production P-256 root SPKI bytes and SHA-256;
@@ -33,30 +34,33 @@ file to be byte-identical. Separate `stable-publish` receives no signer
 credential. No target-controlled `PATH`, `GITHUB_ENV`, tool, checkout, or
 process survives from build into signing.
 
-Task 9 then signs a strictly higher authorization policy for that already
-sealed candidate SHA-256. A separate manual **candidate publication** approval
-must provide the exact protected preparation run ID, artifact ID/digest,
-candidate SHA-256/size/tag/commit, raw tag object, tool hashes, root/bootstrap
-inputs, reviewed changelog-history/tooling provenance, and final authorization
-policy. Publication downloads that artifact;
-it never rebuilds, reruns EVSign/RFC3161, executes target code, or receives
-signer credentials. Any mismatch fails before a draft exists.
+The protected signing job inspects the actual leaf certificate after EVSign
+returns the signed file. The active NaisNet identity continues automatically.
+An unknown legal identity creates a bounded `publisher-change-request-*`
+artifact and stops before a publishable candidate is exposed; it requires a
+separately reviewed higher publisher-policy epoch.
+
+The publisher downloads the exact signed artifact from the same workflow run.
+Artifact ID, artifact digest, candidate SHA-256/size, tool hashes, tag, and
+commit are job outputs rather than manually copied `STABLE_CANDIDATE_*`
+variables. Publication never rebuilds, reruns EVSign/RFC3161, executes target
+code, or receives signer credentials.
 
 The publication token has only `actions: read` plus the Release and attestation
-writes it needs. Before cross-run download, the exact successful push run must
-match repository/head repository, reviewed workflow ID/path, tag, commit, run
-attempt, completed/success state, and non-fork provenance. Artifact
-ID/name/digest/creation/expiry must bind to that run and the reviewed inputs.
+writes it needs. The artifact metadata must bind to the current GitHub run ID,
+exact artifact name, and digest, and must not be expired.
 
-Publication revalidates the candidate and final-hash policy, then uses the
+Publication downloads the exact three assets for the configured reusable
+publisher-policy epoch, imports them into a private bundle, and verifies the
+root signature and epoch transition against the committed rotation SPKI. It
+then revalidates the candidate and the applicable exact-hash or
+publisher-identity authorization, and uses the
 retained Go helper to create `gift-panel-windows-x64.exe` as a same-file hard
 link to the content-addressed sealed EXE. The expected basename is uploaded
-directly, without GitHub CLI label rewriting. The workflow reads back the exact
-draft names/digests/bytes, rechecks the tag, publishes `latest=true`, and
-confirms `/releases/latest`.
-After publication it queries the Release again, requires the exact asset
-names/digests/sizes, downloads and byte-verifies every asset again, and only
-then accepts the matching `/releases/latest` result.
+directly, without GitHub CLI label rewriting. A bounded numeric-ID transaction
+creates or resumes one exact draft, uploads only missing assets, never deletes
+or replaces an asset, publishes `latest=true`, and verifies the numeric-ID,
+tag, Latest, asset metadata, and downloaded bytes.
 
 The public root key ID is never operator supplied. Evidence derives it
 canonically as `sha256:<reviewed-spki-sha256>`. The publisher-policy audit uses
@@ -102,8 +106,11 @@ and updated together before candidate preparation or publication.
 
 ## Action-time approvals
 
-The approvals are separate and ordered: (1) exact version/changelog/tag and
-candidate preparation, (2) Task 9 policy rotation binding that immutable
-candidate hash, and (3) manual publication of the reviewed candidate artifact.
-COS mirroring or stable-pointer advancement remains another action after real
-Windows acceptance. No such external action is performed by this task.
+For an ordinary release under the active primary identity and its finite tag
+window, the `operation=release` dispatch is the publication confirmation. The
+stable-sign and stable-publish environments retain their configured protection
+rules, but no per-release candidate metadata or policy bytes are copied by the
+operator. A newly observed legal identity still stops and requires explicit
+review, a higher root-signed policy epoch, immutable publication, and discovery
+advancement before the release can be retried. COS mirroring remains separate
+from this workflow.
