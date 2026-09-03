@@ -1,9 +1,11 @@
 # Streamlined Stable Release and Event-Driven Publisher Rotation Design
 
 **Date:** 2026-09-03  
-**Status:** Proposed for owner review; implementation requires a separate reviewed plan  
+**Status:** Owner-approved; implementation requires the reviewed plan linked below
 **Supersedes:** only the per-artifact policy approval requirement for stable versions after v0.4.12  
 **Does not replace:** the embedded rotation root, monotonic policy epochs, exact RushRush bridge scope, or structured Authenticode identity checks
+
+**Implementation plan:** [`docs/superpowers/plans/2026-09-03-streamlined-stable-release.md`](../plans/2026-09-03-streamlined-stable-release.md)
 
 ## Goal
 
@@ -104,8 +106,8 @@ The transition order is:
 2. extend the domestic update API's exact stable User-Agent allowlist through `0.4.13` so the new client can continue checking for updates;
 3. update the enrollment inspector so versions after v0.4.12 accept either an exact-hash stable rule or a hashless same-identity stable rule for the exact tag;
 4. keep the v0.4.12 inspector path exact-hash-only;
-5. build and Authenticode-sign the v0.4.13 candidate;
-6. sign and publish epoch 3 with the finite NaisNet tag window and no manifest hash;
+5. sign and publish epoch 3 with the finite NaisNet tag window and no manifest hash; this grants only the already-reviewed NaisNet identity, so an unexpected EVSign identity still cannot pass;
+6. build and Authenticode-sign the v0.4.13 candidate, then require its observed identity to match the epoch-3 NaisNet rule;
 7. verify that the v0.4.12 updater accepts epoch 3 and the signed v0.4.13 artifact;
 8. publish v0.4.13 as GitHub Latest and allow the existing stable mirror to advance COS;
 9. observe v0.4.13 for seven days before adapting or activating the v0.4.11 bridge.
