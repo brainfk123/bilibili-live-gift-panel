@@ -128,6 +128,29 @@ describe('verify enrollment build', () => {
     expect(evidence.artifact.sha256).toBe(value.artifactHash);
   });
 
+  it('records a future primary identity only when the signed policy inspector authorizes it', async () => {
+    const value = fixture();
+    const future = { country: 'CN', organization: 'FutureCo Technology Co., Ltd.', organizationId: '91110000EXAMPLE01' };
+    value.options.version = '0.4.33';
+    value.options.tag = 'v0.4.33';
+    value.artifactInspection.version = '0.4.33';
+    value.artifactInspection.outerIdentity = future;
+    writeFileSync(value.options.artifactInspectionPath, JSON.stringify(value.artifactInspection));
+    value.goEvidence.version = '0.4.33';
+    value.goEvidence.tag = 'v0.4.33';
+    value.goEvidence.authorizedTag = 'v0.4.33';
+    value.goEvidence.authorizationScope = 'publisher-identity';
+    value.goEvidence.authorizedArtifactSha256 = '';
+    value.goEvidence.authorizedIdentity = future;
+    value.goEvidence.outerIdentity = future;
+
+    const evidence = await verifyEnrollmentBuild(value.options);
+
+    expect(evidence.artifact.identity).toEqual(future);
+    expect(evidence.authorizationPolicy.identity).toEqual(future);
+    expect(evidence.ffmpeg.identity).toEqual(naisNet);
+  });
+
   it.each([
     ['changed seal evidence', (value: ReturnType<typeof fixture>) => { value.artifactInspection.signedFileSha256 = '0'.repeat(64); writeFileSync(value.options.artifactInspectionPath, JSON.stringify(value.artifactInspection)); }],
     ['changed EXE sidecar', (value: ReturnType<typeof fixture>) => { writeFileSync(value.options.artifactSidecarPath, `${'0'.repeat(64)}  gift-panel-windows-x64.exe`); }],

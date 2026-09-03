@@ -19,6 +19,7 @@ type VerifyEnrollmentCandidateOptions struct {
 	ExpectedBootstrapPolicySHA256         string
 	ExpectedBootstrapPolicyEpoch          uint64
 	FFmpegArchivePath, FFmpegManifestPath string
+	ExpectedPrimaryIdentity               certidentity.Identity
 	Now                                   time.Time
 	InspectAuthenticode                   func(string) (certidentity.Identity, error)
 }
@@ -50,6 +51,10 @@ type EnrollmentCandidateEvidence struct {
 func VerifyEnrollmentCandidate(options VerifyEnrollmentCandidateOptions) (EnrollmentCandidateEvidence, error) {
 	if !isEnrollmentVersion(options.Version) || options.Tag != "v"+options.Version || !isLowerHex(options.Commit, 40) || !isLowerHex(options.ExpectedPEContentSHA256, 64) || !isLowerHex(options.ExpectedRootSHA256, 64) || !isLowerHex(options.ExpectedBootstrapPolicySHA256, 64) || options.ExpectedBootstrapPolicyEpoch == 0 {
 		return EnrollmentCandidateEvidence{}, errors.New("enrollment candidate arguments are invalid")
+	}
+	expectedPrimary, err := reviewedPrimaryIdentity(options.Version, options.ExpectedPrimaryIdentity)
+	if err != nil {
+		return EnrollmentCandidateEvidence{}, errors.New("enrollment candidate primary identity is invalid")
 	}
 	artifactSnapshot, err := securefile.SnapshotRegular(options.ArtifactPath, 128<<20, "gift-panel-enrollment-candidate-", "candidate.exe")
 	if err != nil {
@@ -87,7 +92,7 @@ func VerifyEnrollmentCandidate(options VerifyEnrollmentCandidateOptions) (Enroll
 		inspect = InspectAuthenticodeFile
 	}
 	outerIdentity, err := inspect(artifactSnapshot.Path)
-	if err != nil || outerIdentity != naisNetIdentity {
+	if err != nil || outerIdentity != expectedPrimary {
 		return EnrollmentCandidateEvidence{}, errors.New("sealed enrollment candidate identity is invalid")
 	}
 	if err := artifactSnapshot.Revalidate(); err != nil {
@@ -101,7 +106,7 @@ func VerifyEnrollmentCandidate(options VerifyEnrollmentCandidateOptions) (Enroll
 	if err != nil || bootstrap.Epoch != options.ExpectedBootstrapPolicyEpoch {
 		return EnrollmentCandidateEvidence{}, errors.New("bootstrap policy signature or epoch is invalid")
 	}
-	if err := bootstrap.AuthorizeAt(updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: outerIdentity}, options.Now); err != nil {
+	if err := bootstrap.AuthorizeAt(updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}, options.Now); err != nil {
 		return EnrollmentCandidateEvidence{}, errors.New("bootstrap policy NaisNet stable authorization is invalid")
 	}
 	archive, err := securefile.ReadBoundedRegular(options.FFmpegArchivePath, 40<<20, nil)

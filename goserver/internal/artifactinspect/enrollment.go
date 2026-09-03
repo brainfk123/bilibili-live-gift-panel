@@ -192,7 +192,7 @@ func VerifyEnrollmentArtifact(options VerifyEnrollmentOptions) (EnrollmentEviden
 		inspect = InspectAuthenticodeFile
 	}
 	outerIdentity, err := inspect(artifactSnapshot.Path)
-	if err != nil || outerIdentity != naisNetIdentity {
+	if err != nil || (options.Version == "0.4.12" && outerIdentity != naisNetIdentity) {
 		return EnrollmentEvidence{}, errors.New("sealed enrollment Authenticode identity is invalid")
 	}
 	if err := artifactSnapshot.Revalidate(); err != nil {
@@ -206,7 +206,7 @@ func VerifyEnrollmentArtifact(options VerifyEnrollmentOptions) (EnrollmentEviden
 	if err != nil || bootstrap.Epoch != options.ExpectedBootstrapPolicyEpoch {
 		return EnrollmentEvidence{}, errors.New("bootstrap policy signature or epoch is invalid")
 	}
-	bootstrapIdentity := updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: outerIdentity}
+	bootstrapIdentity := updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, Certificate: naisNetIdentity}
 	if err := bootstrap.AuthorizeAt(bootstrapIdentity, options.Now); err != nil {
 		return EnrollmentEvidence{}, errors.New("bootstrap policy NaisNet stable authorization is invalid")
 	}
@@ -281,6 +281,23 @@ func authorizationScopeForStableVersion(version string) (AuthorizationScope, err
 	return AuthorizationScopePublisherIdentity, nil
 }
 
+func reviewedPrimaryIdentity(version string, expected certidentity.Identity) (certidentity.Identity, error) {
+	if !isEnrollmentVersion(version) {
+		return certidentity.Identity{}, errors.New("stable version is invalid")
+	}
+	if version == "0.4.12" {
+		if expected != (certidentity.Identity{}) && expected != naisNetIdentity {
+			return certidentity.Identity{}, errors.New("v0.4.12 primary identity is fixed")
+		}
+		return naisNetIdentity, nil
+	}
+	if expected.Country != "CN" || expected.Organization == "" || expected.Organization != strings.TrimSpace(expected.Organization) ||
+		expected.OrganizationID == "" || expected.OrganizationID != strings.ToUpper(strings.TrimSpace(expected.OrganizationID)) {
+		return certidentity.Identity{}, errors.New("reviewed primary identity is invalid")
+	}
+	return expected, nil
+}
+
 func authorizeStablePolicy(policy updatepolicy.Verified, tag, artifactSHA256 string, identity certidentity.Identity, minimum AuthorizationScope, now time.Time) (AuthorizationScope, string, error) {
 	matchCount := 0
 	matchedScope := AuthorizationScope("")
@@ -302,7 +319,9 @@ func authorizeStablePolicy(policy updatepolicy.Verified, tag, artifactSHA256 str
 			Tag: tag, Channel: updatepolicy.ChannelStable, SHA256: candidateHash,
 			Certificate: identity, RequireManifestSHA256: requireHash,
 		}
-		if policy.AuthorizeAt(candidate, now) != nil {
+		singleRulePolicy := policy
+		singleRulePolicy.Rules = []updatepolicy.PublisherRule{rule}
+		if singleRulePolicy.AuthorizeAt(candidate, now) != nil {
 			continue
 		}
 		matchCount++

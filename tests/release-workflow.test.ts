@@ -341,12 +341,21 @@ describe('release workflow supply-chain contract', () => {
 	  const steps=jobSteps(jobs['sign-candidate']);
 	  const inspect=steps[stepIndex(steps,'Inspect actual stable publisher')];
 	  const upload=steps[stepIndex(steps,'Upload unexpected publisher change request')];
+	  const active=steps[stepIndex(steps,'Load active stable publisher identity')];
+	  const resolve=steps[stepIndex(steps,'Resolve protected stable signer')];
+	  const seal=steps[stepIndex(steps,'Seal and close signed stable candidate')];
+	  expect(stepIndex(steps,'Load active stable publisher identity')).toBeLessThan(stepIndex(steps,'Resolve protected stable signer'));
+	  expect(active?.run).toContain('verify-bundle');
+	  expect(active?.run).toContain('ACTIVE_PRIMARY_ORGANIZATION');
+	  expect(resolve?.run).toContain('active signed policy');
 	  expect(stepIndex(steps,'Inspect actual stable publisher')).toBeLessThan(stepIndex(steps,'Seal and close signed stable candidate'));
 	  expect(inspect?.run).toContain('inspect-authenticode');
+	  expect(inspect?.run).toContain('ACTIVE_PRIMARY_ORGANIZATION_ID');
 	  expect(inspect?.run).toContain('PUBLISHER_CHANGE_REQUEST_PATH');
 	  expect(inspect?.run).toContain('publisher-change-request-$env:RELEASE_TAG-$artifactHash');
 	  expect(upload?.if).toContain('failure()');
 	  expect(upload?.with?.name).toBe('${{ steps.publisher.outputs.request-name }}');
+	  expect(seal?.run).toContain('--primary-organization $env:ACTIVE_PRIMARY_ORGANIZATION');
 	});
 	it('builds the reviewed inspector before sealing the downloaded FFmpeg closure', () => {
 	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;

@@ -40,7 +40,7 @@ export async function verifyEnrollmentBuild(options) {
     'ffmpegVersion', 'ffmpegSha256', 'ffmpegSize', 'ffmpegIdentity',
   ]);
   if (Object.keys(artifactInspection).some((key) => !allowedArtifactInspection.has(key))) fail();
-  if (artifactInspection.version !== options.version || artifactInspection.tag !== '' || artifactInspection.commit !== options.commit || artifactInspection.signedFileSha256 !== artifactSHA256 || artifactInspection.signedFileSize !== artifact.length || !lowerHex(artifactInspection.peContentSha256, 64) || artifactInspection.rootSpkiSha256 !== '' || artifactInspection.bootstrapPolicySha256 !== '' || artifactInspection.bootstrapPolicyEpoch !== 0 || artifactInspection.authorizationPolicySha256 !== '' || artifactInspection.authorizationPolicyEpoch !== 0 || !exactIdentity(artifactInspection.outerIdentity, naisNetIdentity) || artifactInspection.ffmpegVersion !== '9.0' || artifactInspection.ffmpegSha256 !== standaloneFFmpegSHA256 || artifactInspection.ffmpegSize !== standaloneFFmpeg.length || !exactIdentity(artifactInspection.ffmpegIdentity, naisNetIdentity)) fail();
+  if (artifactInspection.version !== options.version || artifactInspection.tag !== '' || artifactInspection.commit !== options.commit || artifactInspection.signedFileSha256 !== artifactSHA256 || artifactInspection.signedFileSize !== artifact.length || !lowerHex(artifactInspection.peContentSha256, 64) || artifactInspection.rootSpkiSha256 !== '' || artifactInspection.bootstrapPolicySha256 !== '' || artifactInspection.bootstrapPolicyEpoch !== 0 || artifactInspection.authorizationPolicySha256 !== '' || artifactInspection.authorizationPolicyEpoch !== 0 || !validPrimaryIdentity(artifactInspection.outerIdentity, options.version) || artifactInspection.ffmpegVersion !== '9.0' || artifactInspection.ffmpegSha256 !== standaloneFFmpegSHA256 || artifactInspection.ffmpegSize !== standaloneFFmpeg.length || !exactIdentity(artifactInspection.ffmpegIdentity, naisNetIdentity)) fail();
 
   const inspectorArguments = [
     'verify-enrollment', '--artifact', options.artifactPath, '--pe-content-sha256', artifactInspection.peContentSha256,
@@ -70,12 +70,13 @@ export async function verifyEnrollmentBuild(options) {
   const validAuthorizationScope = authorizationScope === 'artifact-sha256'
     ? inspection.authorizedArtifactSha256 === artifactSHA256
     : authorizationScope === 'publisher-identity' && inspection.authorizedArtifactSha256 === '' && options.version !== '0.4.12';
+  const authorizedPrimary = exactIdentity(inspection.authorizedIdentity, artifactInspection.outerIdentity) && exactIdentity(inspection.outerIdentity, artifactInspection.outerIdentity);
   if (inspection.schemaVersion !== 1 || inspection.version !== options.version || inspection.tag !== options.tag || inspection.commit !== options.commit ||
       inspection.signedFileSha256 !== artifactSHA256 || inspection.signedFileSize !== artifact.length || inspection.peContentSha256 !== artifactInspection.peContentSha256 ||
       inspection.rootSpkiSha256 !== rootSHA256 || inspection.bootstrapPolicySha256 !== bootstrapSHA256 || inspection.bootstrapPolicyEpoch !== options.bootstrapPolicyEpoch || inspection.bootstrapSignatureStatus !== 'Valid' ||
       inspection.authorizationPolicySha256 !== authorizationSHA256 || inspection.authorizationPolicyEpoch !== options.authorizationPolicyEpoch || inspection.authorizationSignatureStatus !== 'Valid' ||
-      !validAuthorizationScope || inspection.authorizedChannel !== 'stable' || inspection.authorizedTag !== options.tag || !exactIdentity(inspection.authorizedIdentity, naisNetIdentity) ||
-      !exactIdentity(inspection.outerIdentity, naisNetIdentity) || inspection.authenticodeStatus !== 'Valid' || inspection.ffmpegVersion !== '9.0' || inspection.ffmpegSha256 !== standaloneFFmpegSHA256 || inspection.ffmpegSize !== standaloneFFmpeg.length ||
+      !validAuthorizationScope || !authorizedPrimary || inspection.authorizedChannel !== 'stable' || inspection.authorizedTag !== options.tag ||
+      inspection.authenticodeStatus !== 'Valid' || inspection.ffmpegVersion !== '9.0' || inspection.ffmpegSha256 !== standaloneFFmpegSHA256 || inspection.ffmpegSize !== standaloneFFmpeg.length ||
 	  inspection.ffmpegArchiveSha256 !== sha256(ffmpegArchive) || inspection.ffmpegManifestSha256 !== ffmpegManifestSHA256 || !exactIdentity(inspection.ffmpegIdentity, naisNetIdentity) || inspection.ffmpegSignatureStatus !== 'Valid') fail();
 
   const evidence = {
@@ -83,10 +84,10 @@ export async function verifyEnrollmentBuild(options) {
     version: options.version,
     tag: options.tag,
     commit: options.commit,
-	artifact: { sha256: artifactSHA256, peContentSha256: inspection.peContentSha256, signatureStatus: 'Valid', identity: naisNetIdentity },
+	artifact: { sha256: artifactSHA256, peContentSha256: inspection.peContentSha256, signatureStatus: 'Valid', identity: inspection.outerIdentity },
 	root: { spkiSha256: rootSHA256, rootKeyId: `sha256:${rootSHA256}` },
     bootstrapPolicy: { sha256: bootstrapSHA256, epoch: options.bootstrapPolicyEpoch, signatureStatus: 'Valid' },
-	authorizationPolicy: { sha256: authorizationSHA256, epoch: options.authorizationPolicyEpoch, signatureStatus: 'Valid', scope: authorizationScope, tag: options.tag, artifactSha256: inspection.authorizedArtifactSha256, identity: naisNetIdentity },
+	authorizationPolicy: { sha256: authorizationSHA256, epoch: options.authorizationPolicyEpoch, signatureStatus: 'Valid', scope: authorizationScope, tag: options.tag, artifactSha256: inspection.authorizedArtifactSha256, identity: inspection.authorizedIdentity },
 	ffmpeg: { version: '9.0', sha256: standaloneFFmpegSHA256, archiveSha256: inspection.ffmpegArchiveSha256, manifestSha256: inspection.ffmpegManifestSha256, signatureStatus: 'Valid', identity: naisNetIdentity },
   };
   await writeEvidence(options.outputPath, evidence);
@@ -169,6 +170,14 @@ function parseObject(contents, _label) {
 
 function exactIdentity(actual, expected) {
   return actual && Object.getPrototypeOf(actual) === Object.prototype && Object.keys(actual).sort().join(',') === 'country,organization,organizationId' && actual.country === expected.country && actual.organization === expected.organization && actual.organizationId === expected.organizationId;
+}
+
+function validPrimaryIdentity(identity, version) {
+  if (version === '0.4.12') return exactIdentity(identity, naisNetIdentity);
+  return identity && Object.getPrototypeOf(identity) === Object.prototype && Object.keys(identity).sort().join(',') === 'country,organization,organizationId' &&
+    identity.country === 'CN' && typeof identity.organization === 'string' && identity.organization.length > 0 && identity.organization === identity.organization.trim() &&
+    Buffer.byteLength(identity.organization, 'utf8') <= 256 && !/\p{C}/u.test(identity.organization) &&
+    typeof identity.organizationId === 'string' && /^[0-9A-Z]{8,32}$/.test(identity.organizationId);
 }
 
 async function writeEvidence(path, evidence) {

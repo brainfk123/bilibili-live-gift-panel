@@ -51,10 +51,19 @@ export function resolveEVSignSignerProfile(profileName, environment = process.en
   if (!identity || typeof identity !== 'object' || Array.isArray(identity) || Object.keys(identity).length !== IDENTITY_KEYS.size || Object.keys(identity).some((key) => !IDENTITY_KEYS.has(key))) {
     throw new Error(`${profileName} EVSign publisher identity is invalid.`);
   }
-  if (Object.entries(profile.identity).some(([key, value]) => identity[key] !== value)) {
+  const identityMatchesProfile = profileName === 'stable'
+    ? validStableIdentity(identity)
+    : Object.entries(profile.identity).every(([key, value]) => identity[key] === value);
+  if (!identityMatchesProfile) {
     throw new Error(`${profileName} EVSign publisher identity is not the reviewed identity.`);
   }
-  return { schema: 2, profile: profileName, certificate, identity: { ...profile.identity } };
+  return { schema: 2, profile: profileName, certificate, identity: { ...identity } };
+}
+
+function validStableIdentity(identity) {
+  const rushRush = identity.country === 'CN' && identity.organization === 'RushRush Network Technology Ltd' && identity.organizationId === '91450900MADM3GLG5P';
+  return !rushRush && identity.country === 'CN' && validProfileString(identity.organization, 256) && !/\p{C}/u.test(identity.organization) &&
+    typeof identity.organizationId === 'string' && /^[0-9A-Z]{8,32}$/.test(identity.organizationId);
 }
 
 function validProfileString(value, maximumBytes) {

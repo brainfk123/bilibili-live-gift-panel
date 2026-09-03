@@ -102,6 +102,9 @@ func runVerifyEnrollmentCandidate(args []string, output io.Writer) error {
 	bootstrapEpoch := flags.String("bootstrap-policy-epoch", "", "bootstrap policy epoch")
 	flags.StringVar(&options.FFmpegArchivePath, "ffmpeg-archive", "", "sealed FFmpeg archive")
 	flags.StringVar(&options.FFmpegManifestPath, "ffmpeg-manifest", "", "sealed FFmpeg manifest")
+	flags.StringVar(&options.ExpectedPrimaryIdentity.Country, "primary-country", "", "reviewed primary country")
+	flags.StringVar(&options.ExpectedPrimaryIdentity.Organization, "primary-organization", "", "reviewed primary organization")
+	flags.StringVar(&options.ExpectedPrimaryIdentity.OrganizationID, "primary-organization-id", "", "reviewed primary organization ID")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return errors.New("enrollment candidate arguments are invalid")
 	}

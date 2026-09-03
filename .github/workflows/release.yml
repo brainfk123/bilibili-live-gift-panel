@@ -579,6 +579,8 @@ jobs:
           New-Item -ItemType Directory -Path $tools -ErrorAction Stop|Out-Null
           go -C signing-tools-source/goserver build -o "$tools/artifact-inspector.exe" ./cmd/artifact-inspector
           if($LASTEXITCODE -ne 0){throw 'Reviewed stable inspector build failed.'}
+          go -C signing-tools-source/updateapi build -trimpath -o "$tools/trustpolicy.exe" ./cmd/trustpolicy
+          if($LASTEXITCODE -ne 0){throw 'Reviewed publisher policy verifier build failed.'}
           Copy-Item -LiteralPath signing-tools-source/scripts/sign-evsign.mjs -Destination "$tools/sign-evsign.mjs"
           Copy-Item -LiteralPath signing-tools-source/scripts/verify-enrollment-build.mjs -Destination "$tools/verify-enrollment-build.mjs"
           Copy-Item -LiteralPath signing-tools-source/scripts/publisher-change-request.mjs -Destination "$tools/publisher-change-request.mjs"
@@ -586,6 +588,38 @@ jobs:
           "EVSIGN_SCRIPT_PATH=$tools/sign-evsign.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "ENROLLMENT_VERIFIER_PATH=$tools/verify-enrollment-build.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "PUBLISHER_CHANGE_REQUEST_PATH=$tools/publisher-change-request.mjs"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRUSTPOLICY_INSPECTOR_PATH=$tools/trustpolicy.exe"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Load active stable publisher identity
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
+          STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
+        run: |
+          if($env:STABLE_AUTHORIZATION_POLICY_EPOCH -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_TRUST_ROOT_SPKI_SHA256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Active publisher policy selector is invalid.'}
+          [int64]$epoch=$env:STABLE_AUTHORIZATION_POLICY_EPOCH;$previous=$epoch-1
+          $tag='publisher-policy-epoch-{0:D8}' -f $epoch
+          $download=Join-Path $env:RUNNER_TEMP 'active-publisher-policy-download'
+          New-Item -ItemType Directory -Path $download -ErrorAction Stop|Out-Null
+          foreach($name in @('gift-panel-publisher-policy.json','gift-panel-publisher-policy.audit.json','gift-panel-publisher-policy.commit.json')){
+            gh release download $tag --repo $env:GITHUB_REPOSITORY --dir $download --pattern $name
+            if($LASTEXITCODE -ne 0){throw 'Active publisher policy download failed.'}
+          }
+          $root="$env:STABLE_HANDOFF_ROOT/root-spki.der"
+          if((Get-FileHash -LiteralPath $root -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_TRUST_ROOT_SPKI_SHA256){throw 'Active publisher root binding failed.'}
+          $parent=Join-Path $env:RUNNER_TEMP 'active-publisher-policy-private'
+          & $env:TRUSTPOLICY_INSPECTOR_PATH import-bundle --policy-source "$download/gift-panel-publisher-policy.json" --audit-source "$download/gift-panel-publisher-policy.audit.json" --commit-source "$download/gift-panel-publisher-policy.commit.json" --bundle-parent $parent
+          if($LASTEXITCODE -ne 0){throw 'Active publisher policy import failed.'}
+          & $env:TRUSTPOLICY_INSPECTOR_PATH verify-bundle --policy "$parent/bundle/policy.json" --audit "$parent/bundle/audit.json" --reviewed-spki $root --expected-spki-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --expected-previous-epoch $previous|Set-Content -NoNewline -Encoding utf8 "$parent/verification.json"
+          if($LASTEXITCODE -ne 0){throw 'Active publisher policy verification failed.'}
+          $verification=Get-Content -LiteralPath "$parent/verification.json" -Raw|ConvertFrom-Json
+          if([int64]$verification.verification.epoch -ne $epoch -or [int64]$verification.verification.expectedPreviousEpoch -ne $previous){throw 'Active publisher policy evidence mismatch.'}
+          $policy=Get-Content -LiteralPath "$parent/bundle/policy.json" -Raw|ConvertFrom-Json
+          $primary=@($policy.signed.publishers|Where-Object{$_.role -ceq 'primary' -and $_.allowedChannel -ceq 'stable' -and @($_.allowedTags) -ccontains $env:RELEASE_TAG})
+          if($primary.Count -ne 1 -or $primary[0].id -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*-primary$' -or $primary[0].country -cne 'CN' -or [string]::IsNullOrWhiteSpace([string]$primary[0].organization) -or [string]$primary[0].organization -cne ([string]$primary[0].organization).Trim() -or [string]$primary[0].organizationId -cnotmatch '^[0-9A-Z]{8,32}$'){throw 'Active stable publisher identity is invalid.'}
+          "ACTIVE_PRIMARY_COUNTRY=$($primary[0].country)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACTIVE_PRIMARY_ORGANIZATION=$($primary[0].organization)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACTIVE_PRIMARY_ORGANIZATION_ID=$($primary[0].organizationId)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Resolve protected stable signer
         shell: pwsh
         env:
@@ -593,7 +627,7 @@ jobs:
           EVSIGN_PUBLISHER_IDENTITY: ${{ vars.EVSIGN_PUBLISHER_IDENTITY }}
         run: |
           $profile=node $env:EVSIGN_SCRIPT_PATH --resolve-profile stable|ConvertFrom-Json
-          if($LASTEXITCODE -ne 0 -or $profile.profile -cne 'stable' -or $profile.identity.country -cne 'CN' -or $profile.identity.organization -cne 'NaisNet Technology Co., Ltd.' -or $profile.identity.organizationId -cne '91210103MA7CJ3C094'){throw 'Stable signer profile is invalid.'}
+          if($LASTEXITCODE -ne 0 -or $profile.profile -cne 'stable' -or $profile.identity.country -cne $env:ACTIVE_PRIMARY_COUNTRY -or $profile.identity.organization -cne $env:ACTIVE_PRIMARY_ORGANIZATION -or $profile.identity.organizationId -cne $env:ACTIVE_PRIMARY_ORGANIZATION_ID){throw 'Stable signer profile does not match the active signed policy.'}
       - name: Sign stable executable on protected runner
         shell: pwsh
         env:
@@ -617,7 +651,7 @@ jobs:
           $inspection=Get-Content -LiteralPath $inspectionPath -Raw|ConvertFrom-Json
           $artifactHash=(Get-FileHash -LiteralPath "$env:RUNNER_TEMP/stable-signed.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
           if($inspection.status -cne 'Valid' -or $inspection.certificateDerSha256 -cnotmatch '^[0-9a-f]{64}$' -or $artifactHash -cnotmatch '^[0-9a-f]{64}$'){throw 'Signed stable publisher evidence is invalid.'}
-          if($inspection.identity.country -ceq 'CN' -and $inspection.identity.organization -ceq 'NaisNet Technology Co., Ltd.' -and $inspection.identity.organizationId -ceq '91210103MA7CJ3C094'){
+          if($inspection.identity.country -ceq $env:ACTIVE_PRIMARY_COUNTRY -and $inspection.identity.organization -ceq $env:ACTIVE_PRIMARY_ORGANIZATION -and $inspection.identity.organizationId -ceq $env:ACTIVE_PRIMARY_ORGANIZATION_ID){
             'unexpected=false'|Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
             exit 0
           }
@@ -645,11 +679,11 @@ jobs:
         run: |
           $candidate="$env:RUNNER_TEMP/stable-candidate"
           New-Item -ItemType Directory -Path "$candidate/sealed","$candidate/tools" -ErrorAction Stop|Out-Null
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned "$env:STABLE_HANDOFF_ROOT/${{ needs.prepare-candidate.outputs.unsigned-sha256 }}.exe" --signed "$env:RUNNER_TEMP/stable-signed.exe" --sealed-directory "$candidate/sealed" --version $env:RELEASE_VERSION --commit $env:RELEASE_COMMIT --country CN --organization 'NaisNet Technology Co., Ltd.' --organization-id 91210103MA7CJ3C094 --ffmpeg-archive "$env:STABLE_HANDOFF_ROOT/ffmpeg.zip" --ffmpeg-manifest "$env:STABLE_HANDOFF_ROOT/manifest.json"|Set-Content -NoNewline -Encoding utf8 "$candidate/stable-artifact-inspection.json"
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-static --unsigned "$env:STABLE_HANDOFF_ROOT/${{ needs.prepare-candidate.outputs.unsigned-sha256 }}.exe" --signed "$env:RUNNER_TEMP/stable-signed.exe" --sealed-directory "$candidate/sealed" --version $env:RELEASE_VERSION --commit $env:RELEASE_COMMIT --country $env:ACTIVE_PRIMARY_COUNTRY --organization $env:ACTIVE_PRIMARY_ORGANIZATION --organization-id $env:ACTIVE_PRIMARY_ORGANIZATION_ID --ffmpeg-archive "$env:STABLE_HANDOFF_ROOT/ffmpeg.zip" --ffmpeg-manifest "$env:STABLE_HANDOFF_ROOT/manifest.json"|Set-Content -NoNewline -Encoding utf8 "$candidate/stable-artifact-inspection.json"
           if($LASTEXITCODE -ne 0){throw 'Signed stable candidate seal failed.'}
           $inspection=Get-Content "$candidate/stable-artifact-inspection.json" -Raw|ConvertFrom-Json
           $sealed="$candidate/sealed/$($inspection.signedFileSha256).exe"
-          & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-candidate --artifact $sealed --pe-content-sha256 $inspection.peContentSha256 --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --root-spki "$env:STABLE_HANDOFF_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$env:STABLE_HANDOFF_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --ffmpeg-archive "$env:STABLE_HANDOFF_ROOT/ffmpeg.zip" --ffmpeg-manifest "$env:STABLE_HANDOFF_ROOT/manifest.json"|Set-Content -NoNewline -Encoding utf8 "$candidate/candidate-evidence.json"
+          & $env:AUTHENTICODE_INSPECTOR_PATH verify-enrollment-candidate --artifact $sealed --pe-content-sha256 $inspection.peContentSha256 --version $env:RELEASE_VERSION --tag $env:RELEASE_TAG --commit $env:RELEASE_COMMIT --root-spki "$env:STABLE_HANDOFF_ROOT/root-spki.der" --root-sha256 $env:STABLE_TRUST_ROOT_SPKI_SHA256 --bootstrap-policy "$env:STABLE_HANDOFF_ROOT/bootstrap-policy.json" --bootstrap-policy-sha256 $env:STABLE_BOOTSTRAP_POLICY_SHA256 --bootstrap-policy-epoch $env:STABLE_BOOTSTRAP_POLICY_EPOCH --primary-country $env:ACTIVE_PRIMARY_COUNTRY --primary-organization $env:ACTIVE_PRIMARY_ORGANIZATION --primary-organization-id $env:ACTIVE_PRIMARY_ORGANIZATION_ID --ffmpeg-archive "$env:STABLE_HANDOFF_ROOT/ffmpeg.zip" --ffmpeg-manifest "$env:STABLE_HANDOFF_ROOT/manifest.json"|Set-Content -NoNewline -Encoding utf8 "$candidate/candidate-evidence.json"
           if($LASTEXITCODE -ne 0){throw 'Stable candidate enrollment verification failed.'}
           $candidateEvidence=Get-Content "$candidate/candidate-evidence.json" -Raw|ConvertFrom-Json
           $candidateEvidence|Add-Member -NotePropertyName changelog -NotePropertyValue ([pscustomobject][ordered]@{sha256=$env:STABLE_CHANGELOG_SHA256;historySha256=$env:STABLE_CHANGELOG_HISTORY_SHA256;toolingCommit=$env:RELEASE_TOOLING_COMMIT_SHA})

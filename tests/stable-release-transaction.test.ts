@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { planStableDraft, runStableReleaseTransaction, type StableReleaseAsset, type StableReleaseGitHub } from '../scripts/stable-release-transaction.mjs';
+import { createGitHubStableReleaseAdapter, planStableDraft, runStableReleaseTransaction, type StableReleaseAsset, type StableReleaseGitHub } from '../scripts/stable-release-transaction.mjs';
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -59,6 +59,57 @@ describe('stable release draft planner', () => {
 });
 
 describe('stable release transaction', () => {
+  it('creates a zero-state draft once and continues only by its returned numeric ID', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'stable-release-create-'));
+    roots.push(root);
+    const assetDirectory = join(root, 'assets');
+    await mkdir(assetDirectory);
+    for (const [name, bytes] of bytesByName) await writeFile(join(assetDirectory, name), bytes);
+    let release = draft();
+    const stored = new Map<string, Buffer>();
+    const operations: string[] = [];
+    const github: StableReleaseGitHub = {
+      listReleases: async () => { operations.push('list'); return []; },
+      createDraft: async (input) => { operations.push(`create:${input.tag}`); return structuredClone(release); },
+      getReleaseById: async (id) => { if (id !== 77) throw new Error('wrong id'); operations.push(`get-id:${id}`); return structuredClone(release); },
+      uploadAssetById: async (id, name, bytes) => { if (id !== 77) throw new Error('wrong id'); operations.push(`upload:${id}:${name}`); stored.set(name, Buffer.from(bytes)); release.assets.push(asset(name, 300 + release.assets.length)); },
+      publishById: async (id) => { if (id !== 77) throw new Error('wrong id'); operations.push(`publish:${id}`); release = { ...release, draft: false, published_at: '2026-09-03T00:00:00Z' }; return structuredClone(release); },
+      getReleaseByTag: async () => structuredClone(release),
+      getLatest: async () => structuredClone(release),
+      downloadAsset: async (_id, name) => Buffer.from(stored.get(name)!),
+    };
+
+    const result = await runStableReleaseTransaction({ github, repository: 'brainfk123/bilibili-live-gift-panel', tag: 'v0.4.13', targetCommit: 'a'.repeat(40), title: 'v0.4.13', assetDirectory, requiredAssets });
+
+    expect(result.uploadedAssets).toEqual(requiredAssets.map((item) => item.name));
+    expect(operations).toEqual(['list', 'create:v0.4.13', 'get-id:77', ...requiredAssets.map((item) => `upload:77:${item.name}`), 'get-id:77', 'publish:77', 'get-id:77']);
+  });
+
+  it('resumes a complete draft idempotently without creating or uploading assets', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'stable-release-complete-'));
+    roots.push(root);
+    const assetDirectory = join(root, 'assets');
+    await mkdir(assetDirectory);
+    for (const [name, bytes] of bytesByName) await writeFile(join(assetDirectory, name), bytes);
+    let release = draft(requiredAssets.map((item, index) => asset(item.name, 200 + index)));
+    const operations: string[] = [];
+    const github: StableReleaseGitHub = {
+      listReleases: async () => { operations.push('list'); return [structuredClone(release)]; },
+      createDraft: async () => { throw new Error('unexpected create'); },
+      getReleaseById: async (id) => { if (id !== 77) throw new Error('wrong id'); operations.push(`get-id:${id}`); return structuredClone(release); },
+      uploadAssetById: async () => { throw new Error('unexpected upload'); },
+      publishById: async (id) => { if (id !== 77) throw new Error('wrong id'); operations.push(`publish:${id}`); release = { ...release, draft: false, published_at: '2026-09-03T00:00:00Z' }; return structuredClone(release); },
+      getReleaseByTag: async () => structuredClone(release),
+      getLatest: async () => structuredClone(release),
+      downloadAsset: async (_id, name) => Buffer.from(bytesByName.get(name)!),
+    };
+
+    const result = await runStableReleaseTransaction({ github, repository: 'brainfk123/bilibili-live-gift-panel', tag: 'v0.4.13', targetCommit: 'a'.repeat(40), title: 'v0.4.13', assetDirectory, requiredAssets });
+
+    expect(result.uploadedAssets).toEqual([]);
+    expect(operations).toEqual(['list', 'get-id:77', 'get-id:77', 'publish:77', 'get-id:77']);
+  });
+
   it('resumes by numeric ID, uploads only missing assets, publishes Latest, and rehashes downloads', async () => {
     const root = await mkdtemp(join(tmpdir(), 'stable-release-transaction-'));
     roots.push(root);
@@ -93,5 +144,54 @@ describe('stable release transaction', () => {
 
     expect(result).toEqual({ schemaVersion: 1, releaseId: 77, tag: 'v0.4.13', uploadedAssets: [requiredAssets[1]!.name], verifiedAssets: requiredAssets.map((item) => item.name) });
     expect(operations).toEqual(['list', 'get-id:77', `upload:77:${requiredAssets[1]!.name}`, 'get-id:77', 'publish:77', 'get-id:77', 'get-tag:v0.4.13', 'latest', ...requiredAssets.map((item) => `download:77:${item.name}`)]);
+  });
+});
+
+describe('stable release GitHub HTTP adapter', () => {
+  it('uses bounded reviewed API shapes and strips authorization from the release-asset redirect', async () => {
+    const expected = requiredAssets[0]!;
+    const release = { ...draft([asset(expected.name, 411)]), upload_url: 'https://uploads.github.com/repos/brainfk123/bilibili-live-gift-panel/releases/77/assets{?name,label}' };
+    const calls: Array<{ url: string; method: string; authorization: string | null; body?: string }> = [];
+    const fetchMock = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = String(input);
+      const method = init.method ?? 'GET';
+      const headers = new Headers(init.headers);
+      calls.push({ url, method, authorization: headers.get('authorization'), body: typeof init.body === 'string' ? init.body : undefined });
+      if (url.includes('/releases?per_page=100&page=1')) return Response.json([release]);
+      if (url.endsWith('/releases') && method === 'POST') return Response.json(release, { status: 201 });
+      if (url.endsWith('/releases/77') && method === 'PATCH') return Response.json({ ...release, draft: false, published_at: '2026-09-03T00:00:00Z' });
+      if (url.endsWith('/releases/77')) return Response.json(release);
+      if (url.includes('uploads.github.com/') && method === 'POST') return Response.json(asset(expected.name, 411), { status: 201 });
+      if (url.includes('/releases/tags/v0.4.13') || url.endsWith('/releases/latest')) return Response.json({ ...release, draft: false, published_at: '2026-09-03T00:00:00Z' });
+      if (url.endsWith('/releases/assets/411')) return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/private/reviewed-asset' } });
+      if (url === 'https://release-assets.githubusercontent.com/private/reviewed-asset') return new Response(bytesByName.get(expected.name), { status: 200, headers: { 'content-length': String(expected.size) } });
+      throw new Error(`unexpected request ${method} ${url}`);
+    }) as typeof fetch;
+    const github = createGitHubStableReleaseAdapter({ GITHUB_REPOSITORY: 'brainfk123/bilibili-live-gift-panel', GH_TOKEN: 'token' }, fetchMock);
+
+    await expect(github.listReleases()).resolves.toHaveLength(1);
+    await github.createDraft({ tag: 'v0.4.13', targetCommit: 'a'.repeat(40), title: 'v0.4.13' });
+    await github.getReleaseById(77);
+    await github.uploadAssetById(77, expected.name, bytesByName.get(expected.name)!);
+    await github.publishById(77);
+    await github.getReleaseByTag('v0.4.13');
+    await github.getLatest();
+    await expect(github.downloadAsset(77, expected.name, expected.size)).resolves.toEqual(bytesByName.get(expected.name));
+
+    expect(calls.some((call) => call.method === 'DELETE')).toBe(false);
+    const create = calls.find((call) => call.url.endsWith('/releases') && call.method === 'POST');
+    expect(JSON.parse(create!.body!)).toEqual({ tag_name: 'v0.4.13', target_commitish: 'a'.repeat(40), name: 'v0.4.13', draft: true, prerelease: false, make_latest: 'false' });
+    const publish = calls.find((call) => call.url.endsWith('/releases/77') && call.method === 'PATCH');
+    expect(JSON.parse(publish!.body!)).toEqual({ draft: false, prerelease: false, make_latest: 'true' });
+    expect(calls.at(-1)).toMatchObject({ url: 'https://release-assets.githubusercontent.com/private/reviewed-asset', authorization: null });
+  });
+
+  it('fails closed after five full release-list pages', async () => {
+    let pages = 0;
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({ ...draft(), id: index + 1, tag_name: `v9.9.${index}` }));
+    const fetchMock = (async () => { pages += 1; return Response.json(fullPage); }) as typeof fetch;
+    const github = createGitHubStableReleaseAdapter({ GITHUB_REPOSITORY: 'brainfk123/bilibili-live-gift-panel', GH_TOKEN: 'token' }, fetchMock);
+    await expect(github.listReleases()).rejects.toThrow('stable release transaction failed');
+    expect(pages).toBe(5);
   });
 });

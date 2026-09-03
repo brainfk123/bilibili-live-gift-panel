@@ -133,6 +133,14 @@ describe('EV Sign signer profile resolution', () => {
     });
   });
 
+  it('accepts a future stable identity for separate active-policy binding', () => {
+    const future = { country: 'CN', organization: 'FutureCo Technology Co., Ltd.', organizationId: '91110000EXAMPLE01' };
+    expect(resolveProfile()('stable', {
+      EVSIGN_CERTIFICATE: 'future-certificate-selector',
+      EVSIGN_PUBLISHER_IDENTITY: JSON.stringify(future),
+    }).identity).toEqual(future);
+  });
+
   it('binds bridge to its reviewed RushRush certificate selector and structured identity', () => {
     expect(resolveProfile()('bridge', {
       EVSIGN_BRIDGE_CERTIFICATE: 'rushrush-certificate-selector',

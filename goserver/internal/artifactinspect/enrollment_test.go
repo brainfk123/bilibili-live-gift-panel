@@ -45,6 +45,27 @@ func TestVerifyEnrollmentArtifactAcceptsPostEnrollmentPublisherIdentityScope(t *
 	}
 }
 
+func TestVerifyEnrollmentArtifactAcceptsExplicitlyAuthorizedFuturePrimary(t *testing.T) {
+	fixture := enrollmentArtifactFixtureForVersion(t, "0.4.33", false)
+	future := certidentity.Identity{Country: "CN", Organization: "FutureCo Technology Co., Ltd.", OrganizationID: "91110000EXAMPLE01"}
+	authorization := signedEnrollmentPolicyForIdentity(t, fixture.key, 2, fixture.options.Tag, "", future)
+	fixture.options.AuthorizationPolicyPath = writeFixture(t, fixture.root, "future-authorization.json", authorization)
+	fixture.options.ExpectedAuthorizationPolicySHA256 = sha256Hex(authorization)
+	fixture.options.InspectAuthenticode = func(path string) (certidentity.Identity, error) {
+		if filepath.Base(path) == "ffmpeg.exe" {
+			return naisNetIdentity, nil
+		}
+		return future, nil
+	}
+	evidence, err := VerifyEnrollmentArtifact(fixture.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.OuterIdentity != future || evidence.AuthorizedIdentity != future || evidence.FFmpegIdentity != naisNetIdentity {
+		t.Fatalf("future primary evidence = %#v", evidence)
+	}
+}
+
 func TestVerifyEnrollmentArtifactKeepsV0412ExactHashOnly(t *testing.T) {
 	fixture := enrollmentArtifactFixtureForVersion(t, "0.4.12", false)
 	if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "authorization") {
@@ -67,7 +88,7 @@ func TestVerifyEnrollmentArtifactRejectsPostEnrollmentWrongHashOrIdentity(t *tes
 		fixture.options.InspectAuthenticode = func(string) (certidentity.Identity, error) {
 			return certidentity.Identity{Country: "CN", Organization: "Other Technology Co., Ltd.", OrganizationID: "91110000OTHER001"}, nil
 		}
-		if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "identity") {
+		if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "authorization") {
 			t.Fatalf("wrong v0.4.13 identity error = %v", err)
 		}
 	})
@@ -191,6 +212,31 @@ func TestVerifyEnrollmentCandidateBeforeAuthorizationPolicyExists(t *testing.T) 
 	}
 }
 
+func TestVerifyEnrollmentCandidateBindsReviewedFuturePrimary(t *testing.T) {
+	fixture := enrollmentArtifactFixtureForVersion(t, "0.4.33", false)
+	future := certidentity.Identity{Country: "CN", Organization: "FutureCo Technology Co., Ltd.", OrganizationID: "91110000EXAMPLE01"}
+	evidence, err := VerifyEnrollmentCandidate(VerifyEnrollmentCandidateOptions{
+		ArtifactPath: fixture.options.ArtifactPath, ExpectedPEContentSHA256: fixture.options.ExpectedPEContentSHA256,
+		Version: fixture.options.Version, Tag: fixture.options.Tag, Commit: fixture.options.Commit,
+		RootSPKIPath: fixture.options.RootSPKIPath, ExpectedRootSHA256: fixture.options.ExpectedRootSHA256,
+		BootstrapPolicyPath: fixture.options.BootstrapPolicyPath, ExpectedBootstrapPolicySHA256: fixture.options.ExpectedBootstrapPolicySHA256, ExpectedBootstrapPolicyEpoch: fixture.options.ExpectedBootstrapPolicyEpoch,
+		FFmpegArchivePath: fixture.options.FFmpegArchivePath, FFmpegManifestPath: fixture.options.FFmpegManifestPath,
+		ExpectedPrimaryIdentity: future, Now: fixture.options.Now,
+		InspectAuthenticode: func(path string) (certidentity.Identity, error) {
+			if filepath.Base(path) == "ffmpeg.exe" {
+				return naisNetIdentity, nil
+			}
+			return future, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.OuterIdentity != future || evidence.FFmpegIdentity != naisNetIdentity {
+		t.Fatalf("future candidate evidence = %#v", evidence)
+	}
+}
+
 type enrollmentArtifactTestFixture struct {
 	root                            string
 	key                             *ecdsa.PrivateKey
@@ -259,12 +305,20 @@ func enrollmentArtifactFixtureForVersion(t testing.TB, version string, exactHash
 }
 
 func signedEnrollmentPolicy(t testing.TB, key *ecdsa.PrivateKey, epoch uint64, tag, manifestSHA256 string) []byte {
+	return signedEnrollmentPolicyForIdentity(t, key, epoch, tag, manifestSHA256, naisNetIdentity)
+}
+
+func signedEnrollmentPolicyForIdentity(t testing.TB, key *ecdsa.PrivateKey, epoch uint64, tag, manifestSHA256 string, identity certidentity.Identity) []byte {
 	t.Helper()
 	rule := updatepolicy.PublisherRule{
-		ID: "naisnet-stable", Role: "primary", Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094",
+		ID: "reviewed-stable", Role: "primary", Country: identity.Country, Organization: identity.Organization, OrganizationID: identity.OrganizationID,
 		AllowedChannel: updatepolicy.ChannelStable, AllowedTags: []string{tag}, ManifestSHA256: manifestSHA256,
 	}
-	signed := updatepolicy.Signed{Epoch: epoch, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []updatepolicy.PublisherRule{rule}}
+	bridge := updatepolicy.PublisherRule{
+		ID: "rushrush-bridge", Role: "bridge", Country: "CN", Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P",
+		AllowedChannel: updatepolicy.ChannelLegacyRushRush, AllowedTags: []string{"v0.4.11"},
+	}
+	signed := updatepolicy.Signed{Epoch: epoch, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []updatepolicy.PublisherRule{rule, bridge}}
 	canonical, err := updatepolicy.CanonicalSigned(signed)
 	if err != nil {
 		t.Fatal(err)

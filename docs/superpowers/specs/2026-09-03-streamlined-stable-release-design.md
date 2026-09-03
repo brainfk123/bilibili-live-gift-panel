@@ -1,8 +1,10 @@
 # Streamlined Stable Release and Event-Driven Publisher Rotation Design
 
-**Date:** 2026-09-03  
+**Date:** 2026-09-03
+
 **Status:** Owner-approved; implementation requires the reviewed plan linked below
-**Supersedes:** only the per-artifact policy approval requirement for stable versions after v0.4.12  
+**Supersedes:** only the per-artifact policy approval requirement for stable versions after v0.4.12
+
 **Does not replace:** the embedded rotation root, monotonic policy epochs, exact RushRush bridge scope, or structured Authenticode identity checks
 
 **Implementation plan:** [`docs/superpowers/plans/2026-09-03-streamlined-stable-release.md`](../plans/2026-09-03-streamlined-stable-release.md)
