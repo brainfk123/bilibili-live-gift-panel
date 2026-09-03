@@ -33,6 +33,13 @@ type VerifyEnrollmentOptions struct {
 	InspectAuthenticode                   func(string) (certidentity.Identity, error)
 }
 
+type AuthorizationScope string
+
+const (
+	AuthorizationScopeArtifactSHA256    AuthorizationScope = "artifact-sha256"
+	AuthorizationScopePublisherIdentity AuthorizationScope = "publisher-identity"
+)
+
 type EnrollmentEvidence struct {
 	SchemaVersion                uint64                `json:"schemaVersion"`
 	Version                      string                `json:"version"`
@@ -48,6 +55,7 @@ type EnrollmentEvidence struct {
 	AuthorizationPolicySHA256    string                `json:"authorizationPolicySha256"`
 	AuthorizationPolicyEpoch     uint64                `json:"authorizationPolicyEpoch"`
 	AuthorizationSignatureStatus string                `json:"authorizationSignatureStatus"`
+	AuthorizationScope           AuthorizationScope    `json:"authorizationScope"`
 	AuthorizedChannel            updatepolicy.Channel  `json:"authorizedChannel"`
 	AuthorizedTag                string                `json:"authorizedTag"`
 	AuthorizedArtifactSHA256     string                `json:"authorizedArtifactSha256"`
@@ -85,6 +93,7 @@ type EnrollmentPolicyEvidence struct {
 	AuthorizationPolicySHA256    string                `json:"authorizationPolicySha256"`
 	AuthorizationPolicyEpoch     uint64                `json:"authorizationPolicyEpoch"`
 	AuthorizationSignatureStatus string                `json:"authorizationSignatureStatus"`
+	AuthorizationScope           AuthorizationScope    `json:"authorizationScope"`
 	AuthorizedChannel            updatepolicy.Channel  `json:"authorizedChannel"`
 	AuthorizedArtifactSHA256     string                `json:"authorizedArtifactSha256"`
 	AuthorizedIdentity           certidentity.Identity `json:"authorizedIdentity"`
@@ -123,26 +132,19 @@ func VerifyEnrollmentPolicies(options VerifyEnrollmentPoliciesOptions) (Enrollme
 	if err != nil || authorization.Epoch != options.ExpectedAuthorizationPolicyEpoch {
 		return EnrollmentPolicyEvidence{}, errors.New("final authorization policy signature or epoch is invalid")
 	}
-	matchCount := 0
-	authorizedHash := ""
-	for _, rule := range authorization.Rules {
-		if !isLowerHex(rule.ManifestSHA256, 64) {
-			continue
-		}
-		candidate := updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, SHA256: rule.ManifestSHA256, Certificate: naisNetIdentity, RequireManifestSHA256: true}
-		if authorization.AuthorizeAt(candidate, options.Now) == nil {
-			matchCount++
-			authorizedHash = rule.ManifestSHA256
-		}
+	minimumScope, err := authorizationScopeForStableVersion(version)
+	if err != nil {
+		return EnrollmentPolicyEvidence{}, err
 	}
-	if matchCount != 1 {
-		return EnrollmentPolicyEvidence{}, errors.New("final authorization policy must contain one exact NaisNet stable artifact hash")
+	authorizationScope, authorizedHash, err := authorizeStablePolicy(authorization, options.Tag, "", naisNetIdentity, minimumScope, options.Now)
+	if err != nil {
+		return EnrollmentPolicyEvidence{}, errors.New("final stable authorization policy is invalid")
 	}
 	return EnrollmentPolicyEvidence{
 		SchemaVersion: 1, Tag: options.Tag, RootSPKISHA256: options.ExpectedRootSHA256,
 		BootstrapPolicySHA256: options.ExpectedBootstrapPolicySHA256, BootstrapPolicyEpoch: bootstrap.Epoch, BootstrapSignatureStatus: "Valid",
 		AuthorizationPolicySHA256: options.ExpectedAuthorizationPolicySHA256, AuthorizationPolicyEpoch: authorization.Epoch, AuthorizationSignatureStatus: "Valid",
-		AuthorizedChannel: updatepolicy.ChannelStable, AuthorizedArtifactSHA256: authorizedHash, AuthorizedIdentity: naisNetIdentity,
+		AuthorizationScope: authorizationScope, AuthorizedChannel: updatepolicy.ChannelStable, AuthorizedArtifactSHA256: authorizedHash, AuthorizedIdentity: naisNetIdentity,
 	}, nil
 }
 
@@ -212,9 +214,13 @@ func VerifyEnrollmentArtifact(options VerifyEnrollmentOptions) (EnrollmentEviden
 	if err != nil || authorization.Epoch != options.ExpectedAuthorizationPolicyEpoch {
 		return EnrollmentEvidence{}, errors.New("final authorization policy signature or epoch is invalid")
 	}
-	finalIdentity := updatepolicy.ArtifactIdentity{Tag: options.Tag, Channel: updatepolicy.ChannelStable, SHA256: artifactSHA256, Certificate: outerIdentity, RequireManifestSHA256: true}
-	if err := authorization.AuthorizeAt(finalIdentity, options.Now); err != nil {
-		return EnrollmentEvidence{}, errors.New("final artifact hash authorization is invalid")
+	minimumScope, err := authorizationScopeForStableVersion(options.Version)
+	if err != nil {
+		return EnrollmentEvidence{}, err
+	}
+	authorizationScope, authorizedHash, err := authorizeStablePolicy(authorization, options.Tag, artifactSHA256, outerIdentity, minimumScope, options.Now)
+	if err != nil {
+		return EnrollmentEvidence{}, errors.New("final stable authorization is invalid")
 	}
 	archive, err := securefile.ReadBoundedRegular(options.FFmpegArchivePath, 40<<20, nil)
 	if err != nil {
@@ -258,11 +264,57 @@ func VerifyEnrollmentArtifact(options VerifyEnrollmentOptions) (EnrollmentEviden
 		RootSPKISHA256:        options.ExpectedRootSHA256,
 		BootstrapPolicySHA256: options.ExpectedBootstrapPolicySHA256, BootstrapPolicyEpoch: bootstrap.Epoch, BootstrapSignatureStatus: "Valid",
 		AuthorizationPolicySHA256: options.ExpectedAuthorizationPolicySHA256, AuthorizationPolicyEpoch: authorization.Epoch, AuthorizationSignatureStatus: "Valid",
-		AuthorizedChannel: updatepolicy.ChannelStable, AuthorizedTag: options.Tag, AuthorizedArtifactSHA256: artifactSHA256, AuthorizedIdentity: outerIdentity,
+		AuthorizationScope: authorizationScope, AuthorizedChannel: updatepolicy.ChannelStable, AuthorizedTag: options.Tag, AuthorizedArtifactSHA256: authorizedHash, AuthorizedIdentity: outerIdentity,
 		OuterIdentity: outerIdentity, AuthenticodeStatus: "Valid",
 		FFmpegVersion: manifest.Version, FFmpegSHA256: manifest.SHA256, FFmpegSize: manifest.Size,
 		FFmpegArchiveSHA256: sha256HexBytes(archive), FFmpegManifestSHA256: sha256HexBytes(manifestBytes), FFmpegIdentity: ffmpegIdentity, FFmpegSignatureStatus: "Valid",
 	}, nil
+}
+
+func authorizationScopeForStableVersion(version string) (AuthorizationScope, error) {
+	if !isEnrollmentVersion(version) {
+		return "", errors.New("stable version is invalid")
+	}
+	if version == "0.4.12" {
+		return AuthorizationScopeArtifactSHA256, nil
+	}
+	return AuthorizationScopePublisherIdentity, nil
+}
+
+func authorizeStablePolicy(policy updatepolicy.Verified, tag, artifactSHA256 string, identity certidentity.Identity, minimum AuthorizationScope, now time.Time) (AuthorizationScope, string, error) {
+	matchCount := 0
+	matchedScope := AuthorizationScope("")
+	matchedHash := ""
+	for _, rule := range policy.Rules {
+		candidateHash := artifactSHA256
+		requireHash := false
+		scope := AuthorizationScopePublisherIdentity
+		if rule.ManifestSHA256 != "" {
+			if candidateHash == "" {
+				candidateHash = rule.ManifestSHA256
+			}
+			requireHash = true
+			scope = AuthorizationScopeArtifactSHA256
+		} else if minimum == AuthorizationScopeArtifactSHA256 {
+			continue
+		}
+		candidate := updatepolicy.ArtifactIdentity{
+			Tag: tag, Channel: updatepolicy.ChannelStable, SHA256: candidateHash,
+			Certificate: identity, RequireManifestSHA256: requireHash,
+		}
+		if policy.AuthorizeAt(candidate, now) != nil {
+			continue
+		}
+		matchCount++
+		matchedScope = scope
+		if scope == AuthorizationScopeArtifactSHA256 {
+			matchedHash = rule.ManifestSHA256
+		}
+	}
+	if matchCount != 1 {
+		return "", "", errors.New("stable policy must contain one matching authorization")
+	}
+	return matchedScope, matchedHash, nil
 }
 
 type enrollmentFFmpegManifest struct {

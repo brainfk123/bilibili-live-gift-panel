@@ -33,7 +33,7 @@ export interface EnrollmentEvidence {
 	artifact: { sha256: string; peContentSha256: string; signatureStatus: 'Valid'; identity: EVSignPublisherIdentity };
 	root: { spkiSha256: string; rootKeyId: string };
   bootstrapPolicy: { sha256: string; epoch: number; signatureStatus: 'Valid' };
-	authorizationPolicy: { sha256: string; epoch: number; signatureStatus: 'Valid'; tag: string; artifactSha256: string; identity: EVSignPublisherIdentity };
+	authorizationPolicy: { sha256: string; epoch: number; signatureStatus: 'Valid'; scope: 'artifact-sha256' | 'publisher-identity'; tag: string; artifactSha256: string; identity: EVSignPublisherIdentity };
 	ffmpeg: { version: string; sha256: string; archiveSha256: string; manifestSha256: string; signatureStatus: 'Valid'; identity: EVSignPublisherIdentity };
 }
 

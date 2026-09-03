@@ -51,7 +51,7 @@ function fixture() {
     signedFileSha256: artifactHash, signedFileSize: artifact.length, peContentSha256,
     rootSpkiSha256: sha256(rootSPKI), bootstrapPolicySha256: sha256(bootstrapPolicy), bootstrapPolicyEpoch: 1,
     bootstrapSignatureStatus: 'Valid', authorizationPolicySha256: sha256(authorizationPolicy), authorizationPolicyEpoch: 2,
-    authorizationSignatureStatus: 'Valid', authorizedChannel: 'stable', authorizedTag: 'v0.4.12', authorizedArtifactSha256: artifactHash,
+    authorizationSignatureStatus: 'Valid', authorizationScope: 'artifact-sha256', authorizedChannel: 'stable', authorizedTag: 'v0.4.12', authorizedArtifactSha256: artifactHash,
     authorizedIdentity: naisNet, outerIdentity: naisNet, authenticodeStatus: 'Valid',
     ffmpegVersion: '9.0', ffmpegSha256: ffmpegHash, ffmpegSize: standaloneFFmpeg.length,
     ffmpegArchiveSha256: sha256(ffmpegArchive), ffmpegManifestSha256: sha256(ffmpegManifest), ffmpegIdentity: naisNet, ffmpegSignatureStatus: 'Valid',
@@ -90,7 +90,7 @@ describe('verify enrollment build', () => {
 	  artifact: { sha256: value.artifactHash, peContentSha256: 'b'.repeat(64), signatureStatus: 'Valid', identity: naisNet },
 	  root: { spkiSha256: value.options.expectedRootSHA256, rootKeyId: `sha256:${value.options.expectedRootSHA256}` },
       bootstrapPolicy: { sha256: value.options.expectedBootstrapPolicySHA256, epoch: 1, signatureStatus: 'Valid' },
-	  authorizationPolicy: { sha256: value.options.expectedAuthorizationPolicySHA256, epoch: 2, signatureStatus: 'Valid', tag: 'v0.4.12', artifactSha256: value.artifactHash, identity: naisNet },
+	  authorizationPolicy: { sha256: value.options.expectedAuthorizationPolicySHA256, epoch: 2, signatureStatus: 'Valid', scope: 'artifact-sha256', tag: 'v0.4.12', artifactSha256: value.artifactHash, identity: naisNet },
 	  ffmpeg: { version: '9.0', sha256: value.ffmpegHash, archiveSha256: value.goEvidence.ffmpegArchiveSha256, manifestSha256: value.goEvidence.ffmpegManifestSha256, signatureStatus: 'Valid', identity: naisNet },
     });
     expect(JSON.parse(readFileSync(value.options.outputPath, 'utf8'))).toEqual(evidence);
@@ -100,6 +100,32 @@ describe('verify enrollment build', () => {
     expect(serialized).not.toMatch(/"(?:size|sidecars|channel)"/);
 	expect(serialized).not.toContain('publisher-root-private-key');
     expect(basename(value.options.artifactPath)).toBe(`${value.artifactHash}.exe`);
+  });
+
+  it('records publisher identity scope for post-enrollment stable releases', async () => {
+    const value = fixture();
+    value.options.version = '0.4.13';
+    value.options.tag = 'v0.4.13';
+    value.artifactInspection.version = '0.4.13';
+    writeFileSync(value.options.artifactInspectionPath, JSON.stringify(value.artifactInspection));
+    value.goEvidence.version = '0.4.13';
+    value.goEvidence.tag = 'v0.4.13';
+    value.goEvidence.authorizedTag = 'v0.4.13';
+    value.goEvidence.authorizationScope = 'publisher-identity';
+    value.goEvidence.authorizedArtifactSha256 = '';
+
+    const evidence = await verifyEnrollmentBuild(value.options);
+
+    expect(evidence.authorizationPolicy).toEqual({
+      sha256: value.options.expectedAuthorizationPolicySHA256,
+      epoch: 2,
+      signatureStatus: 'Valid',
+      scope: 'publisher-identity',
+      tag: 'v0.4.13',
+      artifactSha256: '',
+      identity: naisNet,
+    });
+    expect(evidence.artifact.sha256).toBe(value.artifactHash);
   });
 
   it.each([
@@ -112,6 +138,8 @@ describe('verify enrollment build', () => {
     }],
     ['RushRush final identity', (value: ReturnType<typeof fixture>) => { value.goEvidence.outerIdentity = { country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P' }; }],
     ['wrong authorization hash', (value: ReturnType<typeof fixture>) => { value.goEvidence.authorizedArtifactSha256 = '0'.repeat(64); }],
+    ['identity scope retaining an artifact hash', (value: ReturnType<typeof fixture>) => { value.goEvidence.authorizationScope = 'publisher-identity'; }],
+    ['artifact scope omitting its artifact hash', (value: ReturnType<typeof fixture>) => { value.goEvidence.authorizationScope = 'artifact-sha256'; value.goEvidence.authorizedArtifactSha256 = ''; }],
     ['wrong bootstrap digest', (value: ReturnType<typeof fixture>) => { value.goEvidence.bootstrapPolicySha256 = '0'.repeat(64); }],
     ['wrong reviewed FFmpeg manifest digest', (value: ReturnType<typeof fixture>) => { value.options.expectedFFmpegManifestSHA256 = '0'.repeat(64); }],
 	['pre-enrollment stable version', (value: ReturnType<typeof fixture>) => {

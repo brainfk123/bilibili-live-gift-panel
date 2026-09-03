@@ -27,16 +27,55 @@ func TestVerifyEnrollmentArtifactBindsBootstrapAndFinalHashAuthorization(t *test
 	}
 	if evidence.SchemaVersion != 1 || evidence.Version != "0.4.12" || evidence.Tag != "v0.4.12" || evidence.Commit != strings.Repeat("c", 40) ||
 		evidence.SignedFileSHA256 != fixture.artifactSHA256 || evidence.PEContentSHA256 != fixture.peContentSHA256 || evidence.RootSPKISHA256 != fixture.options.ExpectedRootSHA256 ||
-		evidence.BootstrapPolicyEpoch != 1 || evidence.AuthorizationPolicyEpoch != 2 || evidence.AuthorizedArtifactSHA256 != fixture.artifactSHA256 ||
+		evidence.BootstrapPolicyEpoch != 1 || evidence.AuthorizationPolicyEpoch != 2 || evidence.AuthorizationScope != AuthorizationScopeArtifactSHA256 || evidence.AuthorizedArtifactSHA256 != fixture.artifactSHA256 ||
 		evidence.OuterIdentity != naisNetIdentity || evidence.AuthorizedIdentity != naisNetIdentity || evidence.FFmpegIdentity != naisNetIdentity ||
 		evidence.AuthenticodeStatus != "Valid" || evidence.BootstrapSignatureStatus != "Valid" || evidence.AuthorizationSignatureStatus != "Valid" || evidence.FFmpegSignatureStatus != "Valid" {
 		t.Fatalf("enrollment evidence = %#v", evidence)
 	}
 }
 
+func TestVerifyEnrollmentArtifactAcceptsPostEnrollmentPublisherIdentityScope(t *testing.T) {
+	fixture := enrollmentArtifactFixtureForVersion(t, "0.4.13", false)
+	evidence, err := VerifyEnrollmentArtifact(fixture.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.AuthorizationScope != AuthorizationScopePublisherIdentity || evidence.AuthorizedArtifactSHA256 != "" || evidence.SignedFileSHA256 != fixture.artifactSHA256 {
+		t.Fatalf("post-enrollment evidence = %#v", evidence)
+	}
+}
+
+func TestVerifyEnrollmentArtifactKeepsV0412ExactHashOnly(t *testing.T) {
+	fixture := enrollmentArtifactFixtureForVersion(t, "0.4.12", false)
+	if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "authorization") {
+		t.Fatalf("hashless v0.4.12 authorization error = %v", err)
+	}
+}
+
+func TestVerifyEnrollmentArtifactRejectsPostEnrollmentWrongHashOrIdentity(t *testing.T) {
+	t.Run("wrong exact hash", func(t *testing.T) {
+		fixture := enrollmentArtifactFixtureForVersion(t, "0.4.13", true)
+		wrong := signedEnrollmentPolicy(t, fixture.key, 2, fixture.options.Tag, strings.Repeat("0", 64))
+		fixture.options.AuthorizationPolicyPath = writeFixture(t, fixture.root, "wrong-post-enrollment-authorization.json", wrong)
+		fixture.options.ExpectedAuthorizationPolicySHA256 = sha256Hex(wrong)
+		if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "authorization") {
+			t.Fatalf("wrong v0.4.13 hash authorization error = %v", err)
+		}
+	})
+	t.Run("wrong legal identity", func(t *testing.T) {
+		fixture := enrollmentArtifactFixtureForVersion(t, "0.4.13", false)
+		fixture.options.InspectAuthenticode = func(string) (certidentity.Identity, error) {
+			return certidentity.Identity{Country: "CN", Organization: "Other Technology Co., Ltd.", OrganizationID: "91110000OTHER001"}, nil
+		}
+		if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "identity") {
+			t.Fatalf("wrong v0.4.13 identity error = %v", err)
+		}
+	})
+}
+
 func TestVerifyEnrollmentArtifactRejectsWrongFinalHashAuthorization(t *testing.T) {
 	fixture := enrollmentArtifactFixture(t)
-	wrong := signedEnrollmentPolicy(t, fixture.key, 2, strings.Repeat("0", 64))
+	wrong := signedEnrollmentPolicy(t, fixture.key, 2, fixture.options.Tag, strings.Repeat("0", 64))
 	fixture.options.AuthorizationPolicyPath = writeFixture(t, fixture.root, "wrong-authorization.json", wrong)
 	fixture.options.ExpectedAuthorizationPolicySHA256 = sha256Hex(wrong)
 	if _, err := VerifyEnrollmentArtifact(fixture.options); err == nil || !strings.Contains(strings.ToLower(err.Error()), "authorization") {
@@ -99,7 +138,7 @@ func TestVerifyEnrollmentPoliciesProvesExactAuthorizationBeforeBuild(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.SchemaVersion != 1 || evidence.AuthorizedArtifactSHA256 != fixture.artifactSHA256 || evidence.AuthorizedIdentity != naisNetIdentity || evidence.BootstrapSignatureStatus != "Valid" || evidence.AuthorizationSignatureStatus != "Valid" {
+	if evidence.SchemaVersion != 1 || evidence.AuthorizationScope != AuthorizationScopeArtifactSHA256 || evidence.AuthorizedArtifactSHA256 != fixture.artifactSHA256 || evidence.AuthorizedIdentity != naisNetIdentity || evidence.BootstrapSignatureStatus != "Valid" || evidence.AuthorizationSignatureStatus != "Valid" {
 		t.Fatalf("policy preflight evidence = %#v", evidence)
 	}
 	corrupt, err := os.ReadFile(fixture.options.AuthorizationPolicyPath)
@@ -115,6 +154,22 @@ func TestVerifyEnrollmentPoliciesProvesExactAuthorizationBeforeBuild(t *testing.
 		Tag: fixture.options.Tag, Now: fixture.options.Now,
 	}); err == nil {
 		t.Fatal("corrupt authorization policy passed pre-build verification")
+	}
+}
+
+func TestVerifyEnrollmentPoliciesAcceptsPostEnrollmentPublisherIdentityScope(t *testing.T) {
+	fixture := enrollmentArtifactFixtureForVersion(t, "0.4.13", false)
+	evidence, err := VerifyEnrollmentPolicies(VerifyEnrollmentPoliciesOptions{
+		RootSPKIPath: fixture.options.RootSPKIPath, ExpectedRootSHA256: fixture.options.ExpectedRootSHA256,
+		BootstrapPolicyPath: fixture.options.BootstrapPolicyPath, ExpectedBootstrapPolicySHA256: fixture.options.ExpectedBootstrapPolicySHA256, ExpectedBootstrapPolicyEpoch: fixture.options.ExpectedBootstrapPolicyEpoch,
+		AuthorizationPolicyPath: fixture.options.AuthorizationPolicyPath, ExpectedAuthorizationPolicySHA256: fixture.options.ExpectedAuthorizationPolicySHA256, ExpectedAuthorizationPolicyEpoch: fixture.options.ExpectedAuthorizationPolicyEpoch,
+		Tag: fixture.options.Tag, Now: fixture.options.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.AuthorizationScope != AuthorizationScopePublisherIdentity || evidence.AuthorizedArtifactSHA256 != "" || evidence.AuthorizedIdentity != naisNetIdentity {
+		t.Fatalf("post-enrollment policy evidence = %#v", evidence)
 	}
 }
 
@@ -144,6 +199,10 @@ type enrollmentArtifactTestFixture struct {
 }
 
 func enrollmentArtifactFixture(t testing.TB) enrollmentArtifactTestFixture {
+	return enrollmentArtifactFixtureForVersion(t, "0.4.12", true)
+}
+
+func enrollmentArtifactFixtureForVersion(t testing.TB, version string, exactHash bool) enrollmentArtifactTestFixture {
 	t.Helper()
 	root := t.TempDir()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -154,10 +213,9 @@ func enrollmentArtifactFixture(t testing.TB) enrollmentArtifactTestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bootstrap := signedEnrollmentPolicy(t, key, 1, "")
+	bootstrap := signedEnrollmentPolicy(t, key, 1, "v"+version, "")
 	ffmpeg := []byte("synthetic NaisNet FFmpeg enrollment fixture")
 	archive, manifest := testFFmpegArchive(t, ffmpeg)
-	version := "0.4.12"
 	commit := strings.Repeat("c", 40)
 	payload := bytes.Join([][]byte{
 		[]byte(version), []byte(commit),
@@ -180,7 +238,11 @@ func enrollmentArtifactFixture(t testing.TB) enrollmentArtifactTestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorization := signedEnrollmentPolicy(t, key, 2, artifactSHA256)
+	authorizationHash := ""
+	if exactHash {
+		authorizationHash = artifactSHA256
+	}
+	authorization := signedEnrollmentPolicy(t, key, 2, "v"+version, authorizationHash)
 	return enrollmentArtifactTestFixture{
 		root: root, key: key, artifactSHA256: artifactSHA256, peContentSHA256: peContentSHA256,
 		options: VerifyEnrollmentOptions{
@@ -196,11 +258,11 @@ func enrollmentArtifactFixture(t testing.TB) enrollmentArtifactTestFixture {
 	}
 }
 
-func signedEnrollmentPolicy(t testing.TB, key *ecdsa.PrivateKey, epoch uint64, manifestSHA256 string) []byte {
+func signedEnrollmentPolicy(t testing.TB, key *ecdsa.PrivateKey, epoch uint64, tag, manifestSHA256 string) []byte {
 	t.Helper()
 	rule := updatepolicy.PublisherRule{
 		ID: "naisnet-stable", Role: "primary", Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094",
-		AllowedChannel: updatepolicy.ChannelStable, AllowedTags: []string{"v0.4.12"}, ManifestSHA256: manifestSHA256,
+		AllowedChannel: updatepolicy.ChannelStable, AllowedTags: []string{tag}, ManifestSHA256: manifestSHA256,
 	}
 	signed := updatepolicy.Signed{Epoch: epoch, ExpiresAt: "2030-01-01T00:00:00Z", Publishers: []updatepolicy.PublisherRule{rule}}
 	canonical, err := updatepolicy.CanonicalSigned(signed)

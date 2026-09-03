@@ -62,15 +62,19 @@ export async function verifyEnrollmentBuild(options) {
   const inspectionKeys = [
     'schemaVersion', 'version', 'tag', 'commit', 'signedFileSha256', 'signedFileSize', 'peContentSha256', 'rootSpkiSha256',
     'bootstrapPolicySha256', 'bootstrapPolicyEpoch', 'bootstrapSignatureStatus', 'authorizationPolicySha256', 'authorizationPolicyEpoch',
-    'authorizationSignatureStatus', 'authorizedChannel', 'authorizedTag', 'authorizedArtifactSha256', 'authorizedIdentity', 'outerIdentity',
+    'authorizationSignatureStatus', 'authorizationScope', 'authorizedChannel', 'authorizedTag', 'authorizedArtifactSha256', 'authorizedIdentity', 'outerIdentity',
     'authenticodeStatus', 'ffmpegVersion', 'ffmpegSha256', 'ffmpegSize', 'ffmpegArchiveSha256', 'ffmpegManifestSha256', 'ffmpegIdentity', 'ffmpegSignatureStatus',
   ].sort();
   if (Object.keys(inspection).sort().join(',') !== inspectionKeys.join(',')) fail();
+  const authorizationScope = inspection.authorizationScope;
+  const validAuthorizationScope = authorizationScope === 'artifact-sha256'
+    ? inspection.authorizedArtifactSha256 === artifactSHA256
+    : authorizationScope === 'publisher-identity' && inspection.authorizedArtifactSha256 === '' && options.version !== '0.4.12';
   if (inspection.schemaVersion !== 1 || inspection.version !== options.version || inspection.tag !== options.tag || inspection.commit !== options.commit ||
       inspection.signedFileSha256 !== artifactSHA256 || inspection.signedFileSize !== artifact.length || inspection.peContentSha256 !== artifactInspection.peContentSha256 ||
       inspection.rootSpkiSha256 !== rootSHA256 || inspection.bootstrapPolicySha256 !== bootstrapSHA256 || inspection.bootstrapPolicyEpoch !== options.bootstrapPolicyEpoch || inspection.bootstrapSignatureStatus !== 'Valid' ||
       inspection.authorizationPolicySha256 !== authorizationSHA256 || inspection.authorizationPolicyEpoch !== options.authorizationPolicyEpoch || inspection.authorizationSignatureStatus !== 'Valid' ||
-      inspection.authorizedChannel !== 'stable' || inspection.authorizedTag !== options.tag || inspection.authorizedArtifactSha256 !== artifactSHA256 || !exactIdentity(inspection.authorizedIdentity, naisNetIdentity) ||
+      !validAuthorizationScope || inspection.authorizedChannel !== 'stable' || inspection.authorizedTag !== options.tag || !exactIdentity(inspection.authorizedIdentity, naisNetIdentity) ||
       !exactIdentity(inspection.outerIdentity, naisNetIdentity) || inspection.authenticodeStatus !== 'Valid' || inspection.ffmpegVersion !== '9.0' || inspection.ffmpegSha256 !== standaloneFFmpegSHA256 || inspection.ffmpegSize !== standaloneFFmpeg.length ||
 	  inspection.ffmpegArchiveSha256 !== sha256(ffmpegArchive) || inspection.ffmpegManifestSha256 !== ffmpegManifestSHA256 || !exactIdentity(inspection.ffmpegIdentity, naisNetIdentity) || inspection.ffmpegSignatureStatus !== 'Valid') fail();
 
@@ -82,7 +86,7 @@ export async function verifyEnrollmentBuild(options) {
 	artifact: { sha256: artifactSHA256, peContentSha256: inspection.peContentSha256, signatureStatus: 'Valid', identity: naisNetIdentity },
 	root: { spkiSha256: rootSHA256, rootKeyId: `sha256:${rootSHA256}` },
     bootstrapPolicy: { sha256: bootstrapSHA256, epoch: options.bootstrapPolicyEpoch, signatureStatus: 'Valid' },
-	authorizationPolicy: { sha256: authorizationSHA256, epoch: options.authorizationPolicyEpoch, signatureStatus: 'Valid', tag: options.tag, artifactSha256: artifactSHA256, identity: naisNetIdentity },
+	authorizationPolicy: { sha256: authorizationSHA256, epoch: options.authorizationPolicyEpoch, signatureStatus: 'Valid', scope: authorizationScope, tag: options.tag, artifactSha256: inspection.authorizedArtifactSha256, identity: naisNetIdentity },
 	ffmpeg: { version: '9.0', sha256: standaloneFFmpegSHA256, archiveSha256: inspection.ffmpegArchiveSha256, manifestSha256: inspection.ffmpegManifestSha256, signatureStatus: 'Valid', identity: naisNetIdentity },
   };
   await writeEvidence(options.outputPath, evidence);
