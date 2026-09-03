@@ -33,9 +33,14 @@ export async function verifyEnrollmentBuild(options) {
   verifySidecar(artifactSidecar, artifactSHA256, 'gift-panel-windows-x64.exe');
   verifySidecar(ffmpegSidecar, standaloneFFmpegSHA256, 'ffmpeg-windows-x64.exe');
   const artifactInspection = parseObject(artifactInspectionBytes, 'artifact inspection evidence');
-  const allowedArtifactInspection = new Set(['version', 'tag', 'commit', 'peContentSha256', 'signedFileSha256', 'signedFileSize', 'rootSpkiSha256', 'policySha256', 'policyEpoch', 'outerIdentity', 'ffmpegVersion', 'ffmpegSha256', 'ffmpegSize', 'ffmpegIdentity']);
+  const allowedArtifactInspection = new Set([
+    'version', 'tag', 'commit', 'peContentSha256', 'signedFileSha256', 'signedFileSize',
+    'rootSpkiSha256', 'bootstrapPolicySha256', 'bootstrapPolicyEpoch',
+    'authorizationPolicySha256', 'authorizationPolicyEpoch', 'outerIdentity',
+    'ffmpegVersion', 'ffmpegSha256', 'ffmpegSize', 'ffmpegIdentity',
+  ]);
   if (Object.keys(artifactInspection).some((key) => !allowedArtifactInspection.has(key))) fail();
-  if (artifactInspection.version !== options.version || artifactInspection.commit !== options.commit || artifactInspection.signedFileSha256 !== artifactSHA256 || artifactInspection.signedFileSize !== artifact.length || !lowerHex(artifactInspection.peContentSha256, 64) || !exactIdentity(artifactInspection.outerIdentity, naisNetIdentity) || artifactInspection.ffmpegVersion !== '9.0' || artifactInspection.ffmpegSha256 !== standaloneFFmpegSHA256 || artifactInspection.ffmpegSize !== standaloneFFmpeg.length || !exactIdentity(artifactInspection.ffmpegIdentity, naisNetIdentity)) fail();
+  if (artifactInspection.version !== options.version || artifactInspection.tag !== '' || artifactInspection.commit !== options.commit || artifactInspection.signedFileSha256 !== artifactSHA256 || artifactInspection.signedFileSize !== artifact.length || !lowerHex(artifactInspection.peContentSha256, 64) || artifactInspection.rootSpkiSha256 !== '' || artifactInspection.bootstrapPolicySha256 !== '' || artifactInspection.bootstrapPolicyEpoch !== 0 || artifactInspection.authorizationPolicySha256 !== '' || artifactInspection.authorizationPolicyEpoch !== 0 || !exactIdentity(artifactInspection.outerIdentity, naisNetIdentity) || artifactInspection.ffmpegVersion !== '9.0' || artifactInspection.ffmpegSha256 !== standaloneFFmpegSHA256 || artifactInspection.ffmpegSize !== standaloneFFmpeg.length || !exactIdentity(artifactInspection.ffmpegIdentity, naisNetIdentity)) fail();
 
   const inspectorArguments = [
     'verify-enrollment', '--artifact', options.artifactPath, '--pe-content-sha256', artifactInspection.peContentSha256,

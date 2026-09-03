@@ -676,6 +676,8 @@ jobs:
           STABLE_REVIEWED_TAG_OBJECT_SHA: ${{ vars.STABLE_REVIEWED_TAG_OBJECT_SHA }}
           STABLE_CANDIDATE_INSPECTOR_SHA256: ${{ vars.STABLE_CANDIDATE_INSPECTOR_SHA256 }}
           STABLE_CANDIDATE_VERIFIER_SHA256: ${{ vars.STABLE_CANDIDATE_VERIFIER_SHA256 }}
+          STABLE_PUBLISH_VERIFIER_COMMIT_SHA: ${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}
+          STABLE_PUBLISH_VERIFIER_SHA256: ${{ vars.STABLE_PUBLISH_VERIFIER_SHA256 }}
           STABLE_TRUST_ROOT_SPKI_B64: ${{ vars.STABLE_TRUST_ROOT_SPKI_B64 }}
           STABLE_TRUST_ROOT_SPKI_SHA256: ${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}
           STABLE_BOOTSTRAP_POLICY_B64: ${{ vars.STABLE_BOOTSTRAP_POLICY_B64 }}
@@ -688,7 +690,7 @@ jobs:
           RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
           STABLE_CHANGELOG_HISTORY_SHA256: ${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}
         run: |
-          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Reviewed candidate publication input is missing or malformed.' }
+          if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_WORKFLOW_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_TAG -cne $env:RELEASE_TAG -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_PUBLISH_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_CREATED_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:STABLE_CANDIDATE_ARTIFACT_EXPIRES_AT -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Reviewed candidate publication input is missing or malformed.' }
           "STABLE_CANDIDATE_RUN_ID=$env:STABLE_CANDIDATE_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_WORKFLOW_ID=$env:STABLE_CANDIDATE_WORKFLOW_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_RUN_ATTEMPT=$env:STABLE_CANDIDATE_RUN_ATTEMPT" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
@@ -699,8 +701,29 @@ jobs:
           "STABLE_CANDIDATE_SHA256=$env:STABLE_CANDIDATE_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_SIZE=$env:STABLE_CANDIDATE_SIZE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CANDIDATE_COMMIT_SHA=$env:STABLE_CANDIDATE_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_PUBLISH_VERIFIER_COMMIT_SHA=$env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "STABLE_PUBLISH_VERIFIER_SHA256=$env:STABLE_PUBLISH_VERIFIER_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TOOLING_COMMIT_SHA=$env:RELEASE_TOOLING_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "STABLE_CHANGELOG_HISTORY_SHA256=$env:STABLE_CHANGELOG_HISTORY_SHA256" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check out reviewed stable publish verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}
+          path: publish-verifier-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/verify-enrollment-build.mjs
+          sparse-checkout-cone-mode: false
+      - name: Validate reviewed stable publish verifier
+        shell: pwsh
+        run: |
+          $source=Get-Item -LiteralPath publish-verifier-source -Force
+          $verifier=Get-Item -LiteralPath publish-verifier-source/scripts/verify-enrollment-build.mjs -Force
+          if (-not $source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $verifier.PSIsContainer -or ($verifier.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $verifier.Length -le 0 -or $verifier.Length -gt 262144) { throw 'Reviewed stable publish verifier path is invalid.' }
+          $commit=(git -C publish-verifier-source rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $commit -cne $env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA -or (Get-FileHash -LiteralPath $verifier.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_PUBLISH_VERIFIER_SHA256) { throw 'Reviewed stable publish verifier binding mismatch.' }
+          "STABLE_PUBLISH_VERIFIER_PATH=$($verifier.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Set up publish verifier runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -761,8 +784,9 @@ jobs:
           STABLE_AUTHORIZATION_POLICY_EPOCH: ${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}
           STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256: ${{ vars.STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256 }}
         run: |
-          $inspector='candidate/tools/artifact-inspector.exe'; $verifier='candidate/tools/verify-enrollment-build.mjs'
-          if ((Get-FileHash $inspector -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -or (Get-FileHash $verifier -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_VERIFIER_SHA256 -or (Get-Content candidate/tools/artifact-inspector.exe.sha256 -Raw) -cne "$env:STABLE_CANDIDATE_INSPECTOR_SHA256  artifact-inspector.exe" -or (Get-Content candidate/tools/verify-enrollment-build.mjs.sha256 -Raw) -cne "$env:STABLE_CANDIDATE_VERIFIER_SHA256  verify-enrollment-build.mjs") { throw 'Reviewed candidate verifier tooling hash mismatch.' }
+          $inspector='candidate/tools/artifact-inspector.exe'; $candidateVerifier='candidate/tools/verify-enrollment-build.mjs'; $verifier=$env:STABLE_PUBLISH_VERIFIER_PATH
+          if ((Get-FileHash $inspector -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -or (Get-FileHash $candidateVerifier -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_VERIFIER_SHA256 -or (Get-Content candidate/tools/artifact-inspector.exe.sha256 -Raw) -cne "$env:STABLE_CANDIDATE_INSPECTOR_SHA256  artifact-inspector.exe" -or (Get-Content candidate/tools/verify-enrollment-build.mjs.sha256 -Raw) -cne "$env:STABLE_CANDIDATE_VERIFIER_SHA256  verify-enrollment-build.mjs") { throw 'Reviewed candidate verifier tooling hash mismatch.' }
+          if ((Get-FileHash -LiteralPath $verifier -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_PUBLISH_VERIFIER_SHA256) { throw 'Reviewed stable publish verifier changed before execution.' }
           $candidate='candidate/sealed/'+$env:STABLE_CANDIDATE_SHA256+'.exe'
           if ((Get-FileHash $candidate -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:STABLE_CANDIDATE_SHA256 -or (Get-Item $candidate).Length -ne [int64]$env:STABLE_CANDIDATE_SIZE) { throw 'Reviewed candidate bytes mismatch.' }
           $candidateEvidence=Get-Content candidate/candidate-evidence.json -Raw | ConvertFrom-Json

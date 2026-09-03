@@ -40,9 +40,11 @@ function fixture() {
   };
   writeFileSync(artifactPath, artifact);
   const artifactInspection = {
-    version: '0.4.12', commit, signedFileSha256: artifactHash, signedFileSize: artifact.length,
+    version: '0.4.12', tag: '', commit, signedFileSha256: artifactHash, signedFileSize: artifact.length,
     peContentSha256, outerIdentity: naisNet, ffmpegVersion: '9.0', ffmpegSha256: ffmpegHash,
     ffmpegSize: standaloneFFmpeg.length, ffmpegIdentity: naisNet,
+    rootSpkiSha256: '', bootstrapPolicySha256: '', bootstrapPolicyEpoch: 0,
+    authorizationPolicySha256: '', authorizationPolicyEpoch: 0,
   };
   const goEvidence = {
     schemaVersion: 1, version: '0.4.12', tag: 'v0.4.12', commit,
@@ -104,6 +106,10 @@ describe('verify enrollment build', () => {
     ['changed seal evidence', (value: ReturnType<typeof fixture>) => { value.artifactInspection.signedFileSha256 = '0'.repeat(64); writeFileSync(value.options.artifactInspectionPath, JSON.stringify(value.artifactInspection)); }],
     ['changed EXE sidecar', (value: ReturnType<typeof fixture>) => { writeFileSync(value.options.artifactSidecarPath, `${'0'.repeat(64)}  gift-panel-windows-x64.exe`); }],
     ['changed FFmpeg sidecar', (value: ReturnType<typeof fixture>) => { writeFileSync(value.options.ffmpegSidecarPath, `${'0'.repeat(64)}  ffmpeg-windows-x64.exe`); }],
+    ['static inspection claiming enrollment trust', (value: ReturnType<typeof fixture>) => {
+      value.artifactInspection.rootSpkiSha256 = '0'.repeat(64);
+      writeFileSync(value.options.artifactInspectionPath, JSON.stringify(value.artifactInspection));
+    }],
     ['RushRush final identity', (value: ReturnType<typeof fixture>) => { value.goEvidence.outerIdentity = { country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P' }; }],
     ['wrong authorization hash', (value: ReturnType<typeof fixture>) => { value.goEvidence.authorizedArtifactSha256 = '0'.repeat(64); }],
     ['wrong bootstrap digest', (value: ReturnType<typeof fixture>) => { value.goEvidence.bootstrapPolicySha256 = '0'.repeat(64); }],

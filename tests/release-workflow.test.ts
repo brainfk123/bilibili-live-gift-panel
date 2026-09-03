@@ -360,6 +360,29 @@ describe('release workflow supply-chain contract', () => {
 	  expect(download?.with).toMatchObject({'artifact-ids':'${{ vars.STABLE_CANDIDATE_ARTIFACT_ID }}','run-id':'${{ vars.STABLE_CANDIDATE_RUN_ID }}','github-token':'${{ github.token }}'});
 	});
 
+	it('uses a separately pinned corrected publish verifier without trusting the candidate copy', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const validate=steps[stepIndex(steps,'Validate reviewed publish inputs')];
+	  const checkout=steps[stepIndex(steps,'Check out reviewed stable publish verifier')];
+	  const reviewed=steps[stepIndex(steps,'Validate reviewed stable publish verifier')];
+	  const revalidate=steps[stepIndex(steps,'Revalidate reviewed stable candidate')];
+	  expect(validate?.env).toMatchObject({
+		STABLE_PUBLISH_VERIFIER_COMMIT_SHA:'${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}',
+		STABLE_PUBLISH_VERIFIER_SHA256:'${{ vars.STABLE_PUBLISH_VERIFIER_SHA256 }}',
+	  });
+	  expect(checkout?.uses).toMatch(/^actions\/checkout@[0-9a-f]{40}$/);
+	  expect(checkout?.with).toMatchObject({
+		ref:'${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}',path:'publish-verifier-source','persist-credentials':false,
+	  });
+	  expect(reviewed?.run).toContain('rev-parse HEAD');
+	  expect(reviewed?.run).toContain('STABLE_PUBLISH_VERIFIER_SHA256');
+	  expect(revalidate?.run).toContain("$candidateVerifier='candidate/tools/verify-enrollment-build.mjs'");
+	  expect(revalidate?.run).toContain('$env:STABLE_PUBLISH_VERIFIER_PATH');
+	  expect(revalidate?.run).not.toContain("$verifier='candidate/tools/verify-enrollment-build.mjs'");
+	  expect(stepIndex(steps,'Validate reviewed stable publish verifier')).toBeLessThan(stepIndex(steps,'Revalidate reviewed stable candidate'));
+	});
+
 	it('executes candidate provenance validation and rejects 403, wrong run state, reruns, forks, or moved artifacts', () => {
 	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
 	  const step=jobSteps(jobs['publish-candidate'])[stepIndex(jobSteps(jobs['publish-candidate']),'Verify exact candidate run and artifact provenance')];
