@@ -263,6 +263,7 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
       artifact-name: ${{ steps.unsigned.outputs.artifact-name }}
+      changelog-history-sha256: ${{ steps.changelog.outputs.history_sha256 }}
     env:
       RELEASE_TAG: ${{ needs.classify.outputs.tag }}
       RELEASE_VERSION: ${{ needs.classify.outputs.version }}
@@ -334,10 +335,9 @@ jobs:
         shell: pwsh
         env:
           RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
-          STABLE_CHANGELOG_HISTORY_SHA256: ${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}
         run: |
           $maximum=262144
-          if($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Reviewed changelog provenance is malformed'}
+          if($env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$'){throw 'Reviewed changelog provenance is malformed'}
           $toolingHead=git -C "$env:RELEASE_TOOL_ROOT" rev-parse HEAD
           if($LASTEXITCODE -ne 0 -or $toolingHead -cne $env:RELEASE_TOOLING_COMMIT_SHA){throw 'Reviewed changelog tooling commit mismatch'}
           function Read-Changelog([byte[]]$bytes,[string]$kind){
@@ -373,7 +373,6 @@ jobs:
           $historyItem=Get-Item -LiteralPath $historyPath -Force -ErrorAction Stop
           if(-not($historyItem -is [IO.FileInfo]) -or ($historyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $historyItem.Length -le 0 -or $historyItem.Length -gt $maximum){throw 'Reviewed changelog history file is invalid'}
           $historyBytes=[IO.File]::ReadAllBytes($historyItem.FullName);$historyHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($historyBytes)).ToLowerInvariant()
-          if($historyHash -cne $env:STABLE_CHANGELOG_HISTORY_SHA256){throw 'Reviewed changelog history digest mismatch'}
           $history=@(Read-Changelog $historyBytes 'reviewed history');$currentVersion=[Version]$env:RELEASE_VERSION
           if($env:RELEASE_VERSION -ceq '0.4.12'){
             $requiredEnrollmentHistory=@('0.4.10','0.4.9','0.4.7')
@@ -719,6 +718,7 @@ jobs:
       STABLE_CANDIDATE_SHA256: ${{ needs.sign-candidate.outputs.candidate-sha256 }}
       STABLE_CANDIDATE_SIZE: ${{ needs.sign-candidate.outputs.candidate-size }}
       STABLE_CANDIDATE_COMMIT_SHA: ${{ needs.classify.outputs.commit }}
+      STABLE_CHANGELOG_HISTORY_SHA256: ${{ needs.prepare-candidate.outputs.changelog-history-sha256 }}
     steps:
       - name: Validate same-run public publish metadata
         shell: pwsh
@@ -729,7 +729,6 @@ jobs:
           STABLE_PUBLISH_VERIFIER_COMMIT_SHA: ${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}
           STABLE_PUBLISH_VERIFIER_SHA256: ${{ vars.STABLE_PUBLISH_VERIFIER_SHA256 }}
           RELEASE_TOOLING_COMMIT_SHA: ${{ vars.RELEASE_TOOLING_COMMIT_SHA }}
-          STABLE_CHANGELOG_HISTORY_SHA256: ${{ vars.STABLE_CHANGELOG_HISTORY_SHA256 }}
         run: |
           if ($env:STABLE_CANDIDATE_RUN_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_RUN_ATTEMPT -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_ARTIFACT_NAME -cne "stable-candidate-$env:RELEASE_TAG-$env:STABLE_CANDIDATE_SHA256" -or $env:STABLE_CANDIDATE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_SIZE -cnotmatch '^[1-9][0-9]*$' -or $env:STABLE_CANDIDATE_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_REVIEWED_TAG_OBJECT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CANDIDATE_INSPECTOR_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_CANDIDATE_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_PUBLISH_VERIFIER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:RELEASE_TOOLING_COMMIT_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:STABLE_CHANGELOG_HISTORY_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Same-run candidate publication metadata is missing or malformed.' }
           "STABLE_PUBLISH_VERIFIER_COMMIT_SHA=$env:STABLE_PUBLISH_VERIFIER_COMMIT_SHA" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append

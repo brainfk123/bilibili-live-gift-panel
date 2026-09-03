@@ -88,9 +88,9 @@ Candidate extraction rejects reparse points, symlinks/junctions, unexpected
 or empty directories, and files outside the exact closed set before downloaded
 tools execute. The target `gift-panel-changelog.json` must contain exactly one
 strict release entry matching the current tag/version. History comes only from
-the reviewed tooling checkout's `.github/changelog-history.json`; its exact
-bytes must match the protected lowercase SHA-256 and the checkout must match the
-reviewed tooling commit. There is no tag enumeration, hosted Release download,
+the reviewed tooling checkout's `.github/changelog-history.json`; the checkout
+must match the reviewed tooling commit and the workflow derives the exact file
+SHA-256 into the same-run handoff. There is no tag enumeration, hosted Release download,
 or fallback source. History is strict, bounded to 256 KiB, descending,
 duplicate-free, and entirely older than the current release. Candidate and
 published evidence expose only the canonical changelog hash, reviewed history
@@ -98,11 +98,10 @@ hash, and tooling commit—never paths. The deterministic merge fails on missing
 malformed, mismatched, duplicate, current-colliding, or future history.
 For the first enrollment Release, `v0.4.12`, that reviewed history must begin
 with the exact sequence `0.4.10`, `0.4.9`, `0.4.7`; `0.4.8` is not synthesized.
-Later stable versions continue to require reviewed history bytes and their
-protected digest and may add their own separately reviewed sequence invariant.
-The tooling checkout's history file and protected
-`STABLE_CHANGELOG_HISTORY_SHA256` value are one review unit and must be reviewed
-and updated together before candidate preparation or publication.
+Later stable versions continue to require reviewed history bytes and may add
+their own separately reviewed sequence invariant. No per-release
+`STABLE_CHANGELOG_HISTORY_SHA256` configuration is required; candidate and
+publisher jobs consume the digest produced by the preparation job.
 
 ## Action-time approvals
 

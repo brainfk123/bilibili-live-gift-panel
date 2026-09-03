@@ -18,27 +18,38 @@ describe('versioned changelog', () => {
     expect(css).toMatch(/\.changelog-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
   });
 
-  it('bundles only the v0.4.12 release with gift compatibility and update trust', () => {
+  it('bundles only the v0.4.13 package-size and streamlined-release update', () => {
     expect(CHANGELOG_RELEASES).toHaveLength(1);
     expect(latestChangelogRelease()).toBe(CHANGELOG_RELEASES[0]);
-    expect(normalizeChangelogVersion(' v0.4.12 ')).toBe('0.4.12');
-    expect(changelogReleaseForVersion('v0.4.12')).toEqual({
-      version: '0.4.12',
-      date: '2026-09-02',
-      title: '修复新版礼物消息并升级安全更新',
-      summary: '修复 B 站新版 SEND_GIFT_V2 普通礼物消息未触发属性玩法的问题；自动更新现在通过签名发布者策略、版本通道路由和回滚保护校验下载内容。主程序继续内嵌固定 FFmpeg 9.0，发布包同时提供经过签名和校验的独立 FFmpeg，无需运行时联网下载。',
+    expect(normalizeChangelogVersion(' v0.4.13 ')).toBe('0.4.13');
+    expect(changelogReleaseForVersion('v0.4.13')).toEqual({
+      version: '0.4.13',
+      date: '2026-09-03',
+      title: '缩小安装包并简化安全发布',
+      summary: '完整保留 v0.4.12 的礼物兼容、安全更新与内嵌 FFmpeg 功能；修正发布构建边界，不再把 FFmpeg 源码、测试工具和发布暂存目录作为 UI 资源嵌入 EXE，同时签名校验的 FFmpeg 9.0 运行时仍随主程序提供。同一法律发布者后续版本不再要求每个版本单独轮换策略 epoch。',
       highlights: [
-        { label: '礼物', title: '新版普通礼物恢复响应', description: '兼容 B 站 SEND_GIFT_V2 消息，已配置礼物可以正常触发属性规则。' },
-        { label: '更新', title: '发布者信任与防回滚', description: '更新前会校验签名策略、目标版本、文件哈希和发布者身份。' },
-        { label: 'FFmpeg', title: '固定版本随发布包提供', description: '继续使用经过签名校验的 FFmpeg 9.0，避免国内镜像下载失败。' },
+        { label: '体积', title: '移除重复发布暂存内容', description: 'FFmpeg 源码、测试工具和发布暂存目录不再作为 UI 资源嵌入主程序。' },
+        { label: '更新', title: '同一发布者一次触发发布', description: '同一法律发布者的稳定版构建、签名和发布由一次操作串联完成。' },
+        { label: '安全', title: '未知法律主体继续暂停', description: '签名证书主体发生变化时仍会停止发布，等待明确审阅和授权。' },
       ],
       visuals: [],
     });
   });
 
+  it('binds package metadata and reviewed history to v0.4.13', () => {
+    const packageJSON = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+    const packageLock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8')) as { version: string; packages: Record<string, { version?: string }> };
+    const history = JSON.parse(readFileSync(new URL('../.github/changelog-history.json', import.meta.url), 'utf8')) as { releases: Array<{ version: string }> };
+    expect(packageJSON.version).toBe('0.4.13');
+    expect(packageLock.version).toBe('0.4.13');
+    expect(packageLock.packages['']?.version).toBe('0.4.13');
+    expect(history.releases.slice(0, 4).map((release) => release.version)).toEqual(['0.4.12', '0.4.10', '0.4.9', '0.4.7']);
+    expect(history.releases.map((release) => release.version)).not.toContain('0.4.8');
+  });
+
   it('opens once for a known installed version and ignores development builds', () => {
-    expect(shouldShowChangelog('0.4.12', '')).toBe(true);
-    expect(shouldShowChangelog('v0.4.12', '0.4.12')).toBe(false);
+    expect(shouldShowChangelog('0.4.13', '')).toBe(true);
+    expect(shouldShowChangelog('v0.4.13', '0.4.13')).toBe(false);
     expect(shouldShowChangelog('dev', '')).toBe(false);
     expect(shouldShowChangelog('9.9.9', '')).toBe(false);
   });
@@ -54,12 +65,12 @@ describe('versioned changelog', () => {
       ],
     });
     const merged = mergeChangelogReleases(hosted);
-    expect(merged.map((release) => release.version)).toEqual(['0.4.12', '0.1.0']);
+    expect(merged.map((release) => release.version)).toEqual(['0.4.13', '0.1.0']);
     expect(normalizeChangelogReleases({ releases: [{ version: 'broken' }] })).toEqual([]);
   });
 
   it('ignores the removed training visual from bundled and hosted changelogs', () => {
-    expect(changelogReleaseForVersion('0.4.12')?.visuals).toEqual([]);
+    expect(changelogReleaseForVersion('0.4.13')?.visuals).toEqual([]);
     const [hosted] = normalizeChangelogReleases({
       releases: [{
         version: '0.2.5', date: '2026-08-09', title: '测试版本', summary: '测试在线日志。',
