@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "evidenceMode": "actual Hosted frontend with synthetic HTTP/SSE transport; no real login, database or migration validation",
+  "commit": "309055fbcf024607065b416a32a99d56153c0a54",
+  "browser": "151.0.7922.34",
+  "scriptSHA256": "9962eb03311ba898ae6fbfb3c8c085ed5c6088b2bc9b98c6385eec4f69b05505",
+  "fixtures": [
+    {
+      "path": "acceptance/exe-hosted-ui/fixtures/empty-0.4.10.json",
+      "sha256": "484ae42ca50e38abd8d0425f3cb70104a401ca029380b2424cbc7d46124871f2"
+    },
+    {
+      "path": "acceptance/exe-hosted-ui/fixtures/populated-0.4.10.json",
+      "sha256": "095d176b3c7f217af0d4b1fe9f9e4d189789944f37f07edd6533c84054927a64"
+    }
+  ],
+  "projection": "same gameplay IDs, attribute values, activity, target and progress; names converted to IDs for current Hosted DTO",
+  "unsupportedInCurrentDTO": [
+    "global appearance",
+    "blind-box appearance",
+    "gift target appearance",
+    "viewer contributions",
+    "gift receipt history"
+  ],
+  "captures": [
+    {
+      "view": "account",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-35-07-690Z-hosted-current/hosted-account-populated-desktop-1440x900.png",
+      "sha256": "7fb528a65f4cfb9eed51a8c32605780a5e1cadf130f47703cc2f100d2d5f5e70"
+    },
+    {
+      "view": "configuration-json",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-35-07-690Z-hosted-current/hosted-configuration-json-populated-desktop-1440x900.png",
+      "sha256": "f8e36ab3bbd82c41b7876aec7f6600ac84a618c2aa0d8c8fe5b36adf4ccf75b2"
+    },
+    {
+      "view": "account",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-35-07-690Z-hosted-current/hosted-account-populated-narrow-1024x768.png",
+      "sha256": "02ec224fd2df64ec96ce89238d81a3719302759a19a954ea93347155328515a0"
+    },
+    {
+      "view": "configuration-json",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-35-07-690Z-hosted-current/hosted-configuration-json-populated-narrow-1024x768.png",
+      "sha256": "d8fea1b4fd089140bbcbe5835c6fde1b81e35a05c7ad636344d519e0a6fbacbe"
+    },
+    {
+      "view": "account",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-35-07-690Z-hosted-current/hosted-account-populated-mobile-390x844.png",
+      "sha256": "4f2a6e082f9727e9d9dee6b65b9cca719adf0d7618ee5698a50d939ceca4d805"
+    },
+    {
+      "view": "configuration-json",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-35-07-690Z-hosted-current/hosted-configuration-json-populated-mobile-390x844.png",
+      "sha256": "aacaf52174f1910754884bd0b49b0bd191153ad61c976339620406fb0f6964f1"
+    }
+  ]
+}

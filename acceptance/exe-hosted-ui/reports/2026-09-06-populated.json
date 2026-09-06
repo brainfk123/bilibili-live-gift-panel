@@ -1,0 +1,1893 @@
+{
+  "schema": 1,
+  "scope": "Actual EXE populated and interactive states; no Hosted parity claim",
+  "referenceSnapshot": "f7d18a0e-09d5-4add-b022-de7fa9c2b074",
+  "exeSHA256": "12649c86fc8492dbd6c75ff62df22e37116adb269a24af4c9f1167bf6f283b53",
+  "session": "a0289d97-ad3b-4fab-a319-6dfb25a5caae",
+  "shards": [
+    {
+      "name": "config.json",
+      "sha256": "391c0639cfb6e1bca5cee3f375c24f7dbc163910079ecd8a966d9b38fc469178"
+    },
+    {
+      "name": "cache.json",
+      "sha256": "92d263dd30239d30551824e44884e8fc33c243ec30510f91f3b2b8084d2d3e1e"
+    },
+    {
+      "name": "history.json",
+      "sha256": "64422fbb599ab3972e14a529d8080b9b846989ab2c1006d87ca3e2c79760a0f2"
+    },
+    {
+      "name": "events.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "acceptance/exe-hosted-ui/fixtures/empty-0.4.10.json",
+      "sha256": "484ae42ca50e38abd8d0425f3cb70104a401ca029380b2424cbc7d46124871f2"
+    },
+    {
+      "path": "acceptance/exe-hosted-ui/fixtures/populated-0.4.10.json",
+      "sha256": "095d176b3c7f217af0d4b1fe9f9e4d189789944f37f07edd6533c84054927a64"
+    }
+  ],
+  "browser": "151.0.7922.34",
+  "browserPlatform": "macOS",
+  "deviceScaleFactor": 1,
+  "timezone": "Asia/Shanghai",
+  "locale": "zh-CN",
+  "commit": "309055fbcf024607065b416a32a99d56153c0a54",
+  "scriptSHA256": "ac43e0a2315fa01e83220405d008b6ab7185aa45f10ca896839f9ac666289db1",
+  "captures": [
+    {
+      "feature": "overview",
+      "state": "populated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-populated-desktop-1440x900.png",
+      "sha256": "841a27ab852615177d47eb4163a02aba9a2adb412f979966ab95e766c86bb19b",
+      "steps": [
+        "Navigate to workspace overview"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "overview",
+      "state": "focus-visible",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-focus-visible-desktop-1440x900.png",
+      "sha256": "ba3545c5746cac1b2fbe0c0e1385503ceb54b7d491e1677a351bfc391e1307c7",
+      "steps": [
+        "Navigate to workspace overview",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "overview",
+      "state": "overlay-open",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-overlay-open-desktop-1440x900.png",
+      "sha256": "0be4181bf10416d1e0b2c2fdae1532fb628ed0d13b86d71325b7814266dc6840",
+      "steps": [
+        "Navigate to workspace overview",
+        "Press Tab",
+        "Open program settings"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "populated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-populated-desktop-1440x900.png",
+      "sha256": "a7b78affe474b98943fba257f459f0b26b4a6dc59a72aa0161e26bf8a37b936c",
+      "steps": [
+        "Navigate to workspace attributes"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "focus-visible",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-focus-visible-desktop-1440x900.png",
+      "sha256": "4de0cd8644fc89df25b9be55a4622fc5466e973c23a7f18766fe4cf705b96a7e",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "editing",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-editing-desktop-1440x900.png",
+      "sha256": "cd89ccf3abb57509bb1852feb45f0be57f1249a25aa93e0822bc82abd503749e",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "validation-error",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-validation-error-desktop-1440x900.png",
+      "sha256": "84871f0403c83ea4e8bdb0012717d8831562fe3b1d1775344633fd6a11b57806",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "feedback": {
+        "message": "请填写属性名称",
+        "occluded": true
+      }
+    },
+    {
+      "feature": "attributes",
+      "state": "overlay-open",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-overlay-open-desktop-1440x900.png",
+      "sha256": "653a6f0f1bd2cecaaaeeffbf39b2fe1241a5223c17a04c0c48f8b53f44ea49cc",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name",
+        "Cancel invalid attribute draft",
+        "Create attribute",
+        "Choose blank attribute instead of a template"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "delete-confirm",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-delete-confirm-desktop-1440x900.png",
+      "sha256": "138c08e096ee39a51f2f55ef0ad33151437fdbe1c15a7bbf5dd02b03c55ab5cd",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name",
+        "Cancel invalid attribute draft",
+        "Create attribute",
+        "Choose blank attribute instead of a template",
+        "Save new synthetic attribute",
+        "Arm deletion of synthetic attribute"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "populated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-populated-desktop-1440x900.png",
+      "sha256": "a0838a97b6dfced21f6a210f0d6c7755c4a8a7f7caed324fecbca4665ed8afda",
+      "steps": [
+        "Navigate to workspace activities"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "focus-visible",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-focus-visible-desktop-1440x900.png",
+      "sha256": "cd5e51fc3e714d2fc207c1c8ba9ebb6428a21b3dcc3bb53b1799752506d3bdf6",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "overlay-open",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-overlay-open-desktop-1440x900.png",
+      "sha256": "ec5c45f2146930feb49c5f049c5dfb9211465d72668122beafb4073e88b5bbaa",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "active",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-active-desktop-1440x900.png",
+      "sha256": "166a9c86256acd3c45cd122f742084afee4cd85ee772cd47a2c69e1af8e4fe1d",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "locked",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-locked-desktop-1440x900.png",
+      "sha256": "db116e78d09670ab6e1a2d6eb2314c0a984039274ec3d918afcc4fd349b5ef09",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动",
+        "锁定结果"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "settled",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-settled-desktop-1440x900.png",
+      "sha256": "d50867bdd5a312650a40721879fc75e1d93a7ec04b362c38e788bdfd4ef916d4",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动",
+        "锁定结果",
+        "确认结算"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "populated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-populated-desktop-1440x900.png",
+      "sha256": "5886e55c891c1c63a12b078d9d242ceac9e51d0abc0e24adfa2088e1eba05788",
+      "steps": [
+        "Navigate to workspace gift-targets"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "focus-visible",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-focus-visible-desktop-1440x900.png",
+      "sha256": "fb9bc9557451e704e6cffab661331c4011e2df15ca10848475e601c18d580cf8",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "editing",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-editing-desktop-1440x900.png",
+      "sha256": "77ce0a05e93d6c9b5b60c641cf5af503db75723c3349c5284ed3bdc8524b2953",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "validation-error",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-validation-error-desktop-1440x900.png",
+      "sha256": "6609dd32905cb31f459ccc84d52f51685a4070b69949987aa69981d24ec579a2",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "feedback": {
+        "message": "请填写名称并至少选择一种礼物",
+        "occluded": true
+      }
+    },
+    {
+      "feature": "gift-targets",
+      "state": "overlay-open",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-overlay-open-desktop-1440x900.png",
+      "sha256": "4155ce03eee39849de64a4c05c7e1feece4a942e64a858d8be9c94efddb8503d",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name",
+        "Cancel target draft",
+        "Open new target editor"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "delete-confirm",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-delete-confirm-desktop-1440x900.png",
+      "sha256": "24c0149720ce04deecf852b361efea79fb7463b95193f146180904e3683a0a9e",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name",
+        "Cancel target draft",
+        "Open new target editor",
+        "Cancel new target",
+        "Arm target deletion without confirming"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "populated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-populated-desktop-1440x900.png",
+      "sha256": "063cf09f5d1f4859c196a15747cae60176fd4dd6776f28848d086ed8b5c0b5d5",
+      "steps": [
+        "Navigate to workspace obs"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "focus-visible",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-focus-visible-desktop-1440x900.png",
+      "sha256": "aeb8abc474474bed9356b08158abf2ba5e57491814bf2a5e2138e4711a881d82",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "overlay-open",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-overlay-open-desktop-1440x900.png",
+      "sha256": "96b64a0f648d9f161e0985129fe20b298918398d8db21076bd5aa849603bd9a3",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "readonly",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-readonly-desktop-1440x900.png",
+      "sha256": "cba8fc0c746c5b79cbd3aac01b03064af4329b8b1448fea1b63a1010243f8bf2",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output",
+        "Cancel combination draft",
+        "Open OBS in a fresh page, scroll to and focus its readonly output link"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "stateScope": "readonly output-link field"
+    },
+    {
+      "feature": "obs",
+      "state": "preview",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-preview-desktop-1440x900.png",
+      "sha256": "c3de0dc0c8ce514c7b7d8818a5403ddd0e3cc2749718b7baccb021101334ce2e",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output",
+        "Cancel combination draft",
+        "Open OBS in a fresh page, scroll to and focus its readonly output link",
+        "Open the combination output URL read from its readonly field"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "populated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-populated-desktop-1440x900.png",
+      "sha256": "32449d0438bce98c23b1178d1fbca9b299abf17c12727e603654a683e60645bc",
+      "steps": [
+        "Navigate to workspace analytics"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "focus-visible",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-focus-visible-desktop-1440x900.png",
+      "sha256": "645d2047d75b302263f4efcde9c4417f23f8edc30dea69d0f923b9fec5fe2682",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "filtered",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-filtered-desktop-1440x900.png",
+      "sha256": "34432f398567743723333a253f3022bcb57e96dd7f9fda4e4209cc51dc22afb1",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "paginated",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-paginated-desktop-1440x900.png",
+      "sha256": "bb18a49bb9842fea8d50293ba127411509ae755493fb86ce386fd160a702abb9",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "disabled",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-disabled-desktop-1440x900.png",
+      "sha256": "bb18a49bb9842fea8d50293ba127411509ae755493fb86ce386fd160a702abb9",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "stateScope": "media replay button without animation assets"
+    },
+    {
+      "feature": "analytics",
+      "state": "clear-confirm",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-clear-confirm-desktop-1440x900.png",
+      "sha256": "c6751d3aa944a3d6009ade1103a7e4c2360f9a80662c724d18f4cd018cc66261",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "loading",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-loading-desktop-1440x900.png",
+      "sha256": "7b64a3a8342fb201b4725efd81896810967b524c68338fc8446a12f9a71da9f4",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history",
+        "Hold the leaderboard response using browser request interception"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "evidenceMode": "browser fault injection on actual EXE UI"
+    },
+    {
+      "feature": "analytics",
+      "state": "error",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-error-desktop-1440x900.png",
+      "sha256": "b5bce1128b146a17b3bef3ccf0263edd5c9e10642cc92fd2eb8289ac59e69198",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history",
+        "Hold the leaderboard response using browser request interception",
+        "Return a deliberate HTTP 503 leaderboard response"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "evidenceMode": "browser fault injection on actual EXE UI"
+    },
+    {
+      "feature": "overview",
+      "state": "populated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-populated-narrow-1024x768.png",
+      "sha256": "29e6f7de2d31c07fc3097340424440576f60796c6b7a38b62e388448c3571857",
+      "steps": [
+        "Navigate to workspace overview"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "overview",
+      "state": "focus-visible",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-focus-visible-narrow-1024x768.png",
+      "sha256": "90da32595c7d91c81c453966f2f14b76e88da6ce7ec9a7512f85ecc3d5e24c7c",
+      "steps": [
+        "Navigate to workspace overview",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "overview",
+      "state": "overlay-open",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-overlay-open-narrow-1024x768.png",
+      "sha256": "224cbefe007b15585dbb99577ff6afc5a064a82e2baca02aa7ed3d72e265ccbf",
+      "steps": [
+        "Navigate to workspace overview",
+        "Press Tab",
+        "Open program settings"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "populated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-populated-narrow-1024x768.png",
+      "sha256": "f3f56d54b58dbd551c238dc4093216dc86b99406c4a87a3147fa37ed9f1bc651",
+      "steps": [
+        "Navigate to workspace attributes"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "focus-visible",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-focus-visible-narrow-1024x768.png",
+      "sha256": "53e6516ddb252a995e82d3fa56ef2e3f088dafef0f5f32c863607b27e8eb8bc5",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "editing",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-editing-narrow-1024x768.png",
+      "sha256": "54ef31a4f7f85aa028a90d1318da34b0a78f54dd944924a0667ac146e4a9efff",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "validation-error",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-validation-error-narrow-1024x768.png",
+      "sha256": "d6a5c935beff9611001674442c3cd13bd233a7abc07168037584b71fa49c07b6",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "feedback": {
+        "message": "请填写属性名称",
+        "occluded": true
+      }
+    },
+    {
+      "feature": "attributes",
+      "state": "overlay-open",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-overlay-open-narrow-1024x768.png",
+      "sha256": "25941ce45735c7cff52c6abee138a88dc9b58a53dca2967302d5c6713c08af63",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name",
+        "Cancel invalid attribute draft",
+        "Create attribute",
+        "Choose blank attribute instead of a template"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "delete-confirm",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-delete-confirm-narrow-1024x768.png",
+      "sha256": "ad7c2b3dc754eb367efaade4ee6dafa1ed0b5ef19204cc39913ec751e62c2789",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name",
+        "Cancel invalid attribute draft",
+        "Create attribute",
+        "Choose blank attribute instead of a template",
+        "Save new synthetic attribute",
+        "Arm deletion of synthetic attribute"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "populated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-populated-narrow-1024x768.png",
+      "sha256": "f876ba7a35164d1e3dc2d70e559d38853d76359d5eef4094c8b0eb9301d6d127",
+      "steps": [
+        "Navigate to workspace activities"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "focus-visible",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-focus-visible-narrow-1024x768.png",
+      "sha256": "6977a131764f2e8937e7bcd1cdc2632070e10843dc3f6ae9a4bfce8ce2a0dfee",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "overlay-open",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-overlay-open-narrow-1024x768.png",
+      "sha256": "c9263862c55ac6e81447e6cb6c01324a0e46238399a96c8da2fb0ea060f04294",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "active",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-active-narrow-1024x768.png",
+      "sha256": "df84cadb8184f426459cd3c95a78544d3c87457e31cb3a4d0342b9d86f4def28",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "locked",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-locked-narrow-1024x768.png",
+      "sha256": "3430fa1ce5791d30496533c62825b2bab3e6b8752085d6eb14a0121a4423aa88",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动",
+        "锁定结果"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "settled",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-settled-narrow-1024x768.png",
+      "sha256": "01eca58803a70fed432d539aec54f27477a75b0f2a94f6fdc42291acf828095a",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动",
+        "锁定结果",
+        "确认结算"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "populated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-populated-narrow-1024x768.png",
+      "sha256": "86ed2006021ae3b61363afafa45a32f1ecb7c616044d146ea4281cdc87c7059c",
+      "steps": [
+        "Navigate to workspace gift-targets"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "focus-visible",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-focus-visible-narrow-1024x768.png",
+      "sha256": "e266db4d1e1a97b6c023ede5147d76bfbdfbc5209fd920fee3f3099abc93f70c",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "editing",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-editing-narrow-1024x768.png",
+      "sha256": "3e6f1f8578e5703a6d6ef95e95d5903791c2adb05184e3dc4ede85ee4f5c7955",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "validation-error",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-validation-error-narrow-1024x768.png",
+      "sha256": "0f0e5f8b6363e38bae09ac33c28d242943adfb1530dffd643253fd6e4dfafe8b",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "feedback": {
+        "message": "请填写名称并至少选择一种礼物",
+        "occluded": true
+      }
+    },
+    {
+      "feature": "gift-targets",
+      "state": "overlay-open",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-overlay-open-narrow-1024x768.png",
+      "sha256": "5ea95bcd16ec59d52534ec5f4482b0fb93b685d278f61bbefad9b35babe2a291",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name",
+        "Cancel target draft",
+        "Open new target editor"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "delete-confirm",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-delete-confirm-narrow-1024x768.png",
+      "sha256": "c66edefd3ac1fd0c8ed69d83d2668890a63fe6404a1834f8d4542acac8fa49dd",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name",
+        "Cancel target draft",
+        "Open new target editor",
+        "Cancel new target",
+        "Arm target deletion without confirming"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "populated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-populated-narrow-1024x768.png",
+      "sha256": "4e8cccf9a19ddf84ef13c3dffeb056bc427de74b2f32fc7018a4eb6d1b13aa84",
+      "steps": [
+        "Navigate to workspace obs"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "focus-visible",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-focus-visible-narrow-1024x768.png",
+      "sha256": "6e3b9317dd15ba6563590f213ed96022d541bc27a6051868c3ed42d25919e4bb",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "overlay-open",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-overlay-open-narrow-1024x768.png",
+      "sha256": "a002fe7d96610ca5ce98f59e53ecee265c99c23e68ddf4aae82d65948c5b164e",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "readonly",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-readonly-narrow-1024x768.png",
+      "sha256": "cb7b7cfcd15dfe58798896ac9fd3f191c1bab8243e48da42d60918dbbc189de9",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output",
+        "Cancel combination draft",
+        "Open OBS in a fresh page, scroll to and focus its readonly output link"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "stateScope": "readonly output-link field"
+    },
+    {
+      "feature": "obs",
+      "state": "preview",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-preview-narrow-1024x768.png",
+      "sha256": "8b40b3305ecc557822e768fb0e3b37eca5cfd97c528cff4d0a28a097f0a6a9e6",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output",
+        "Cancel combination draft",
+        "Open OBS in a fresh page, scroll to and focus its readonly output link",
+        "Open the combination output URL read from its readonly field"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "populated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-populated-narrow-1024x768.png",
+      "sha256": "c2d05f38c18ddec676077ca17f312eec58fb684d3692901b245ad4f744dcb574",
+      "steps": [
+        "Navigate to workspace analytics"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "focus-visible",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-focus-visible-narrow-1024x768.png",
+      "sha256": "d82ee6fd022542fca4e678cffd11d590ddb1efb448987ccce1bed9f28ee61d40",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "filtered",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-filtered-narrow-1024x768.png",
+      "sha256": "0aa61b4863ddd54c7efdcc2729ab2c1bf26c66096684e47aa573488741f26f3c",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "paginated",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-paginated-narrow-1024x768.png",
+      "sha256": "9dd086d6743130c4bd4d67568faf9e8a5936d49693975d2a5f97b69b016e1667",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "disabled",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-disabled-narrow-1024x768.png",
+      "sha256": "9dd086d6743130c4bd4d67568faf9e8a5936d49693975d2a5f97b69b016e1667",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "stateScope": "media replay button without animation assets"
+    },
+    {
+      "feature": "analytics",
+      "state": "clear-confirm",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-clear-confirm-narrow-1024x768.png",
+      "sha256": "75307550623beeefd9870664c889bf692a14f77b28688eff0ea07cc42cb3e99e",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "loading",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-loading-narrow-1024x768.png",
+      "sha256": "af49e5b1a59a52875c3f9a3123fe8613ba3f66f0fdb087428d063d7d5ec51b1b",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history",
+        "Hold the leaderboard response using browser request interception"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "evidenceMode": "browser fault injection on actual EXE UI"
+    },
+    {
+      "feature": "analytics",
+      "state": "error",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-error-narrow-1024x768.png",
+      "sha256": "e2dd2f72f2eb05903069160e4baf4ed9406780e1195dc49d0a2a348c8b3f98f0",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history",
+        "Hold the leaderboard response using browser request interception",
+        "Return a deliberate HTTP 503 leaderboard response"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "evidenceMode": "browser fault injection on actual EXE UI"
+    },
+    {
+      "feature": "overview",
+      "state": "populated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-populated-mobile-390x844.png",
+      "sha256": "66e2b9ff94fb0e1090a5e8499c0910f075803c123a054d8fe3e714c406edcef5",
+      "steps": [
+        "Navigate to workspace overview"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "overview",
+      "state": "focus-visible",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-focus-visible-mobile-390x844.png",
+      "sha256": "477e13b2e9fd52922086ab5fe48f55b3f3c06e7dccfc88392cad2370bd1684cd",
+      "steps": [
+        "Navigate to workspace overview",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "overview",
+      "state": "overlay-open",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-overview-overlay-open-mobile-390x844.png",
+      "sha256": "7bb2477be489e6fb6229f68135c813bc7503be096d92fd4b0e7adce1af549ae2",
+      "steps": [
+        "Navigate to workspace overview",
+        "Press Tab",
+        "Open program settings"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "populated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-populated-mobile-390x844.png",
+      "sha256": "7a5fa19783cb281cec562924e1553a9a26880c8f0bfa895027ddc110d727b0bc",
+      "steps": [
+        "Navigate to workspace attributes"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "focus-visible",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-focus-visible-mobile-390x844.png",
+      "sha256": "145b653a0372c7ff6e31889e3292ebe4ed36df9d69776ae3b508157bfa02df8c",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "editing",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-editing-mobile-390x844.png",
+      "sha256": "ca2009c9b7bd981db864761384798ed50cfa86d767e3265381951d17a64b7271",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "validation-error",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-validation-error-mobile-390x844.png",
+      "sha256": "617ddae3d88c38570e3c251131b65243e807f16947e86388e37744faadc327fb",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "feedback": {
+        "message": "请填写属性名称",
+        "occluded": true
+      }
+    },
+    {
+      "feature": "attributes",
+      "state": "overlay-open",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-overlay-open-mobile-390x844.png",
+      "sha256": "d0b9934cd220e70f4f20fa4b426239483d480ab9385c0a8c10681fc9b0bc4d32",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name",
+        "Cancel invalid attribute draft",
+        "Create attribute",
+        "Choose blank attribute instead of a template"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "state": "delete-confirm",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-attributes-delete-confirm-mobile-390x844.png",
+      "sha256": "095ea65369ac16d3706c4c5be1cfe378b4a9a6ab85e466c1a11d5d62a15e2421",
+      "steps": [
+        "Navigate to workspace attributes",
+        "Press Tab",
+        "Edit red-team attribute",
+        "Clear attribute name",
+        "Submit empty attribute name",
+        "Cancel invalid attribute draft",
+        "Create attribute",
+        "Choose blank attribute instead of a template",
+        "Save new synthetic attribute",
+        "Arm deletion of synthetic attribute"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "populated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-populated-mobile-390x844.png",
+      "sha256": "afee5c133ed4bf40649635935772886cd613c3d9b8d743effad01671f854cf69",
+      "steps": [
+        "Navigate to workspace activities"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "focus-visible",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-focus-visible-mobile-390x844.png",
+      "sha256": "e45b094461e536add4f3b957efeb0c70c3888f2367118d3d393755fd33bd096e",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "overlay-open",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-overlay-open-mobile-390x844.png",
+      "sha256": "bc987e0afea2d0c854cd7376cb9c16d3a82f871433dc56409d02e161929dfa6d",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "active",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-active-mobile-390x844.png",
+      "sha256": "a7e70edc4c6da791dfe35f4abdb887b65fdfac6d3825e184cc5c57114ec3494a",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "locked",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-locked-mobile-390x844.png",
+      "sha256": "606ed92cf448384dd28f1edd5180876a049b765f0eaeeab2b3cde11a48f53951",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动",
+        "锁定结果"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "activities",
+      "state": "settled",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-activities-settled-mobile-390x844.png",
+      "sha256": "00face56d24440a3e2add8b8fb454ce15e70fdb53da081a0df4db21324ee13b5",
+      "steps": [
+        "Navigate to workspace activities",
+        "Press Tab",
+        "Edit fixture activity",
+        "Cancel activity draft",
+        "开始活动",
+        "锁定结果",
+        "确认结算"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "populated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-populated-mobile-390x844.png",
+      "sha256": "506cf44644af6a2baa9b98051343bf79afcb83608bfaa0fd49235de3863f6657",
+      "steps": [
+        "Navigate to workspace gift-targets"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "focus-visible",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-focus-visible-mobile-390x844.png",
+      "sha256": "b93f62d0283c932033311870f026093b08100e589f90c8383a23f63981e7f28c",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "editing",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-editing-mobile-390x844.png",
+      "sha256": "f2c8bad5aa516354577f4a5e0da2446142e8468647225e136f0627e7002eaec7",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "validation-error",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-validation-error-mobile-390x844.png",
+      "sha256": "acd2adf1edd32542b51239d3069d48f27a040042fcb6b6c7cfaa06bd64b14bbb",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "feedback": {
+        "message": "请填写名称并至少选择一种礼物",
+        "occluded": true
+      }
+    },
+    {
+      "feature": "gift-targets",
+      "state": "overlay-open",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-overlay-open-mobile-390x844.png",
+      "sha256": "46727861e03e7addb7a9ef8bccc8670d106d6c25017703bfda0c4852bfab4dc9",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name",
+        "Cancel target draft",
+        "Open new target editor"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "state": "delete-confirm",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-gift-targets-delete-confirm-mobile-390x844.png",
+      "sha256": "e0658946d45161891bf7dad1f5c3bfe6ec1f517b4375613a28fdbe1b8ea67c1d",
+      "steps": [
+        "Navigate to workspace gift-targets",
+        "Press Tab",
+        "Edit gift target",
+        "Submit empty target name",
+        "Cancel target draft",
+        "Open new target editor",
+        "Cancel new target",
+        "Arm target deletion without confirming"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "populated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-populated-mobile-390x844.png",
+      "sha256": "93b308bc368105a79a6fd3b87898a4cd734c984d13e3845fd26324d225bc221e",
+      "steps": [
+        "Navigate to workspace obs"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "focus-visible",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-focus-visible-mobile-390x844.png",
+      "sha256": "ba6ce5a263682837bdb0b7a7c7ff0fbdd220e41445bbbf3ddf2a9bd31f138fda",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "overlay-open",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-overlay-open-mobile-390x844.png",
+      "sha256": "9cf7bb5295ddc37a138796d7d8ce27dccef283d28482280b6afa9e72ad6882a2",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "obs",
+      "state": "readonly",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-readonly-mobile-390x844.png",
+      "sha256": "68348fdf488a94188f0771a1babff984d2163614e754c9e47ac8a1a75f617888",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output",
+        "Cancel combination draft",
+        "Open OBS in a fresh page, scroll to and focus its readonly output link"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "stateScope": "readonly output-link field"
+    },
+    {
+      "feature": "obs",
+      "state": "preview",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-obs-preview-mobile-390x844.png",
+      "sha256": "e39b3623b67f2f9fdd6698132b5ec73f30f5ab746ff7651ef4aef2cf7251cd87",
+      "steps": [
+        "Navigate to workspace obs",
+        "Press Tab",
+        "Focus combination card using keyboard",
+        "Edit combination output",
+        "Cancel combination draft",
+        "Open OBS in a fresh page, scroll to and focus its readonly output link",
+        "Open the combination output URL read from its readonly field"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "populated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-populated-mobile-390x844.png",
+      "sha256": "7e278cd3a46bd357c64c1ce91284499199a5b7825216c0129645754b831c5c9f",
+      "steps": [
+        "Navigate to workspace analytics"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "focus-visible",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-focus-visible-mobile-390x844.png",
+      "sha256": "8943dbf5ccbec0b5428c97930049b72c237cd0c7769c7546aadb7e33d7c1b71d",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "filtered",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-filtered-mobile-390x844.png",
+      "sha256": "4b1efb602e265a61b4b9f65b729b69b93312a486d95846d4d8261e7d737f14aa",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "paginated",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-paginated-mobile-390x844.png",
+      "sha256": "137a62b14886035b75118239aeb7b3b957462389ed63440767fca139744aeb0b",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "disabled",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-disabled-mobile-390x844.png",
+      "sha256": "137a62b14886035b75118239aeb7b3b957462389ed63440767fca139744aeb0b",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "stateScope": "media replay button without animation assets"
+    },
+    {
+      "feature": "analytics",
+      "state": "clear-confirm",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-clear-confirm-mobile-390x844.png",
+      "sha256": "dcde95def18c075bfb92a27a399e41717a9d762d5fa4bf022b928e1093bd3bd0",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "loading",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-loading-mobile-390x844.png",
+      "sha256": "4d864b750093435ab49ea70eeec227b31404da029c31e67a3a2c1489a00a6d54",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history",
+        "Hold the leaderboard response using browser request interception"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "evidenceMode": "browser fault injection on actual EXE UI"
+    },
+    {
+      "feature": "analytics",
+      "state": "error",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T08-30-54-070Z-populated/exe-analytics-error-mobile-390x844.png",
+      "sha256": "a65add68dd366ac8731e5cbe7c7bbbdf3b65a7694871d69bf448e4d44f307cda",
+      "steps": [
+        "Navigate to workspace analytics",
+        "Press Tab",
+        "Filter ranking to rule contributions",
+        "Scroll receipt list to trigger automatic next batch",
+        "Arm clearing synthetic receipt history",
+        "Hold the leaderboard response using browser request interception",
+        "Return a deliberate HTTP 503 leaderboard response"
+      ],
+      "redactions": [
+        "readonly URL fields and output-link previews"
+      ],
+      "evidenceMode": "browser fault injection on actual EXE UI"
+    }
+  ],
+  "interactions": [
+    {
+      "feature": "overview",
+      "viewport": "desktop-1440x900",
+      "action": "open-settings",
+      "result": "passed"
+    },
+    {
+      "feature": "attributes",
+      "viewport": "desktop-1440x900",
+      "action": "create/edit/validation/cancel/save",
+      "result": "passed"
+    },
+    {
+      "feature": "attributes",
+      "viewport": "desktop-1440x900",
+      "action": "delete-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "desktop-1440x900",
+      "action": "start",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "desktop-1440x900",
+      "action": "lock",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "desktop-1440x900",
+      "action": "settle",
+      "result": "passed"
+    },
+    {
+      "feature": "gift-targets",
+      "viewport": "desktop-1440x900",
+      "action": "edit/validation/cancel/delete-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "obs",
+      "viewport": "desktop-1440x900",
+      "action": "edit/cancel",
+      "result": "passed"
+    },
+    {
+      "feature": "analytics",
+      "viewport": "desktop-1440x900",
+      "action": "filter/paginate/clear-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "overview",
+      "viewport": "narrow-1024x768",
+      "action": "open-settings",
+      "result": "passed"
+    },
+    {
+      "feature": "attributes",
+      "viewport": "narrow-1024x768",
+      "action": "create/edit/validation/cancel/save",
+      "result": "passed"
+    },
+    {
+      "feature": "attributes",
+      "viewport": "narrow-1024x768",
+      "action": "delete-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "narrow-1024x768",
+      "action": "start",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "narrow-1024x768",
+      "action": "lock",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "narrow-1024x768",
+      "action": "settle",
+      "result": "passed"
+    },
+    {
+      "feature": "gift-targets",
+      "viewport": "narrow-1024x768",
+      "action": "edit/validation/cancel/delete-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "obs",
+      "viewport": "narrow-1024x768",
+      "action": "edit/cancel",
+      "result": "passed"
+    },
+    {
+      "feature": "analytics",
+      "viewport": "narrow-1024x768",
+      "action": "filter/paginate/clear-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "overview",
+      "viewport": "mobile-390x844",
+      "action": "open-settings",
+      "result": "passed"
+    },
+    {
+      "feature": "attributes",
+      "viewport": "mobile-390x844",
+      "action": "create/edit/validation/cancel/save",
+      "result": "passed"
+    },
+    {
+      "feature": "attributes",
+      "viewport": "mobile-390x844",
+      "action": "delete-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "mobile-390x844",
+      "action": "start",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "mobile-390x844",
+      "action": "lock",
+      "result": "passed"
+    },
+    {
+      "feature": "activities",
+      "viewport": "mobile-390x844",
+      "action": "settle",
+      "result": "passed"
+    },
+    {
+      "feature": "gift-targets",
+      "viewport": "mobile-390x844",
+      "action": "edit/validation/cancel/delete-confirm",
+      "result": "passed"
+    },
+    {
+      "feature": "obs",
+      "viewport": "mobile-390x844",
+      "action": "edit/cancel",
+      "result": "passed"
+    },
+    {
+      "feature": "analytics",
+      "viewport": "mobile-390x844",
+      "action": "filter/paginate/clear-confirm",
+      "result": "passed"
+    }
+  ],
+  "failures": [],
+  "restored": true,
+  "sourceFiles": [
+    {
+      "path": "scripts/capture-exe-populated-baseline.mjs",
+      "sha256": "ac43e0a2315fa01e83220405d008b6ab7185aa45f10ca896839f9ac666289db1"
+    },
+    {
+      "path": "scripts/exe-vm-session.mjs",
+      "sha256": "5b88dd3c0f809847844e99f67a0f02a741867ff7f7f0ad0a0e2c115abde6602f"
+    },
+    {
+      "path": "scripts/exe-session-lifecycle.mjs",
+      "sha256": "c0393e1cffd89d83176353994f63357d092b80ebcca3bc5d939f8522d250c49f"
+    },
+    {
+      "path": "scripts/exe-populated-fixture.mjs",
+      "sha256": "fb4da4584c1fda4c018ed6740177c7cba82ce88779b5b96c2bc8f03bba96558b"
+    }
+  ]
+}

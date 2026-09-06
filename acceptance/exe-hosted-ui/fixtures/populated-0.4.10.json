@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "description": "Synthetic offline UI fixture. No real viewers, room, credentials, or remote media.",
+  "base": "empty-0.4.10.json",
+  "timestamp": "2026-09-01T08:00:00Z",
+  "attributes": [
+    {"id":"baseline-score-red","name":"红队积分","value":23,"unit":"none","format":"number","decimals":0,"suffix":"分","color":"#fb7299"},
+    {"id":"baseline-score-blue","name":"蓝队积分","value":22,"unit":"none","format":"number","decimals":0,"suffix":"分","color":"#66ccff"}
+  ],
+  "displayScenes": [{"id":"baseline-scene","name":"双队积分板","attributeNames":["红队积分","蓝队积分"],"layout":"grid","themeId":"glass"}],
+  "activities": [{"id":"baseline-match","name":"基线友谊赛","attributeNames":["红队积分","蓝队积分"],"sceneId":"baseline-scene","status":"not_started","resultMode":"highest","gateRules":false,"initialValues":{"红队积分":0,"蓝队积分":0},"milestones":[]}],
+  "gifts": [{"id":900000001,"name":"基线测试礼物","price":100,"coinType":"gold","imgBasic":""}],
+  "giftTargets": [{"id":"baseline-target","name":"基线百份目标","layout":"grid","items":[{"giftId":900000001,"giftName":"基线测试礼物","target":100,"received":45,"barStyle":"progress"}]}],
+  "viewers": [{"key":"name:基线观众甲","uname":"基线观众甲"},{"key":"name:基线观众乙","uname":"基线观众乙"}],
+  "receiptCount":45
+}

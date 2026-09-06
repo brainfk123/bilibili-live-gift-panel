@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "scope": "EXE empty state only; Hosted comparison and remaining states pending",
+  "exeVersion": "0.4.10",
+  "exeCommit": "a2b2a217fdc02c0eef5a8c960aef9420506a0dc8",
+  "expectedExeSHA256": "12649c86fc8492dbd6c75ff62df22e37116adb269a24af4c9f1167bf6f283b53",
+  "referenceSnapshot": "f7d18a0e-09d5-4add-b022-de7fa9c2b074",
+  "identityVerification": "health version checked; artifact hash and snapshot restoration must be independently verified",
+  "fixture": {
+    "path": "acceptance/exe-hosted-ui/fixtures/empty-0.4.10.json",
+    "sha256": "484ae42ca50e38abd8d0425f3cb70104a401ca029380b2424cbc7d46124871f2"
+  },
+  "browser": "151.0.7922.34",
+  "browserPlatform": "macOS",
+  "deviceScaleFactor": 1,
+  "createdAt": "2026-09-06T07:48:08.519Z",
+  "captureCommit": "892651d06ab5220b1af1add45ea73ee3086e9f29",
+  "captureScriptSHA256": "65c379946c63875dfbbfc9c36d8dd3adceb26ea7dcdad607c5fd31f9fb7b3dd0",
+  "captures": [
+    {
+      "feature": "overview",
+      "state": "empty",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-overview-empty-desktop-1440x900.png",
+      "sha256": "d25b4eec480ae3eea2569ce236a7a72d9474b4c58a003ef5310d9059671bfe87",
+      "redactions": []
+    },
+    {
+      "feature": "attributes",
+      "state": "empty",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-attributes-empty-desktop-1440x900.png",
+      "sha256": "feebf8f3cb4197053d5c161dcd77e89c703cafe91e9cf4639b8adacfec28a027",
+      "redactions": []
+    },
+    {
+      "feature": "activities",
+      "state": "empty",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-activities-empty-desktop-1440x900.png",
+      "sha256": "ad999edb394e25e2280767c91e25e24447565d2710b58fd8329a9c0249536ab3",
+      "redactions": []
+    },
+    {
+      "feature": "gift-targets",
+      "state": "empty",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-gift-targets-empty-desktop-1440x900.png",
+      "sha256": "113185e2c98aedc3d9b30eae76ca50e4e08a5a57db80147bf535f70a365f0241",
+      "redactions": []
+    },
+    {
+      "feature": "obs",
+      "state": "empty",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-obs-empty-desktop-1440x900.png",
+      "sha256": "76c39f190df19d3b31019fe92193a0d7b8adfd9ce00e0c4081d526b6ac007798",
+      "redactions": [
+        "visible input values (OBS URLs)"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "empty",
+      "viewport": "desktop-1440x900",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-analytics-empty-desktop-1440x900.png",
+      "sha256": "cd76bcd91b887c95442ca98f759480d7e75d2c4a655b8d04c7bf5858ce6aa7cc",
+      "redactions": []
+    },
+    {
+      "feature": "overview",
+      "state": "empty",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-overview-empty-narrow-1024x768.png",
+      "sha256": "b10944428c32b20faf85f8d713e1029ddb9468ed38e210d06e4a31d2890ae291",
+      "redactions": []
+    },
+    {
+      "feature": "attributes",
+      "state": "empty",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-attributes-empty-narrow-1024x768.png",
+      "sha256": "2b8fcab507095dc9d4a9d063ae9e65b32e44374139a3ec2167bf21921a9f0e4f",
+      "redactions": []
+    },
+    {
+      "feature": "activities",
+      "state": "empty",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-activities-empty-narrow-1024x768.png",
+      "sha256": "47793813e759c06d67148db78aeaee473d727d93b8bb24cc2a04c98efddbe55d",
+      "redactions": []
+    },
+    {
+      "feature": "gift-targets",
+      "state": "empty",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-gift-targets-empty-narrow-1024x768.png",
+      "sha256": "1d01f8519d7312233d7e46b63a21ef6cfcb9b1c11b85574a3c35af336ca26b7c",
+      "redactions": []
+    },
+    {
+      "feature": "obs",
+      "state": "empty",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-obs-empty-narrow-1024x768.png",
+      "sha256": "14ac3c37657ff265279c75a744339f8d0d4c016c98b79320e31f56e9b2b56765",
+      "redactions": [
+        "visible input values (OBS URLs)"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "empty",
+      "viewport": "narrow-1024x768",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-analytics-empty-narrow-1024x768.png",
+      "sha256": "0df3d2a172170abaa74e5dc34c9a85879ec85f7fb25e0b9eb32d127436f889b1",
+      "redactions": []
+    },
+    {
+      "feature": "overview",
+      "state": "empty",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-overview-empty-mobile-390x844.png",
+      "sha256": "60f6161fdfb1c4ef8f5c42d1d19739c6ef9f64661bc7b8f31438039540a3de01",
+      "redactions": []
+    },
+    {
+      "feature": "attributes",
+      "state": "empty",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-attributes-empty-mobile-390x844.png",
+      "sha256": "ce1f90d0ee70d173affb2f54aa998e6d90a04c4d0f33ecdfe571eae69dfe82c0",
+      "redactions": []
+    },
+    {
+      "feature": "activities",
+      "state": "empty",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-activities-empty-mobile-390x844.png",
+      "sha256": "c1bc6d09d1f7d4b6f20a6b04b546be0e0b50c71fc22858ea819e3e75605ac58c",
+      "redactions": []
+    },
+    {
+      "feature": "gift-targets",
+      "state": "empty",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-gift-targets-empty-mobile-390x844.png",
+      "sha256": "dad09adcf4ca95c9dca3019d50c35a9ff8cf95503efead0742f44a60b8670139",
+      "redactions": []
+    },
+    {
+      "feature": "obs",
+      "state": "empty",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-obs-empty-mobile-390x844.png",
+      "sha256": "634c48b5e36403c2d8df6e9681ea8c99909e3ee77d4d4a21f68a790cadc807f2",
+      "redactions": [
+        "visible input values (OBS URLs)"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "state": "empty",
+      "viewport": "mobile-390x844",
+      "path": "acceptance/exe-hosted-ui/captures/0.4.10/2026-09-06T07-48-05-830Z/exe-analytics-empty-mobile-390x844.png",
+      "sha256": "d32610e56ff91dee7452616d97b2a347ffb929add1e24bb3323569ada73ee389",
+      "redactions": []
+    }
+  ],
+  "independentArtifactCheck": {
+    "date": "2026-09-06",
+    "method": "Windows certutil SHA256 of reference EXE",
+    "sha256": "12649c86fc8492dbd6c75ff62df22e37116adb269a24af4c9f1167bf6f283b53"
+  }
+}

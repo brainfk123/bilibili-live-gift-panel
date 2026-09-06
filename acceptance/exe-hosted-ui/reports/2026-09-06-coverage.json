@@ -1,0 +1,320 @@
+{
+  "schema": 1,
+  "scope": "EXE state coverage only. Component-level readonly/disabled do not satisfy workspace-level requirements. Hosted parity has not passed.",
+  "captured": 99,
+  "pending": 69,
+  "matrix": [
+    {
+      "feature": "overview",
+      "viewport": "desktop-1440x900",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "overview",
+      "viewport": "narrow-1024x768",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "overview",
+      "viewport": "mobile-390x844",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "viewport": "desktop-1440x900",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "editing",
+        "validation-error"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "viewport": "narrow-1024x768",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "editing",
+        "validation-error"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "attributes",
+      "viewport": "mobile-390x844",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "editing",
+        "validation-error"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "activities",
+      "viewport": "desktop-1440x900",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "active",
+        "locked",
+        "settled"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "activities",
+      "viewport": "narrow-1024x768",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "active",
+        "locked",
+        "settled"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "activities",
+      "viewport": "mobile-390x844",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "active",
+        "locked",
+        "settled"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "viewport": "desktop-1440x900",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "editing"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "viewport": "narrow-1024x768",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "editing"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "gift-targets",
+      "viewport": "mobile-390x844",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "editing"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "obs",
+      "viewport": "desktop-1440x900",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "preview"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "obs",
+      "viewport": "narrow-1024x768",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "preview"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "obs",
+      "viewport": "mobile-390x844",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "focus-visible",
+        "overlay-open",
+        "preview"
+      ],
+      "pendingStates": [
+        "loading",
+        "error",
+        "readonly",
+        "disabled"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "viewport": "desktop-1440x900",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "loading",
+        "error",
+        "focus-visible",
+        "filtered"
+      ],
+      "pendingStates": [
+        "readonly",
+        "disabled",
+        "overlay-open"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "viewport": "narrow-1024x768",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "loading",
+        "error",
+        "focus-visible",
+        "filtered"
+      ],
+      "pendingStates": [
+        "readonly",
+        "disabled",
+        "overlay-open"
+      ]
+    },
+    {
+      "feature": "analytics",
+      "viewport": "mobile-390x844",
+      "capturedStates": [
+        "empty",
+        "populated",
+        "loading",
+        "error",
+        "focus-visible",
+        "filtered"
+      ],
+      "pendingStates": [
+        "readonly",
+        "disabled",
+        "overlay-open"
+      ]
+    }
+  ]
+}

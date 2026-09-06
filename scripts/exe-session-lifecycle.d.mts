@@ -1,0 +1,2 @@
+export function beginDisposableSession(options: {stopOriginal(): Promise<void>; startFixture(): Promise<void>; verifyFixture(): Promise<unknown>; restore(): Promise<void>}): Promise<unknown>;
+export function finishDisposableSession(options: {closeBrowser(): Promise<void>; restore(): Promise<void>; verifyOriginal(): Promise<void>}): Promise<{restored:boolean;errors:Array<{phase:string;message:string}>}>;
