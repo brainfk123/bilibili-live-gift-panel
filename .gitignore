@@ -7,3 +7,4 @@ artifacts/
 .local-secrets/
 .tmp/
 *.local
+acceptance/exe-hosted-ui/captures/

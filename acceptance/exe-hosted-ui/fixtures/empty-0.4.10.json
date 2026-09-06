@@ -1,0 +1,25 @@
+{
+  "roomId": "",
+  "attributes": [],
+  "displayScenes": [],
+  "giftKpiPanels": [],
+  "activities": [],
+  "rules": [],
+  "timerRules": [],
+  "formulaPresets": [],
+  "giftCatalog": [],
+  "recentGifts": [],
+  "stats": {},
+  "log": [],
+  "giftReceipts": [],
+  "contributions": { "viewers": [] },
+  "blindBoxDisplay": { "themeId": "glass", "fontSize": 48, "accentColor": "#fb7299", "showConnection": true, "align": "center", "panelOpacity": 55, "viewerSlots": 3 },
+  "settings": {
+    "fontSize": 48, "accentColor": "#fb7299", "showStats": true, "showConnection": true,
+    "align": "center", "theme": "dark", "giftView": "list", "panelOpacity": 55,
+    "defaultDisplayThemeId": "glass", "showTutorial": false, "tutorialVersion": 3,
+    "tutorialCompletedLessons": [], "tutorialReplayMode": true, "trainingCompletedTopics": [],
+    "lastSeenChangelogVersion": "0.4.10", "autoUpdate": false,
+    "configExperience": "advanced", "giftClipCrops": {}
+  }
+}
