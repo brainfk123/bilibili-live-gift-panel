@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -126,6 +126,17 @@ function readinessFixture(manifestScoped = true) {
 }
 
 describe('bridge readiness reviewed evidence', () => {
+  it('runs the CLI validation when launched through a directory alias', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bridge-readiness-alias-'));
+    try {
+      const scriptPath = materializeWorkflowReadinessTool(root);
+      const alias = join(root, 'scripts-alias');
+      symlinkSync(dirname(scriptPath), alias, 'junction');
+      const result = spawnSync(process.execPath, [join(alias, 'bridge-release-inputs.mjs'), 'verify'], { encoding: 'utf8' });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('bridge readiness verification failed');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   it('adapts the actual Task9 publisher closure into the strict bridge bundle and readiness gate', async () => {
     const fixture = readinessFixture();
     let published: Parameters<PublisherAdapters['github']['publishImmutableRelease']>[0] | undefined;

@@ -13,6 +13,8 @@ ln -sfn "$(brew --prefix)/lib/docker/cli-plugins/docker-compose" "$HOME/.docker/
 ln -sfn "$(brew --prefix)/lib/docker/cli-plugins/docker-buildx" "$HOME/.docker/cli-plugins/docker-buildx"
 colima start --runtime docker --vm-type vz
 export BASH_BIN="$(brew --prefix)/bin/bash"
+# 安全文件测试拒绝路径中的符号链接；macOS 的 /var 是 /private/var 别名。
+export TMPDIR="$(node -e 'process.stdout.write(require("node:fs").realpathSync(require("node:os").tmpdir()))')"
 docker version
 docker compose version
 npm ci
@@ -89,6 +91,8 @@ Windows x64 只在需要验证真实目标行为时运行：例如 Windows 专�
 修复在 Mac checkout 中完成，提交后由 CI 重新构建、重新上传和复验；不要在 VM 或下载的 artifact 中直接编辑代码。无法复现时也要回传上述证据，而不是只报告“本地正常”。
 
 ## Windows 11 ARM snapshot rules
+
+已安装 VM 的启动、受限转发、快照与固定 EXE 版本见 [Windows ARM UI 开发环境](windows-arm-ui-environment.md)。
 
 Windows 11 ARM snapshot 可用于检查安装、启动、窗口交互、Hosted 页面、文件路径和软件编码等 ARM 行为。snapshot 必须注明系统架构、镜像版本、测试 commit 和测试范围，不包含发布凭据。
 

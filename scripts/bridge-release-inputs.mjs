@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { POLICY_RELEASE_ASSET_CONTRACT } from './publisher-policy-release-contract.mjs';
@@ -206,6 +207,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(resolve(process.argv[1]))).href) {
   main().catch(() => { console.error('bridge readiness verification failed'); process.exitCode = 1; });
 }
