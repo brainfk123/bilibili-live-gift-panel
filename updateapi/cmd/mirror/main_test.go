@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -14,7 +16,62 @@ import (
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/mirror"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish"
+	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 )
+
+func TestRunRequiresExactChannelAndTagCombinationsBeforeFactory(t *testing.T) {
+	for _, args := range [][]string{
+		{"--dry-run", "--state-dir", t.TempDir()},
+		{"--channel", "preview", "--dry-run", "--state-dir", t.TempDir()},
+		{"--channel", "stable", "--tag", "v0.4.11", "--dry-run", "--state-dir", t.TempDir()},
+		{"--channel", "legacy-rushrush", "--dry-run", "--state-dir", t.TempDir()},
+		{"--channel", "legacy-rushrush", "--tag", "v0.4.10", "--dry-run", "--state-dir", t.TempDir()},
+	} {
+		factoryCalls := 0
+		err := run(context.Background(), args, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+			factoryCalls++
+			return &fakeCommandRunner{}, nil
+		}, io.Discard, time.Now)
+		if err == nil || commandStageOf(err) != stageArguments {
+			t.Fatalf("run(%v) error=%v stage=%q, want argument rejection", args, err, commandStageOf(err))
+		}
+		if factoryCalls != 0 {
+			t.Fatalf("run(%v) factory calls=%d", args, factoryCalls)
+		}
+	}
+}
+
+func TestRunIsolatesStateDirectoryAndOptionsByChannel(t *testing.T) {
+	base := t.TempDir()
+	tests := []struct {
+		name    string
+		args    []string
+		channel release.Channel
+		tag     string
+	}{
+		{name: "stable", args: []string{"--channel", "stable", "--dry-run", "--state-dir", base}, channel: release.ChannelStable},
+		{name: "legacy", args: []string{"--channel", "legacy-rushrush", "--tag", "v0.4.11", "--dry-run", "--state-dir", base}, channel: release.ChannelLegacyRushRush, tag: "v0.4.11"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeCommandRunner{result: mirror.RunResult{NotModified: true}}
+			var gotStateDir string
+			err := run(context.Background(), test.args, emptyEnvironment, func(stateDir string, _ cosConfiguration) (commandRunner, error) {
+				gotStateDir = stateDir
+				return runner, nil
+			}, io.Discard, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotStateDir != filepath.Join(base, string(test.channel)) {
+				t.Fatalf("state dir = %q, want channel-isolated path", gotStateDir)
+			}
+			if runner.options.Channel != test.channel || runner.options.Tag != test.tag {
+				t.Fatalf("RunOptions = %+v", runner.options)
+			}
+		})
+	}
+}
 
 // Mutation caught: removing the build identity flag makes a deployed binary impossible to tie to its reviewed source commit.
 func TestRunReportsEmbeddedBuildCommitWithoutConstructingMirror(t *testing.T) {
@@ -49,14 +106,14 @@ func TestRunRejectsNonReviewedBuildIdentityOutsideDryRun(t *testing.T) {
 	})
 	factoryCalls := 0
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"--state-dir", t.TempDir()}, configuration, func(string, cosConfiguration) (commandRunner, error) {
+	err := run(context.Background(), []string{"--channel", "stable", "--state-dir", t.TempDir()}, configuration, func(string, cosConfiguration) (commandRunner, error) {
 		factoryCalls++
 		return &fakeCommandRunner{}, nil
 	}, &output, time.Now)
 	if err == nil || commandStageOf(err) != stageConfiguration || factoryCalls != 0 {
 		t.Fatalf("run() error=%v stage=%q factory=%d", err, commandStageOf(err), factoryCalls)
 	}
-	if err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(&fakeCommandRunner{result: mirror.RunResult{DryRun: true}}), &output, time.Now); err != nil {
+	if err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(&fakeCommandRunner{result: mirror.RunResult{DryRun: true}}), &output, time.Now); err != nil {
 		t.Fatalf("dry-run error = %v", err)
 	}
 }
@@ -94,7 +151,7 @@ func TestRunRequiresAbsoluteCleanStateDirectory(t *testing.T) {
 	unclean := t.TempDir() + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "unclean"
 	for _, stateDir := range []string{"", "relative", "relative/path", unclean} {
 		var output bytes.Buffer
-		err := run(context.Background(), []string{"--dry-run", "--state-dir", stateDir}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+		err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", stateDir}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
 			return &fakeCommandRunner{}, nil
 		}, &output, time.Now)
 		if err == nil || commandStageOf(err) != stageArguments {
@@ -107,14 +164,14 @@ func TestRunRequiresAbsoluteCleanStateDirectory(t *testing.T) {
 func TestRunUsesFixedProductionStateDirectoryDefault(t *testing.T) {
 	var gotStateDir string
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"--dry-run"}, emptyEnvironment, func(stateDir string, _ cosConfiguration) (commandRunner, error) {
+	err := run(context.Background(), []string{"--channel", "stable", "--dry-run"}, emptyEnvironment, func(stateDir string, _ cosConfiguration) (commandRunner, error) {
 		gotStateDir = stateDir
 		return &fakeCommandRunner{result: mirror.RunResult{Tag: "v1.2.3", DryRun: true}}, nil
 	}, &output, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotStateDir != "/var/lib/gift-panel-release-mirror" {
+	if gotStateDir != "/var/lib/gift-panel-release-mirror/stable" {
 		t.Fatalf("state directory = %q", gotStateDir)
 	}
 }
@@ -124,7 +181,7 @@ func TestRunDryRunNeedsNoCOSEnvironmentAndForwardsOption(t *testing.T) {
 	var gotConfiguration cosConfiguration
 	runner := &fakeCommandRunner{result: mirror.RunResult{Tag: "v1.2.3", DryRun: true}}
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(_ string, configuration cosConfiguration) (commandRunner, error) {
+	err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(_ string, configuration cosConfiguration) (commandRunner, error) {
 		gotConfiguration = configuration
 		return runner, nil
 	}, &output, time.Now)
@@ -156,7 +213,7 @@ func TestRunNormalModeRequiresAllFourCOSVariables(t *testing.T) {
 			delete(environment, missing)
 			factoryCalls := 0
 			var output bytes.Buffer
-			err := run(context.Background(), []string{"--state-dir", t.TempDir()}, mapEnvironment(environment), func(string, cosConfiguration) (commandRunner, error) {
+			err := run(context.Background(), []string{"--channel", "stable", "--state-dir", t.TempDir()}, mapEnvironment(environment), func(string, cosConfiguration) (commandRunner, error) {
 				factoryCalls++
 				return &fakeCommandRunner{}, nil
 			}, &output, time.Now)
@@ -171,7 +228,7 @@ func TestRunNormalModeRequiresAllFourCOSVariables(t *testing.T) {
 
 	var got cosConfiguration
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"--state-dir", t.TempDir()}, mapEnvironment(complete), func(_ string, configuration cosConfiguration) (commandRunner, error) {
+	err := run(context.Background(), []string{"--channel", "stable", "--state-dir", t.TempDir()}, mapEnvironment(complete), func(_ string, configuration cosConfiguration) (commandRunner, error) {
 		got = configuration
 		return &fakeCommandRunner{result: mirror.RunResult{NotModified: true}}, nil
 	}, &output, time.Now)
@@ -197,7 +254,7 @@ func TestRunSuppliesFiniteOverallDeadline(t *testing.T) {
 		return nil
 	}, result: mirror.RunResult{Tag: "v1.2.3", DryRun: true}}
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, time.Now); err != nil {
+	if err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, time.Now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -208,7 +265,7 @@ func TestRunPreservesCallerCancellation(t *testing.T) {
 	cancel()
 	runner := &fakeCommandRunner{inspectContext: func(ctx context.Context) error { return ctx.Err() }}
 	var output bytes.Buffer
-	err := run(ctx, []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, time.Now)
+	err := run(ctx, []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, time.Now)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("run() error = %v, want context.Canceled", err)
 	}
@@ -226,7 +283,7 @@ func TestRunWithSignalsCancelsOnSIGTERM(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		var output bytes.Buffer
-		result <- runWithSignals(context.Background(), signals, []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, time.Now)
+		result <- runWithSignals(context.Background(), signals, []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, time.Now)
 	}()
 	<-started
 	signals <- syscall.SIGTERM
@@ -249,7 +306,7 @@ func TestRunWithSignalsCancelsBlockingFactoryOnSIGTERM(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		var output bytes.Buffer
-		result <- runWithSignals(context.Background(), signals, []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+		result <- runWithSignals(context.Background(), signals, []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
 			close(started)
 			<-releaseFactory
 			return runner, nil
@@ -283,7 +340,7 @@ func TestRunCallerDeadlineCancelsBlockingFactory(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		var output bytes.Buffer
-		result <- run(ctx, []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+		result <- run(ctx, []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
 			close(started)
 			<-releaseFactory
 			return &fakeCommandRunner{}, nil
@@ -316,7 +373,7 @@ func TestRunOverallDeadlineStartsBeforeFactoryConstruction(t *testing.T) {
 		return nil
 	}, result: mirror.RunResult{Tag: "v1.2.3", DryRun: true}}
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
+	err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, func(string, cosConfiguration) (commandRunner, error) {
 		time.Sleep(100 * time.Millisecond)
 		return runner, nil
 	}, &output, time.Now)
@@ -335,7 +392,7 @@ func TestRunWritesOnlySafeSuccessSummaries(t *testing.T) {
 	} {
 		clock := &stepClock{times: []time.Time{time.Unix(0, 0), time.Unix(2, 0)}}
 		var output bytes.Buffer
-		err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(&fakeCommandRunner{result: result}), &output, clock.Now)
+		err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(&fakeCommandRunner{result: result}), &output, clock.Now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,7 +419,7 @@ func TestRunWritesOnlySafeStageFailureSummary(t *testing.T) {
 	}
 	clock := &stepClock{times: []time.Time{time.Unix(0, 0), time.Unix(3, 0)}}
 	var output bytes.Buffer
-	err := run(context.Background(), []string{"--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, clock.Now)
+	err := run(context.Background(), []string{"--channel", "stable", "--dry-run", "--state-dir", t.TempDir()}, emptyEnvironment, fixedRunnerFactory(runner), &output, clock.Now)
 	if err == nil || mirror.StageOf(err) != mirror.StageDiscovery {
 		t.Fatalf("run() error = %v, stage=%q", err, mirror.StageOf(err))
 	}
@@ -432,6 +489,10 @@ func (clock *stepClock) Now() time.Time {
 type cliReleaseSource struct{ err error }
 
 func (source cliReleaseSource) Latest(context.Context, string) (mirror.LatestResult, error) {
+	return mirror.LatestResult{}, source.err
+}
+
+func (source cliReleaseSource) ByTag(context.Context, string, string) (mirror.LatestResult, error) {
 	return mirror.LatestResult{}, source.err
 }
 

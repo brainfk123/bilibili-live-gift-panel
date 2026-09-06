@@ -8,73 +8,85 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 600_000;
 const DEFAULT_RETRY_DELAYS_MS = Object.freeze([15_000, 45_000]);
 const SIGNATURE_GROWTH_LIMIT = 4 * 1024 * 1024;
+export const EVSIGN_API_ENDPOINT = 'https://api.evsign.cn/v1';
 const RETRYABLE_NETWORK_CODES = new Set(['ECONNABORTED', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETDOWN', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ETIMEDOUT']);
-const SIGNER_PROFILE_KEYS = new Set(['name', 'cert', 'subject']);
+const IDENTITY_KEYS = new Set(['country', 'organization', 'organizationId']);
+const SIGNER_PROFILES = Object.freeze({
+  stable: Object.freeze({
+    certificateEnv: 'EVSIGN_CERTIFICATE',
+    expectedIdentityEnv: 'EVSIGN_PUBLISHER_IDENTITY',
+    identity: Object.freeze({ country: 'CN', organization: 'NaisNet Technology Co., Ltd.', organizationId: '91210103MA7CJ3C094' }),
+  }),
+  bridge: Object.freeze({
+    certificateEnv: 'EVSIGN_BRIDGE_CERTIFICATE',
+    expectedIdentityEnv: 'EVSIGN_BRIDGE_PUBLISHER_IDENTITY',
+    identity: Object.freeze({ country: 'CN', organization: 'RushRush Network Technology Ltd', organizationId: '91450900MADM3GLG5P' }),
+  }),
+});
 
-export function resolveEVSignSignerProfile(environment = process.env) {
-  const profilesJSON = environment.EVSIGN_SIGNER_PROFILES_JSON?.trim() || '';
-  const activeProfile = environment.EVSIGN_ACTIVE_PROFILE?.trim() || '';
-  if ((profilesJSON === '') !== (activeProfile === '')) {
-    throw new Error('EVSIGN_SIGNER_PROFILES_JSON and EVSIGN_ACTIVE_PROFILE must be configured together.');
+export function resolveEVSignSignerProfile(profileName, environment = process.env) {
+  const profile = SIGNER_PROFILES[profileName];
+  if (!profile) throw new Error('unknown EVSign signer profile.');
+  for (const [otherName, other] of Object.entries(SIGNER_PROFILES)) {
+    if (otherName === profileName) continue;
+    if ((environment[other.certificateEnv]?.trim() || '') !== '' || (environment[other.expectedIdentityEnv]?.trim() || '') !== '') {
+      throw new Error('cross-profile EVSign configuration is not allowed.');
+    }
   }
 
-  if (!profilesJSON) {
-    const cert = environment.EVSIGN_CERT?.trim() || '';
-    const subject = environment.EVSIGN_EXPECTED_SUBJECT?.trim() || '';
-    if (!subject) throw new Error('EVSIGN_EXPECTED_SUBJECT is required when signer profiles are not configured.');
-    validateProfileValue('cert', cert, 1024, true);
-    validateProfileValue('subject', subject, 4096, false);
-    return { schema: 1, source: 'legacy', profile: 'legacy', cert, subject };
+  const certificate = environment[profile.certificateEnv];
+  const identityJSON = environment[profile.expectedIdentityEnv];
+  if (!validProfileString(certificate, 1024) || !validProfileString(identityJSON, 4096)) {
+    throw new Error(`${profileName} EVSign profile is not configured.`);
   }
-
-  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(activeProfile)) {
-    throw new Error('EVSIGN_ACTIVE_PROFILE is invalid.');
+  if (profileName === 'bridge' && certificate === 'default') {
+    throw new Error('bridge EVSign certificate must be explicit.');
   }
-
-  let profiles;
+  let identity;
   try {
-    profiles = JSON.parse(profilesJSON);
+    identity = JSON.parse(identityJSON);
   } catch {
-    throw new Error('EVSIGN_SIGNER_PROFILES_JSON is not valid JSON.');
+    throw new Error(`${profileName} EVSign publisher identity is invalid.`);
   }
-  if (!Array.isArray(profiles) || profiles.length < 1 || profiles.length > 16) {
-    throw new Error('EVSIGN_SIGNER_PROFILES_JSON must contain an array of 1 to 16 profiles.');
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity) || Object.keys(identity).length !== IDENTITY_KEYS.size || Object.keys(identity).some((key) => !IDENTITY_KEYS.has(key))) {
+    throw new Error(`${profileName} EVSign publisher identity is invalid.`);
   }
-
-  const names = new Set();
-  let selected;
-  for (const profile of profiles) {
-    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
-      throw new Error('Each EVSign signer profile must be an object.');
-    }
-    const keys = Object.keys(profile);
-    if (keys.some((key) => !SIGNER_PROFILE_KEYS.has(key)) || keys.length !== SIGNER_PROFILE_KEYS.size) {
-      throw new Error('EVSign signer profile contains missing or unknown properties.');
-    }
-    const { name, cert, subject } = profile;
-    const normalizedCert = cert === null ? '' : cert;
-    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) {
-      throw new Error('EVSign signer profile name is invalid.');
-    }
-    if (names.has(name)) throw new Error('EVSign signer profile name is duplicated.');
-    names.add(name);
-    validateProfileValue('cert', normalizedCert, 1024, true);
-    validateProfileValue('subject', subject, 4096, false);
-    if (name === activeProfile) selected = { schema: 1, source: 'profiles', profile: name, cert: normalizedCert, subject };
+  const identityMatchesProfile = profileName === 'stable'
+    ? validStableIdentity(identity)
+    : Object.entries(profile.identity).every(([key, value]) => identity[key] === value);
+  if (!identityMatchesProfile) {
+    throw new Error(`${profileName} EVSign publisher identity is not the reviewed identity.`);
   }
-  if (!selected) throw new Error('The active EVSign signer profile does not exist.');
-  return selected;
+  return { schema: 2, profile: profileName, certificate, identity: { ...identity } };
 }
 
-function validateProfileValue(name, value, maximumBytes, allowEmpty) {
-  if (typeof value !== 'string' || value !== value.trim() || (!allowEmpty && value.length === 0) || /[\r\n]/.test(value) || Buffer.byteLength(value, 'utf8') > maximumBytes) {
-    throw new Error(`EVSign signer profile ${name} is invalid.`);
-  }
+function validStableIdentity(identity) {
+  const rushRush = identity.country === 'CN' && identity.organization === 'RushRush Network Technology Ltd' && identity.organizationId === '91450900MADM3GLG5P';
+  return !rushRush && identity.country === 'CN' && validProfileString(identity.organization, 256) && !/\p{C}/u.test(identity.organization) &&
+    typeof identity.organizationId === 'string' && /^[0-9A-Z]{8,32}$/.test(identity.organizationId);
 }
 
-export async function requestSignedBytes(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes }) {
-  const url = new URL(endpoint);
-  if (url.protocol !== 'https:') throw new Error('EV Sign endpoint must use HTTPS.');
+function validProfileString(value, maximumBytes) {
+  return typeof value === 'string' && value.length > 0 && value === value.trim() && !/[\r\n]/.test(value) && Buffer.byteLength(value, 'utf8') <= maximumBytes;
+}
+
+export async function requestSignedBytes(source, { headers, attemptTimeoutMs, maximumResponseBytes, fetchImpl }) {
+  const url = new URL(EVSIGN_API_ENDPOINT);
+  if (fetchImpl) {
+    const response = await fetchImpl(url, { method: 'POST', headers, body: source, redirect: 'error' });
+    if (response.status !== 200) {
+      const error = new Error(`EV Sign failed with HTTP ${response.status}.`);
+      error.statusCode = response.status;
+      throw error;
+    }
+    const declared = response.headers.get('content-length');
+    if (declared !== null && (!/^(?:0|[1-9][0-9]*)$/.test(declared) || Number(declared) > maximumResponseBytes)) {
+      throw integrityError('EV Sign response exceeds the signed-file size limit.');
+    }
+    const signed = Buffer.from(await response.arrayBuffer());
+    if (signed.length > maximumResponseBytes) throw integrityError('EV Sign response exceeds the signed-file size limit.');
+    return signed;
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
     let deadline;
@@ -118,9 +130,9 @@ export async function requestSignedBytes(source, { endpoint, headers, attemptTim
 }
 
 export async function signFileWithRetry(options, dependencies = {}) {
-  const { inputPath, outputPath, endpoint, headers, maxAttempts = DEFAULT_MAX_ATTEMPTS, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS, retryDelaysMs = DEFAULT_RETRY_DELAYS_MS } = options;
+  const { inputPath, outputPath, headers, maxAttempts = DEFAULT_MAX_ATTEMPTS, attemptTimeoutMs = DEFAULT_ATTEMPT_TIMEOUT_MS, retryDelaysMs = DEFAULT_RETRY_DELAYS_MS } = options;
   validateRetryPolicy(maxAttempts, attemptTimeoutMs, retryDelaysMs);
-  const request = dependencies.request || ((source) => requestSignedBytes(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT }));
+  const request = dependencies.request || ((source) => requestSignedBytes(source, { headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT }));
   const sleep = dependencies.sleep || ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
   const log = dependencies.log || console.log;
   const source = await readFile(inputPath);
@@ -129,7 +141,7 @@ export async function signFileWithRetry(options, dependencies = {}) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const started = Date.now();
     try {
-      const signed = await request(source, { endpoint, headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT });
+      const signed = await request(source, { endpoint: EVSIGN_API_ENDPOINT, headers, attemptTimeoutMs, maximumResponseBytes: source.length + SIGNATURE_GROWTH_LIMIT });
       if (!Buffer.isBuffer(signed) || signed.length === 0) throw integrityError('EV Sign returned an empty file.');
       if (signed.length > source.length + SIGNATURE_GROWTH_LIMIT) throw integrityError('EV Sign response exceeds the signed-file size limit.');
       const temporaryPath = `${outputPath}.signing-${process.pid}-${randomBytes(8).toString('hex')}`;
@@ -152,6 +164,35 @@ export async function signFileWithRetry(options, dependencies = {}) {
       await sleep(delay);
     }
   }
+}
+
+export async function signWithProfile(options, dependencies = {}) {
+  const environment = options.environment || process.env;
+  if ((environment.EVSIGN_ENDPOINT?.trim() || '') !== '') throw new Error('EVSign endpoint override is forbidden.');
+  const signerProfile = resolveEVSignSignerProfile(options.profile, environment);
+  const key = environment.EVSIGN_KEY?.trim();
+  if (!key) throw new Error('EVSIGN_KEY is required. Store the EV Sign license UUID in GitHub Actions Secrets.');
+  const inputPath = resolve(options.inputPath);
+  const outputPath = resolve(options.outputPath || options.inputPath);
+  const headers = {
+    'Content-Type': 'application/octet-stream',
+    'X-Key': key,
+    'X-Action': 'api-sign',
+    'X-Algorithm': 'sha256',
+    'X-File-Name': encodeURIComponent(basename(outputPath)),
+    'X-Timestamp': environment.EVSIGN_TIMESTAMP?.trim() || 'auto',
+    'X-Append': 'no',
+  };
+  if (signerProfile.certificate !== 'default') headers['X-Cert'] = signerProfile.certificate;
+  if (environment.EVSIGN_PASSWORD?.trim()) headers['X-Password'] = environment.EVSIGN_PASSWORD.trim();
+  await signFileWithRetry({
+    inputPath,
+    outputPath,
+    headers,
+    maxAttempts: readIntegerEnvironmentFrom(environment, 'EVSIGN_MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS),
+    attemptTimeoutMs: readIntegerEnvironmentFrom(environment, 'EVSIGN_ATTEMPT_TIMEOUT_MS', DEFAULT_ATTEMPT_TIMEOUT_MS),
+    retryDelaysMs: readRetryDelaysFrom(environment),
+  }, dependencies);
 }
 
 function signingErrorCategory(error) {
@@ -185,37 +226,46 @@ function validateRetryPolicy(maxAttempts, attemptTimeoutMs, retryDelaysMs) {
 }
 
 function readIntegerEnvironment(name, fallback) {
-  const value = process.env[name]?.trim();
+  return readIntegerEnvironmentFrom(process.env, name, fallback);
+}
+
+function readIntegerEnvironmentFrom(environment, name, fallback) {
+  const value = environment[name]?.trim();
   if (!value) return fallback;
   if (!/^\d+$/.test(value)) throw new Error(`${name} must contain one decimal integer.`);
   return Number(value);
 }
 
 function readRetryDelays() {
-  const value = process.env.EVSIGN_RETRY_DELAYS_MS?.trim();
+  return readRetryDelaysFrom(process.env);
+}
+
+function readRetryDelaysFrom(environment) {
+  const value = environment.EVSIGN_RETRY_DELAYS_MS?.trim();
   if (!value) return [...DEFAULT_RETRY_DELAYS_MS];
   if (!/^\d+(?:,\d+)*$/.test(value)) throw new Error('EVSIGN_RETRY_DELAYS_MS must be comma-separated decimal integers.');
   return value.split(',').map(Number);
 }
 
-async function main() {
-  const [inputArg, outputArg = inputArg] = process.argv.slice(2);
-  if (inputArg === '--resolve-profile') {
-    if (process.argv.length !== 3) throw new Error('Usage: node scripts/sign-evsign.mjs --resolve-profile');
-    console.log(JSON.stringify(resolveEVSignSignerProfile(process.env)));
+export async function runSigningCLI(args, environment = process.env, dependencies = {}) {
+  const log = dependencies.log || console.log;
+  if (args[0] === '--resolve-profile') {
+    if (args.length !== 2) throw new Error('Usage: node scripts/sign-evsign.mjs --resolve-profile stable|bridge');
+    const resolved = resolveEVSignSignerProfile(args[1], environment);
+    log(JSON.stringify({ schema: resolved.schema, profile: resolved.profile, certificateConfigured: true, identity: resolved.identity }));
     return;
   }
+  const explicitProfile = args[0] === '--profile';
+  const profileName = explicitProfile ? args[1] : 'stable';
+  const inputArg = explicitProfile ? args[2] : args[0];
+  const outputArg = (explicitProfile ? args[3] : args[1]) || inputArg;
+  if (explicitProfile && (args.length < 3 || args.length > 4)) throw new Error('Usage: node scripts/sign-evsign.mjs --profile stable|bridge <input.exe> [output.exe]');
   if (!inputArg) throw new Error('Usage: node scripts/sign-evsign.mjs <input.exe> [output.exe]');
-  const key = process.env.EVSIGN_KEY?.trim();
-  if (!key) throw new Error('EVSIGN_KEY is required. Store the EV Sign license UUID in GitHub Actions Secrets.');
-  const inputPath = resolve(inputArg);
-  const outputPath = resolve(outputArg);
-  const endpoint = process.env.EVSIGN_ENDPOINT?.trim() || 'https://api.evsign.cn/v1';
-  const headers = { 'Content-Type': 'application/octet-stream', 'X-Key': key, 'X-Action': 'api-sign', 'X-Algorithm': 'sha256', 'X-File-Name': encodeURIComponent(basename(outputPath)), 'X-Timestamp': process.env.EVSIGN_TIMESTAMP?.trim() || 'auto', 'X-Append': 'no' };
-  for (const [name, value] of [['X-Cert', process.env.EVSIGN_CERT], ['X-Password', process.env.EVSIGN_PASSWORD]]) if (value?.trim()) headers[name] = value.trim();
-  await signFileWithRetry({ inputPath, outputPath, endpoint, headers, maxAttempts: readIntegerEnvironment('EVSIGN_MAX_ATTEMPTS', DEFAULT_MAX_ATTEMPTS), attemptTimeoutMs: readIntegerEnvironment('EVSIGN_ATTEMPT_TIMEOUT_MS', DEFAULT_ATTEMPT_TIMEOUT_MS), retryDelaysMs: readRetryDelays() });
-  const signed = await readFile(outputPath);
-  console.log(`Signed ${basename(outputPath)} via EV Sign (${signed.length} bytes).`);
+  const sign = dependencies.signWithProfile || signWithProfile;
+  const read = dependencies.readFile || readFile;
+  await sign({ profile: profileName, environment, inputPath: inputArg, outputPath: outputArg });
+  const signed = await read(outputArg);
+  log(`Signed ${basename(outputArg)} via EV Sign (${signed.length} bytes).`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await runSigningCLI(process.argv.slice(2));

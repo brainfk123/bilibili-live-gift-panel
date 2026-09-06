@@ -11,7 +11,8 @@ import (
 
 func validChannelManifest() release.ChannelManifest {
 	return release.ChannelManifest{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
+		Channel:       release.ChannelStable,
 		TagName:       "v0.4.4",
 		PublishedAt:   "2026-08-14T12:00:00Z",
 		Asset: release.AssetManifest{
@@ -21,6 +22,58 @@ func validChannelManifest() release.ChannelManifest {
 			SHA256:    strings.Repeat("a", 64),
 		},
 		ChangelogObjectKey: "releases/v0.4.4/gift-panel-changelog.json",
+	}
+}
+
+func TestParseChannelManifestTreatsSchemaOneAsStableOnly(t *testing.T) {
+	body := []byte(`{"schemaVersion":1,"tagName":"v1.2.3","publishedAt":"2026-08-14T12:00:00Z","asset":{"name":"gift-panel-windows-x64.exe","objectKey":"releases/v1.2.3/gift-panel-windows-x64.exe","size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"changelogObjectKey":"releases/v1.2.3/gift-panel-changelog.json"}`)
+
+	manifest, err := release.ParseChannelManifest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Channel != release.ChannelStable {
+		t.Fatalf("schema 1 channel = %q, want stable", manifest.Channel)
+	}
+	if err := manifest.ValidateForChannel(release.ChannelLegacyRushRush); err == nil {
+		t.Fatal("schema 1 manifest validated for legacy channel")
+	}
+}
+
+func TestChannelManifestRejectsSchemaChannelMismatchAndUnknownChannel(t *testing.T) {
+	tests := []struct {
+		name    string
+		schema  int
+		channel release.Channel
+		tag     string
+		want    release.Channel
+	}{
+		{name: "schema 2 missing channel", schema: 2, tag: "v1.2.3", want: release.ChannelStable},
+		{name: "schema 2 unknown channel", schema: 2, channel: release.Channel("preview"), tag: "v1.2.3", want: release.ChannelStable},
+		{name: "stable body on legacy pointer", schema: 2, channel: release.ChannelStable, tag: "v1.2.3", want: release.ChannelLegacyRushRush},
+		{name: "legacy body on stable pointer", schema: 2, channel: release.ChannelLegacyRushRush, tag: "v0.4.11", want: release.ChannelStable},
+		{name: "legacy wrong tag", schema: 2, channel: release.ChannelLegacyRushRush, tag: "v0.4.10", want: release.ChannelLegacyRushRush},
+		{name: "stable reserved bridge tag", schema: 2, channel: release.ChannelStable, tag: "v0.4.11", want: release.ChannelStable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := validChannelManifest()
+			manifest.SchemaVersion = test.schema
+			manifest.Channel = test.channel
+			setManifestTag(&manifest, test.tag)
+			if err := manifest.ValidateForChannel(test.want); err == nil {
+				t.Fatal("ValidateForChannel() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func TestChannelManifestAcceptsOnlyExactLegacyBridge(t *testing.T) {
+	manifest := validChannelManifest()
+	manifest.Channel = release.ChannelLegacyRushRush
+	setManifestTag(&manifest, "v0.4.11")
+	if err := manifest.ValidateForChannel(release.ChannelLegacyRushRush); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -69,7 +122,7 @@ func TestChannelManifestValidateRejectsUntrustedValues(t *testing.T) {
 		{
 			name: "unsupported schema version",
 			mutate: func(manifest *release.ChannelManifest) {
-				manifest.SchemaVersion = 2
+				manifest.SchemaVersion = 3
 			},
 		},
 		{

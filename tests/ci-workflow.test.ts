@@ -117,6 +117,19 @@ describe('mainline CI workflow', () => {
     expect(commands(jobs['hosted-mysql'])).toContain('npm run test:hosted-mysql');
   });
 
+  it('prepares historical tags and UI assets before every full Vitest run', () => {
+    const jobs = ciWorkflow().workflow.jobs ?? {};
+    for (const name of ['hosted', 'windows-compat']) {
+      const job = jobs[name];
+      const jobCommands = commands(job);
+      const testIndex = jobCommands.indexOf('npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2');
+      expect(testIndex, name).toBeGreaterThanOrEqual(0);
+      expect(jobCommands.indexOf('npm run build:ui'), name).toBeLessThan(testIndex);
+      expect(job?.steps?.find((step) => step.uses?.startsWith('actions/checkout@'))?.with, name)
+        .toMatchObject({ 'fetch-depth': 0, 'persist-credentials': false });
+    }
+  });
+
   it('runs an unsigned Windows x64 package and smoke only when scope requires it', () => {
     const windows = ciWorkflow().workflow.jobs?.['windows-compat'];
     expect(windows?.['runs-on']).toBe('windows-2025');
@@ -130,6 +143,16 @@ describe('mainline CI workflow', () => {
       'npm run smoke:windows-exe',
     ]));
     const windowsCommands = commands(windows);
+    const canonicalTempIndex = windows?.steps?.findIndex((step) => step.name === 'Prepare canonical Windows test temp') ?? -1;
+    const fullTestIndex = windows?.steps?.findIndex((step) => step.run === 'npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2') ?? -1;
+    expect(canonicalTempIndex).toBeGreaterThanOrEqual(0);
+    expect(canonicalTempIndex).toBeLessThan(fullTestIndex);
+    const canonicalTemp = windows?.steps?.[canonicalTempIndex]?.run ?? '';
+    expect(canonicalTemp).toContain('$env:USERPROFILE');
+    expect(canonicalTemp).toContain('realpathSync');
+    expect(canonicalTemp).toContain('TEMP=');
+    expect(canonicalTemp).toContain('TMP=');
+    expect(canonicalTemp).toContain('$env:GITHUB_ENV');
     expect(windowsCommands.filter((command) => command === 'npm run build:ui')).toHaveLength(1);
     expect(windowsCommands.indexOf('npm run build:ui')).toBeLessThan(windowsCommands.indexOf('npm run prepare:go-assets'));
     expect(windowsCommands.indexOf('npm run prepare:go-assets')).toBeLessThan(windowsCommands.indexOf('go -C goserver test ./... -race -count=1'));

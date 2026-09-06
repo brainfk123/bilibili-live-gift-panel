@@ -3,10 +3,12 @@ package mirror
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -86,6 +88,204 @@ func TestGitHubReleaseSourceLatest304ReturnsNoMetadata(t *testing.T) {
 	}
 	if result.ETag != "" || result.Release.Tag != "" || !result.Release.PublishedAt.IsZero() || result.Release.Assets != nil {
 		t.Fatalf("304 result contains untrusted metadata: %#v", result)
+	}
+}
+
+func TestGitHubReleaseSourceByTagUsesExactEndpointAndConditionalETag(t *testing.T) {
+	const bridgeTag = "v0.4.11"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.EscapedPath() != "/repos/brainfk123/bilibili-live-gift-panel/releases/tags/v0.4.11" {
+			t.Fatalf("path = %q, want exact tag endpoint", request.URL.EscapedPath())
+		}
+		if got := request.Header.Get("If-None-Match"); got != `W/"bridge"` {
+			t.Fatalf("If-None-Match = %q", got)
+		}
+		payload := validReleaseJSON()
+		payload["tag_name"] = bridgeTag
+		for _, asset := range payload["assets"].([]map[string]any) {
+			asset["browser_download_url"] = strings.Replace(asset["browser_download_url"].(string), testTag, bridgeTag, 1)
+		}
+		writer.Header().Set("ETag", `"bridge-current"`)
+		writeReleaseJSON(t, writer, payload)
+	}))
+	defer server.Close()
+
+	result, err := newGitHubReleaseSource(server.Client(), server.URL).ByTag(context.Background(), bridgeTag, `W/"bridge"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Release.Tag != bridgeTag || result.ETag != `"bridge-current"` || result.NotModified {
+		t.Fatalf("ByTag() = %#v", result)
+	}
+}
+
+func TestGitHubReleaseSourceByTag304ReturnsNoMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/repos/brainfk123/bilibili-live-gift-panel/releases/latest" {
+			t.Fatal("ByTag called latest endpoint")
+		}
+		writer.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	result, err := newGitHubReleaseSource(server.Client(), server.URL).ByTag(context.Background(), "v0.4.11", `"prior"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.NotModified || result.ETag != "" || result.Release.Tag != "" {
+		t.Fatalf("304 result = %#v", result)
+	}
+}
+
+func TestGitHubReleaseSourceRequiresStrictConditionalETagFor304(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusNotModified)
+	}))
+	defer server.Close()
+
+	values := []struct {
+		name    string
+		etag    string
+		wantErr bool
+	}{
+		{name: "missing", etag: "", wantErr: true},
+		{name: "whitespace", etag: "   ", wantErr: true},
+		{name: "bare token", etag: "opaque-token", wantErr: true},
+		{name: "unterminated quote", etag: `"unterminated`, wantErr: true},
+		{name: "invalid weak form", etag: `W/opaque-token`, wantErr: true},
+		{name: "control character", etag: "\"bad\x01value\"", wantErr: true},
+		{name: "strong", etag: `"strong"`},
+		{name: "weak", etag: `W/"weak"`},
+	}
+	methods := []struct {
+		name string
+		call func(*GitHubReleaseSource, string) (LatestResult, error)
+	}{
+		{name: "latest", call: func(source *GitHubReleaseSource, etag string) (LatestResult, error) {
+			return source.Latest(context.Background(), etag)
+		}},
+		{name: "by tag", call: func(source *GitHubReleaseSource, etag string) (LatestResult, error) {
+			return source.ByTag(context.Background(), "v0.4.11", etag)
+		}},
+	}
+	for _, method := range methods {
+		for _, value := range values {
+			t.Run(method.name+"/"+value.name, func(t *testing.T) {
+				result, err := method.call(newGitHubReleaseSource(server.Client(), server.URL), value.etag)
+				if value.wantErr {
+					if err == nil {
+						t.Fatalf("304 with invalid ETag returned success: %#v", result)
+					}
+					if value.etag != "" && strings.Contains(err.Error(), value.etag) {
+						t.Fatalf("error leaked ETag content: %v", err)
+					}
+					return
+				}
+				if err != nil || !result.NotModified {
+					t.Fatalf("304 with valid ETag result=%#v error=%v", result, err)
+				}
+			})
+		}
+	}
+}
+
+func TestGitHubReleaseSourceValidatesHTTP200ResponseETagForLatestAndByTag(t *testing.T) {
+	methods := []struct {
+		name string
+		path string
+		tag  string
+		call func(*GitHubReleaseSource) (LatestResult, error)
+	}{
+		{
+			name: "latest",
+			path: "/repos/brainfk123/bilibili-live-gift-panel/releases/latest",
+			tag:  testTag,
+			call: func(source *GitHubReleaseSource) (LatestResult, error) {
+				return source.Latest(context.Background(), "")
+			},
+		},
+		{
+			name: "by tag",
+			path: "/repos/brainfk123/bilibili-live-gift-panel/releases/tags/v0.4.11",
+			tag:  "v0.4.11",
+			call: func(source *GitHubReleaseSource) (LatestResult, error) {
+				return source.ByTag(context.Background(), "v0.4.11", "")
+			},
+		},
+	}
+
+	for _, method := range methods {
+		for _, etag := range conditionalResponseETagCases() {
+			t.Run(method.name+"/"+etag.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if request.URL.Path != method.path {
+						t.Fatalf("path = %q, want %q", request.URL.Path, method.path)
+					}
+					writer.Header().Set("ETag", etag.value)
+					writeReleaseJSON(t, writer, validReleaseJSONForTag(method.tag))
+				}))
+				defer server.Close()
+
+				result, err := method.call(newGitHubReleaseSource(server.Client(), server.URL))
+				if !etag.valid {
+					if err == nil {
+						t.Fatalf("malformed response ETag returned success: %#v", result)
+					}
+					if result.ETag != "" || result.NotModified || result.Release.Tag != "" || !result.Release.PublishedAt.IsZero() || result.Release.Assets != nil {
+						t.Fatalf("rejected response returned trusted metadata: %#v", result)
+					}
+					if strings.TrimSpace(etag.value) != "" && strings.Contains(err.Error(), etag.value) {
+						t.Fatalf("error leaked response ETag: %v", err)
+					}
+					return
+				}
+				if err != nil || result.NotModified || result.ETag != etag.value || result.Release.Tag != method.tag {
+					t.Fatalf("valid response result=%#v error=%v", result, err)
+				}
+			})
+		}
+	}
+}
+
+func TestGitHubReleaseSourceFailsClosedOnRawControlCharacterHTTP200ResponseETag(t *testing.T) {
+	methods := []struct {
+		name string
+		path string
+		tag  string
+		call func(*GitHubReleaseSource) (LatestResult, error)
+	}{
+		{
+			name: "latest",
+			path: "/repos/brainfk123/bilibili-live-gift-panel/releases/latest",
+			tag:  testTag,
+			call: func(source *GitHubReleaseSource) (LatestResult, error) {
+				return source.Latest(context.Background(), "")
+			},
+		},
+		{
+			name: "by tag",
+			path: "/repos/brainfk123/bilibili-live-gift-panel/releases/tags/v0.4.11",
+			tag:  "v0.4.11",
+			call: func(source *GitHubReleaseSource) (LatestResult, error) {
+				return source.ByTag(context.Background(), "v0.4.11", "")
+			},
+		},
+	}
+
+	for _, method := range methods {
+		t.Run(method.name, func(t *testing.T) {
+			server, waitForResponse := newRawHTTPResponseFixture(t, method.path, rawReleaseHTTPResponse(t, method.tag, rawMalformedResponseETag))
+			result, err := method.call(newGitHubReleaseSource(server.Client(), server.URL))
+			waitForResponse()
+
+			if err == nil {
+				t.Fatalf("raw malformed response ETag returned success: %#v", result)
+			}
+			if result.ETag != "" || result.NotModified || result.Release.Tag != "" || !result.Release.PublishedAt.IsZero() || result.Release.Assets != nil {
+				t.Fatalf("raw malformed response returned trusted metadata: %#v", result)
+			}
+			assertRawMalformedETagNotExposed(t, err)
+		})
 	}
 }
 
@@ -245,12 +445,120 @@ func TestGitHubReleaseSourceLatestRejectsMissingETagAndMalformedJSONWithoutLeaki
 }
 
 func validReleaseJSON() map[string]any {
+	return validReleaseJSONForTag(testTag)
+}
+
+func validReleaseJSONForTag(tag string) map[string]any {
+	assets := validAssets()
+	if tag != testTag {
+		for _, asset := range assets {
+			asset["browser_download_url"] = strings.Replace(asset["browser_download_url"].(string), testTag, tag, 1)
+		}
+	}
 	return map[string]any{
-		"tag_name":     testTag,
+		"tag_name":     tag,
 		"draft":        false,
 		"prerelease":   false,
 		"published_at": testPublishedAt,
-		"assets":       validAssets(),
+		"assets":       assets,
+	}
+}
+
+type conditionalResponseETagCase struct {
+	name  string
+	value string
+	valid bool
+}
+
+func conditionalResponseETagCases() []conditionalResponseETagCase {
+	return []conditionalResponseETagCase{
+		{name: "whitespace", value: "   "},
+		{name: "bare token", value: "opaque-token"},
+		{name: "unterminated quote", value: `"unterminated`},
+		{name: "invalid weak form", value: `W/opaque-token`},
+		{name: "wildcard", value: "*"},
+		{name: "strong", value: `"strong"`, valid: true},
+		{name: "weak", value: `W/"weak"`, valid: true},
+	}
+}
+
+const (
+	rawHTTPFixtureTimeout          = 5 * time.Second
+	rawMalformedResponseETagSecret = "private-wire-etag"
+	rawMalformedResponseETag       = "\"bad\x01" + rawMalformedResponseETagSecret + "\""
+)
+
+func newRawHTTPResponseFixture(t *testing.T, wantPath string, response []byte) (*httptest.Server, func()) {
+	t.Helper()
+	completed := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var fixtureErr error
+		defer func() {
+			completed <- fixtureErr
+		}()
+		if request.Method != http.MethodGet || request.URL.Path != wantPath {
+			fixtureErr = fmt.Errorf("raw HTTP fixture request method=%q path=%q, want GET %q", request.Method, request.URL.Path, wantPath)
+		}
+
+		// Hijacking bypasses net/http's response-header serializer so the client
+		// receives the malformed header bytes exactly as constructed below.
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			fixtureErr = fmt.Errorf("HTTP fixture cannot hijack connection")
+			return
+		}
+		connection, buffer, err := hijacker.Hijack()
+		if err != nil {
+			fixtureErr = err
+			return
+		}
+		defer connection.Close()
+		if err := connection.SetDeadline(time.Now().Add(rawHTTPFixtureTimeout)); err != nil {
+			fixtureErr = err
+			return
+		}
+		if _, err := buffer.Write(response); err != nil {
+			fixtureErr = err
+			return
+		}
+		if err := buffer.Flush(); err != nil {
+			fixtureErr = err
+		}
+	}))
+	server.Client().Timeout = rawHTTPFixtureTimeout
+	t.Cleanup(server.Close)
+	waitForResponse := func() {
+		t.Helper()
+		select {
+		case err := <-completed:
+			if err != nil {
+				t.Fatalf("raw HTTP fixture error: %v", err)
+			}
+		case <-time.After(rawHTTPFixtureTimeout):
+			t.Fatal("raw HTTP fixture did not complete")
+		}
+	}
+	return server, waitForResponse
+}
+
+func rawReleaseHTTPResponse(t *testing.T, tag, etag string) []byte {
+	t.Helper()
+	body, err := json.Marshal(validReleaseJSONForTag(tag))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(fmt.Sprintf(
+		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		etag,
+		len(body),
+		body,
+	))
+}
+
+func assertRawMalformedETagNotExposed(t *testing.T, err error) {
+	t.Helper()
+	if strings.Contains(err.Error(), rawMalformedResponseETagSecret) || strings.ContainsRune(err.Error(), '\x01') {
+		t.Fatalf("error exposed raw malformed response ETag: %v", err)
 	}
 }
 

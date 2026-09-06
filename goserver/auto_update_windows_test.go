@@ -3,14 +3,18 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRestorePendingLogsVerificationDetailButExposesGenericStatus(t *testing.T) {
@@ -365,11 +369,1036 @@ func TestLaunchUpdateInstallerRevalidatesPendingAfterStaleCleanup(t *testing.T) 
 	})
 
 	err := launchUpdateInstaller(updater.metadataPath(), 1234, false)
-	if err == nil || !strings.Contains(err.Error(), "安全校验") {
-		t.Fatalf("error = %v, want final pending verification failure", err)
-	}
+	assertUpdateCode(t, err, "artifact_verification_failed")
 	if started {
 		t.Fatal("tampered pending executable must not start")
+	}
+}
+
+func TestEnrollmentInstallerAndReplaceUsePolicyVerifierForAllFiveChecks(t *testing.T) {
+	root := t.TempDir()
+	updatesDir := filepath.Join(root, "updates")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("policy-authorized enrollment executable")
+	pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+	targetPath := filepath.Join(root, "gift-panel.exe")
+	if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, []byte("previous executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(binary)
+	github := false
+	pending := pendingUpdate{
+		SchemaVersion: pendingUpdateSchemaVersion, Version: "0.4.12",
+		Size: int64(len(binary)), SHA256: hex.EncodeToString(digest[:]), PendingPath: pendingPath, TargetPath: targetPath,
+		Verification: pendingUpdateVerification{
+			Provenance: pendingVerificationSignedPolicy, SourceName: "domestic", SourceURLSHA256: strings.Repeat("b", 64), SourceGitHub: &github,
+			Tag: "v0.4.12", Channel: updateChannelStable, ArtifactSHA256: hex.EncodeToString(digest[:]),
+			PolicyEpoch: 7, PolicySHA256: strings.Repeat("c", 64), PolicyMode: updateTrustModeCurrent,
+		},
+	}
+	writer := &autoUpdater{updatesDir: updatesDir}
+	if err := writer.writePendingMetadata(pending); err != nil {
+		t.Fatal(err)
+	}
+
+	previousResolver := pendingUpdateVerifierForBuild
+	previousStart := startUpdateInstallerExecutable
+	previousVersion, previousPublisher := appVersion, updateExpectedPublisherHex
+	resolverCalls := 0
+	verifiedPaths := make([]string, 0, 5)
+	pendingUpdateVerifierForBuild = func(got pendingUpdate) (func(string) error, error) {
+		resolverCalls++
+		if got.Verification.Provenance != pending.Verification.Provenance || got.Verification.SourceName != pending.Verification.SourceName ||
+			got.Verification.SourceURLSHA256 != pending.Verification.SourceURLSHA256 || got.Verification.SourceGitHub == nil || *got.Verification.SourceGitHub != github ||
+			got.Verification.Tag != pending.Verification.Tag || got.Verification.Channel != pending.Verification.Channel || got.Verification.ArtifactSHA256 != pending.Verification.ArtifactSHA256 ||
+			got.Verification.PolicyEpoch != pending.Verification.PolicyEpoch || got.Verification.PolicySHA256 != pending.Verification.PolicySHA256 || got.Verification.PolicyMode != pending.Verification.PolicyMode || got.SHA256 != pending.SHA256 {
+			t.Fatalf("policy verifier candidate = %#v, want tag/channel/hash from pending metadata", got)
+		}
+		return func(path string) error {
+			verifiedPaths = append(verifiedPaths, filepath.Clean(path))
+			return nil
+		}, nil
+	}
+	startUpdateInstallerExecutable = func(string, ...string) error { return nil }
+	appVersion, updateExpectedPublisherHex = "0.4.12", ""
+	t.Cleanup(func() {
+		pendingUpdateVerifierForBuild = previousResolver
+		startUpdateInstallerExecutable = previousStart
+		appVersion, updateExpectedPublisherHex = previousVersion, previousPublisher
+	})
+
+	if err := launchUpdateInstaller(writer.metadataPath(), 1234, false); err != nil {
+		t.Fatalf("launchUpdateInstaller rejected policy enrollment: %v", err)
+	}
+	if err := replaceDownloadedExecutable(pendingPath, pending, 2147483647); err != nil {
+		t.Fatalf("replaceDownloadedExecutable rejected policy enrollment: %v", err)
+	}
+	if resolverCalls != 2 {
+		t.Fatalf("policy verifier resolutions = %d, want once per launch/replace phase", resolverCalls)
+	}
+	wantPaths := []string{pendingPath, pendingPath, pendingPath, targetPath + ".new", targetPath}
+	if len(verifiedPaths) != len(wantPaths) {
+		t.Fatalf("policy verification paths = %#v, want five checks", verifiedPaths)
+	}
+	for index := range wantPaths {
+		if verifiedPaths[index] != filepath.Clean(wantPaths[index]) {
+			t.Fatalf("policy verification path %d = %q, want %q", index, verifiedPaths[index], filepath.Clean(wantPaths[index]))
+		}
+	}
+}
+
+func TestEnrollmentWindowsFiveChecksRedactSensitiveVerificationErrors(t *testing.T) {
+	const sensitive = `recognizable-secret C:\Users\private-user\artifact.exe`
+	tests := []struct {
+		name   string
+		phase  string
+		failAt int
+	}{
+		{name: "launch first", phase: "launch", failAt: 1},
+		{name: "launch second", phase: "launch", failAt: 2},
+		{name: "replace source", phase: "replace", failAt: 1},
+		{name: "replace new", phase: "replace", failAt: 2},
+		{name: "replace final", phase: "replace", failAt: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			pending, metadataPath := writeWindowsEnrollmentPending(t, root)
+			previousResolver := pendingUpdateVerifierForBuild
+			previousStart := startUpdateInstallerExecutable
+			calls := 0
+			pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+				return func(string) error {
+					calls++
+					if calls == test.failAt {
+						return errors.New(sensitive)
+					}
+					return nil
+				}, nil
+			}
+			startUpdateInstallerExecutable = func(string, ...string) error { return nil }
+			t.Cleanup(func() {
+				pendingUpdateVerifierForBuild = previousResolver
+				startUpdateInstallerExecutable = previousStart
+			})
+
+			var operationErr error
+			diagnostics := captureAutoUpdateStderr(t, func() {
+				if test.phase == "launch" {
+					operationErr = launchUpdateInstaller(metadataPath, 1234, false)
+				} else {
+					operationErr = replaceDownloadedExecutable(pending.PendingPath, pending, 2147483647)
+				}
+			})
+			if operationErr == nil {
+				t.Fatal("sensitive enrollment verification error was accepted")
+			}
+			if strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") {
+				t.Fatalf("enrollment diagnostics leaked sensitive verifier error: %q", diagnostics)
+			}
+			if !strings.Contains(diagnostics, "update_result=artifact_verification_failed") {
+				t.Fatalf("enrollment diagnostics = %q, want bounded result code", diagnostics)
+			}
+		})
+	}
+}
+
+func TestEnrollmentInstallHelperAndRestartDiagnosticsAreBounded(t *testing.T) {
+	const sensitive = `recognizable-secret C:\Users\private-user\process.exe`
+	t.Run("install launcher", func(t *testing.T) {
+		fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+		fixture.Updater.launchInstaller = func(string, int, bool) error { return errors.New(sensitive) }
+		var installErr error
+		diagnostics := captureAutoUpdateStderr(t, func() { installErr = fixture.Updater.InstallOnExit(false) })
+		assertBoundedEnrollmentDiagnostics(t, diagnostics, sensitive, "installer_launch_failed")
+		if installErr == nil {
+			t.Fatal("sensitive installer launch error was accepted")
+		}
+	})
+
+	t.Run("helper apply", func(t *testing.T) {
+		root := t.TempDir()
+		_, metadataPath := writeWindowsEnrollmentPending(t, root)
+		previousApply := applyPendingUpdate
+		applyPendingUpdate = func(pendingUpdate, int) error { return errors.New(sensitive) }
+		t.Cleanup(func() { applyPendingUpdate = previousApply })
+		var helperErr error
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+		})
+		assertBoundedEnrollmentDiagnostics(t, diagnostics, sensitive, "update_apply_failed")
+		if helperErr == nil {
+			t.Fatal("sensitive helper apply error was accepted")
+		}
+	})
+
+	t.Run("restart process", func(t *testing.T) {
+		root := t.TempDir()
+		pending, _ := writeWindowsEnrollmentPending(t, root)
+		binary, err := os.ReadFile(pending.PendingPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pending.TargetPath, binary, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		previousResolver := pendingUpdateVerifierForBuild
+		previousStart := startUpdatedTargetExecutable
+		started := false
+		pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+			return func(string) error { return nil }, nil
+		}
+		startUpdatedTargetExecutable = func(string, ...string) error { started = true; return errors.New(sensitive) }
+		t.Cleanup(func() {
+			pendingUpdateVerifierForBuild = previousResolver
+			startUpdatedTargetExecutable = previousStart
+		})
+		var restartErr error
+		diagnostics := captureAutoUpdateStderr(t, func() { restartErr = startVerifiedUpdatedExecutable(pending) })
+		assertBoundedEnrollmentDiagnostics(t, diagnostics, sensitive, "restart_launch_failed")
+		if restartErr == nil || !started {
+			t.Fatalf("restart error = %v, started = %v", restartErr, started)
+		}
+	})
+
+	t.Run("restore verification", func(t *testing.T) {
+		fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+		restartedStore := &updateTrustStore{Root: &fixture.Key.PublicKey, EmbeddedPolicy: fixture.Policy, CacheDir: fixture.Store.CacheDir}
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_ = newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "0.4.11", ExecutablePath: fixture.TargetPath, UpdatesDir: fixture.UpdatesDir,
+				ReleaseSources: []updateReleaseSource{fixture.Source}, AssetName: updateAssetName,
+				TrustStore: restartedStore, Now: func() time.Time { return testTrustNow },
+				InspectAuthenticode: func(string) (inspectedUpdateCertificate, error) {
+					return inspectedUpdateCertificate{}, errors.New(sensitive)
+				},
+			})
+		})
+		assertBoundedEnrollmentDiagnostics(t, diagnostics, sensitive, "authenticode_invalid")
+	})
+}
+
+func TestEnrollmentContextChangeBeforeWindowsLaunchClearsPending(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	previousResolver := pendingUpdateVerifierForBuild
+	pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+		return nil, updateResultError("pending_policy_context_changed")
+	}
+	t.Cleanup(func() { pendingUpdateVerifierForBuild = previousResolver })
+	fixture.Updater.launchInstaller = launchUpdateInstaller
+
+	err := fixture.Updater.InstallOnExit(false)
+	assertUpdateCode(t, err, "pending_policy_context_changed")
+	if fixture.Updater.HasPending() {
+		t.Fatal("context-changed pending remained in memory")
+	}
+	for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("context-changed pending survived at %q: %v", path, statErr)
+		}
+	}
+}
+
+func TestEnrollmentWindowsLaunchArtifactFailureClearsPending(t *testing.T) {
+	for _, failAt := range []int{1, 2} {
+		t.Run(fmt.Sprintf("check_%d", failAt), func(t *testing.T) {
+			fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+			previousResolver := pendingUpdateVerifierForBuild
+			calls := 0
+			pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+				return func(string) error {
+					calls++
+					if calls == failAt {
+						return updateResultError("artifact_verification_failed")
+					}
+					return nil
+				}, nil
+			}
+			t.Cleanup(func() { pendingUpdateVerifierForBuild = previousResolver })
+			fixture.Updater.launchInstaller = launchUpdateInstaller
+
+			err := fixture.Updater.InstallOnExit(false)
+			assertUpdateCode(t, err, "artifact_verification_failed")
+			if fixture.Updater.HasPending() {
+				t.Fatal("launch-time artifact failure retained in-memory pending")
+			}
+			for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("launch-time artifact failure left %q: %v", path, statErr)
+				}
+			}
+			if _, statErr := os.Stat(pendingUpdateEnrollmentFloorPath(filepath.Join(fixture.UpdatesDir, "pending-update.json"))); statErr != nil {
+				t.Fatalf("launch cleanup removed enrollment floor: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestEnrollmentLaunchCleanupFailuresKeepPrimaryTrustCodeAndAllowRedownload(t *testing.T) {
+	const sensitive = `recognizable-cleanup-error C:\Users\private-user\stale-update.exe`
+	tests := []struct {
+		name        string
+		primaryCode string
+		fail        []string
+	}{
+		{name: "pending executable", primaryCode: "artifact_verification_failed", fail: []string{"pending"}},
+		{name: "metadata", primaryCode: "pending_policy_context_changed", fail: []string{"metadata"}},
+		{name: "new executable", primaryCode: "artifact_verification_failed", fail: []string{"new"}},
+		{name: "multiple artifacts", primaryCode: "pending_policy_context_changed", fail: []string{"pending", "metadata", "new"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			binary := []byte("redownloadable policy-authorized executable")
+			digest := sha256.Sum256(binary)
+			rule := stableTestRule("naisnet-primary", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094")
+			rule.ManifestSHA256 = hex.EncodeToString(digest[:])
+			updater, _, _ := newPolicyUpdater(t, policyUpdaterFixture{
+				CurrentVersion: "0.4.11", Tag: "v0.4.12", ChannelHeaders: []string{string(updateChannelStable)}, Binary: binary,
+				Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+				Rules:       []updatePublisherRule{rule},
+			})
+			assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+
+			pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+			metadataPath := updater.metadataPath()
+			oldPath := updater.executablePath + ".old"
+			newPath := updater.executablePath + ".new"
+			paths := map[string]string{
+				"pending":  pendingPath,
+				"metadata": metadataPath,
+				"old":      oldPath,
+				"new":      newPath,
+			}
+			failedPaths := make(map[string]bool, len(test.fail))
+			for _, name := range test.fail {
+				failedPaths[filepath.Clean(paths[name])] = true
+			}
+
+			cleanupStarted := false
+			attempts := make(map[string]int)
+			updater.removeFile = func(path string) error {
+				path = filepath.Clean(path)
+				if cleanupStarted {
+					attempts[path]++
+					if failedPaths[path] && attempts[path] <= updateCleanupAttempts {
+						return fmt.Errorf("%s at %s", sensitive, path)
+					}
+				}
+				return os.Remove(path)
+			}
+			updater.launchInstaller = func(string, int, bool) error {
+				for _, path := range []string{oldPath, newPath} {
+					if err := os.WriteFile(path, []byte("stale transaction artifact"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cleanupStarted = true
+				return updateResultError(test.primaryCode)
+			}
+
+			var installErr error
+			diagnostics := captureAutoUpdateStderr(t, func() { installErr = updater.InstallOnExit(false) })
+			assertUpdateCode(t, installErr, test.primaryCode)
+			if strings.Contains(diagnostics, "recognizable-cleanup-error") || strings.Contains(diagnostics, "private-user") {
+				t.Fatalf("launch cleanup diagnostics leaked sensitive detail: %q", diagnostics)
+			}
+			for _, code := range []string{test.primaryCode, "artifact_cleanup_failed"} {
+				if !strings.Contains(diagnostics, "update_result="+code) {
+					t.Fatalf("launch cleanup diagnostics = %q, want %s", diagnostics, code)
+				}
+			}
+			for name, path := range paths {
+				wantAttempts := 1
+				if failedPaths[filepath.Clean(path)] {
+					wantAttempts = updateCleanupAttempts
+				}
+				if attempts[filepath.Clean(path)] != wantAttempts {
+					t.Fatalf("cleanup attempts for %s = %d, want %d", name, attempts[filepath.Clean(path)], wantAttempts)
+				}
+			}
+			if updater.HasPending() {
+				t.Fatal("definitive launch failure retained in-memory pending after cleanup failure")
+			}
+			if _, err := os.Stat(pendingUpdateEnrollmentFloorPath(metadataPath)); err != nil {
+				t.Fatalf("launch cleanup removed enrollment floor: %v", err)
+			}
+
+			assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+			if !updater.HasPending() || updater.Status().State != "ready" {
+				t.Fatalf("redownload state = status %#v, pending %v; want ready", updater.Status(), updater.HasPending())
+			}
+		})
+	}
+}
+
+func TestEnrollmentPreLaunchDefinitiveFailuresKeepPrimaryTrustCodeAndAllowRedownload(t *testing.T) {
+	const sensitive = `recognizable-prelaunch-cleanup C:\Users\private-user\stale-update.exe`
+	tests := []struct {
+		name        string
+		failure     string
+		primaryCode string
+		fail        []string
+	}{
+		{name: "artifact with pending cleanup failure", failure: "artifact", primaryCode: "artifact_verification_failed", fail: []string{"pending"}},
+		{name: "context with metadata cleanup failure", failure: "context", primaryCode: "pending_policy_context_changed", fail: []string{"metadata"}},
+		{name: "raw legacy provenance with old cleanup failure", failure: "raw-legacy", primaryCode: "pending_verification_invalid", fail: []string{"old"}},
+		{name: "deleted provenance with new cleanup failure", failure: "deleted-provenance", primaryCode: "pending_verification_invalid", fail: []string{"new"}},
+		{name: "decode failure with every cleanup failure", failure: "decode", primaryCode: "pending_metadata_invalid", fail: []string{"pending", "metadata", "old", "new"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			binary := []byte("prelaunch policy-authorized executable")
+			digest := sha256.Sum256(binary)
+			rule := stableTestRule("naisnet-primary", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094")
+			rule.ManifestSHA256 = hex.EncodeToString(digest[:])
+			updater, _, _ := newPolicyUpdater(t, policyUpdaterFixture{
+				CurrentVersion: "0.4.11", Tag: "v0.4.12", ChannelHeaders: []string{string(updateChannelStable)}, Binary: binary,
+				Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+				Rules:       []updatePublisherRule{rule},
+			})
+			assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+
+			pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+			metadataPath := updater.metadataPath()
+			oldPath := updater.executablePath + ".old"
+			newPath := updater.executablePath + ".new"
+			paths := map[string]string{
+				"pending":  pendingPath,
+				"metadata": metadataPath,
+				"old":      oldPath,
+				"new":      newPath,
+			}
+			for _, path := range []string{oldPath, newPath} {
+				if err := os.WriteFile(path, []byte("stale transaction artifact"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			originalSources := append([]updateReleaseSource(nil), updater.releaseSources...)
+			switch test.failure {
+			case "artifact":
+				tampered, err := os.ReadFile(pendingPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tampered[0] ^= 0xff
+				if err := os.WriteFile(pendingPath, tampered, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "context":
+				updater.releaseSources[0].URL += "/changed"
+			case "raw-legacy", "deleted-provenance":
+				data, err := os.ReadFile(metadataPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var metadata map[string]any
+				if err := json.Unmarshal(data, &metadata); err != nil {
+					t.Fatal(err)
+				}
+				if test.failure == "raw-legacy" {
+					verification, ok := metadata["verification"].(map[string]any)
+					if !ok {
+						t.Fatalf("verification metadata = %#v", metadata["verification"])
+					}
+					verification["provenance"] = pendingVerificationLegacyMigrated
+				} else {
+					delete(metadata, "schemaVersion")
+					delete(metadata, "verification")
+				}
+				data, err = json.MarshalIndent(metadata, "", "  ")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(metadataPath, append(data, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "decode":
+				if err := os.WriteFile(metadataPath, []byte(`{"schemaVersion":`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				t.Fatalf("unknown failure mode %q", test.failure)
+			}
+
+			failedPaths := make(map[string]bool, len(test.fail))
+			for _, name := range test.fail {
+				failedPaths[filepath.Clean(paths[name])] = true
+			}
+			cleanupFailuresEnabled := true
+			attempts := make(map[string]int)
+			updater.removeFile = func(path string) error {
+				path = filepath.Clean(path)
+				attempts[path]++
+				if cleanupFailuresEnabled && failedPaths[path] {
+					return fmt.Errorf("%s at %s", sensitive, path)
+				}
+				return os.Remove(path)
+			}
+			launched := false
+			updater.launchInstaller = func(string, int, bool) error {
+				launched = true
+				return nil
+			}
+
+			var installErr error
+			diagnostics := captureAutoUpdateStderr(t, func() { installErr = updater.InstallOnExit(false) })
+			assertUpdateCode(t, installErr, test.primaryCode)
+			if launched {
+				t.Fatal("definitive pre-launch failure reached the installer launcher")
+			}
+			if strings.Contains(diagnostics, "recognizable-prelaunch-cleanup") || strings.Contains(diagnostics, "private-user") ||
+				strings.Contains(installErr.Error(), "recognizable-prelaunch-cleanup") || strings.Contains(installErr.Error(), "private-user") {
+				t.Fatalf("pre-launch cleanup leaked sensitive detail: diagnostics=%q error=%v", diagnostics, installErr)
+			}
+			for _, code := range []string{test.primaryCode, "artifact_cleanup_failed"} {
+				if !strings.Contains(diagnostics, "update_result="+code) {
+					t.Fatalf("pre-launch diagnostics = %q, want %s", diagnostics, code)
+				}
+			}
+			for name, path := range paths {
+				wantAttempts := 1
+				if failedPaths[filepath.Clean(path)] {
+					wantAttempts = updateCleanupAttempts
+				}
+				if attempts[filepath.Clean(path)] != wantAttempts {
+					t.Fatalf("cleanup attempts for %s = %d, want %d", name, attempts[filepath.Clean(path)], wantAttempts)
+				}
+			}
+			if updater.HasPending() {
+				t.Fatal("definitive pre-launch failure retained in-memory pending")
+			}
+			if _, err := os.Stat(pendingUpdateEnrollmentFloorPath(metadataPath)); err != nil {
+				t.Fatalf("pre-launch cleanup removed enrollment floor: %v", err)
+			}
+
+			cleanupFailuresEnabled = false
+			updater.releaseSources = originalSources
+			assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+			if !updater.HasPending() || updater.Status().State != "ready" {
+				t.Fatalf("redownload state = status %#v, pending %v; want ready", updater.Status(), updater.HasPending())
+			}
+		})
+	}
+}
+
+func TestInstallOnExitDiscardsLegacyPendingWhenEnrollmentFloorRecheckFails(t *testing.T) {
+	const sensitive = `recognizable-floor-recheck C:\Users\private-user\pending-update-enrollment-floor.json`
+	binary := []byte("legacy pending enrollment floor recheck")
+	digest := sha256.Sum256(binary)
+	rule := stableTestRule("naisnet-primary", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094")
+	rule.ManifestSHA256 = hex.EncodeToString(digest[:])
+	updater, _, _ := newPolicyUpdater(t, policyUpdaterFixture{
+		CurrentVersion: "0.4.11", Tag: "v0.4.12", ChannelHeaders: []string{string(updateChannelStable)}, Binary: binary,
+		Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+		Rules:       []updatePublisherRule{rule},
+	})
+	assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+
+	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+	metadataPath := updater.metadataPath()
+	floorPath := pendingUpdateEnrollmentFloorPath(metadataPath)
+	legacy := pendingUpdate{
+		Version: updater.pending.Version, Size: updater.pending.Size, SHA256: updater.pending.SHA256,
+		PendingPath: pendingPath, TargetPath: updater.executablePath,
+	}
+	metadata, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, append(metadata, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(floorPath); err != nil {
+		t.Fatal(err)
+	}
+	updater.pending = &legacy
+	paths := []string{pendingPath, metadataPath, updater.executablePath + ".old", updater.executablePath + ".new"}
+	for _, path := range paths[2:] {
+		if err := os.WriteFile(path, []byte("stale installer transaction"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previousMetadataWrite := writePendingMetadataAtomically
+	writePendingMetadataAtomically = func(path string, data []byte) error {
+		if err := previousMetadataWrite(path, data); err != nil {
+			return err
+		}
+		return os.WriteFile(floorPath, []byte(sensitive), 0o600)
+	}
+	t.Cleanup(func() { writePendingMetadataAtomically = previousMetadataWrite })
+	launched := false
+	updater.launchInstaller = func(string, int, bool) error {
+		launched = true
+		return nil
+	}
+
+	var installErr error
+	diagnostics := captureAutoUpdateStderr(t, func() { installErr = updater.InstallOnExit(false) })
+	assertUpdateCode(t, installErr, "pending_enrollment_floor_invalid")
+	if launched {
+		t.Fatal("enrollment floor recheck failure launched installer")
+	}
+	if strings.Contains(diagnostics, sensitive) || strings.Contains(diagnostics, "private-user") ||
+		strings.Contains(installErr.Error(), sensitive) || strings.Contains(installErr.Error(), "private-user") {
+		t.Fatalf("enrollment floor recheck leaked sensitive detail: diagnostics=%q error=%v", diagnostics, installErr)
+	}
+	if !strings.Contains(diagnostics, "update_result=pending_enrollment_floor_invalid") {
+		t.Fatalf("enrollment floor recheck diagnostics = %q", diagnostics)
+	}
+	if updater.HasPending() {
+		t.Fatal("enrollment floor recheck failure retained in-memory pending")
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("enrollment floor recheck failure left %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(floorPath); err != nil {
+		t.Fatalf("enrollment floor recheck cleanup removed floor: %v", err)
+	}
+
+	writePendingMetadataAtomically = previousMetadataWrite
+	if err := os.WriteFile(floorPath, pendingUpdateEnrollmentFloorBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+	if !updater.HasPending() || updater.Status().State != "ready" {
+		t.Fatalf("redownload state = status %#v, pending %v; want ready", updater.Status(), updater.HasPending())
+	}
+}
+
+func TestInstallOnExitClassifiesDeletedEnrollmentFloorRecreationFailureAsInvalid(t *testing.T) {
+	const sensitive = `recognizable-floor-recreate C:\Users\private-user\pending-update-enrollment-floor.json`
+	binary := []byte("legacy pending deleted enrollment floor")
+	digest := sha256.Sum256(binary)
+	rule := stableTestRule("naisnet-primary", "NaisNet Technology Co., Ltd.", "91210103MA7CJ3C094")
+	rule.ManifestSHA256 = hex.EncodeToString(digest[:])
+	updater, _, _ := newPolicyUpdater(t, policyUpdaterFixture{
+		CurrentVersion: "0.4.11", Tag: "v0.4.12", ChannelHeaders: []string{string(updateChannelStable)}, Binary: binary,
+		Certificate: updateCertificateIdentity{Country: "CN", Organization: "NaisNet Technology Co., Ltd.", OrganizationID: "91210103MA7CJ3C094"},
+		Rules:       []updatePublisherRule{rule},
+	})
+	assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+
+	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
+	metadataPath := updater.metadataPath()
+	floorPath := pendingUpdateEnrollmentFloorPath(metadataPath)
+	legacy := pendingUpdate{
+		Version: updater.pending.Version, Size: updater.pending.Size, SHA256: updater.pending.SHA256,
+		PendingPath: pendingPath, TargetPath: updater.executablePath,
+	}
+	metadata, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, append(metadata, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(floorPath); err != nil {
+		t.Fatal(err)
+	}
+	updater.pending = &legacy
+	paths := []string{pendingPath, metadataPath, updater.executablePath + ".old", updater.executablePath + ".new"}
+	for _, path := range paths[2:] {
+		if err := os.WriteFile(path, []byte("stale installer transaction"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previousMetadataWrite := writePendingMetadataAtomically
+	previousFloorWrite := writePendingEnrollmentFloorAtomically
+	writePendingMetadataAtomically = func(path string, data []byte) error {
+		if err := previousMetadataWrite(path, data); err != nil {
+			return err
+		}
+		if err := os.Remove(floorPath); err != nil {
+			return err
+		}
+		writePendingEnrollmentFloorAtomically = func(string, []byte) error { return errors.New(sensitive) }
+		return nil
+	}
+	t.Cleanup(func() {
+		writePendingMetadataAtomically = previousMetadataWrite
+		writePendingEnrollmentFloorAtomically = previousFloorWrite
+	})
+	updater.launchInstaller = func(string, int, bool) error {
+		t.Fatal("deleted enrollment floor recreation failure launched installer")
+		return nil
+	}
+
+	var installErr error
+	diagnostics := captureAutoUpdateStderr(t, func() { installErr = updater.InstallOnExit(false) })
+	assertUpdateCode(t, installErr, "pending_enrollment_floor_invalid")
+	if strings.Contains(diagnostics, "recognizable-floor-recreate") || strings.Contains(diagnostics, "private-user") ||
+		strings.Contains(installErr.Error(), "recognizable-floor-recreate") || strings.Contains(installErr.Error(), "private-user") {
+		t.Fatalf("deleted enrollment floor failure leaked sensitive detail: diagnostics=%q error=%v", diagnostics, installErr)
+	}
+	if !strings.Contains(diagnostics, "update_result=pending_enrollment_floor_invalid") {
+		t.Fatalf("deleted enrollment floor diagnostics = %q", diagnostics)
+	}
+	if updater.HasPending() {
+		t.Fatal("deleted enrollment floor failure retained in-memory pending")
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("deleted enrollment floor failure left %q: %v", path, err)
+		}
+	}
+
+	writePendingMetadataAtomically = previousMetadataWrite
+	writePendingEnrollmentFloorAtomically = previousFloorWrite
+	assertUpdateCode(t, updater.checkAndDownload(context.Background(), true), "")
+	if !updater.HasPending() || updater.Status().State != "ready" {
+		t.Fatalf("redownload state = status %#v, pending %v; want ready", updater.Status(), updater.HasPending())
+	}
+	if _, err := os.Stat(floorPath); err != nil {
+		t.Fatalf("redownload did not recreate enrollment floor: %v", err)
+	}
+}
+
+func TestValidatedLegacyPreLaunchFailureKeepsRetryStateWhenArtifactLocked(t *testing.T) {
+	for _, provenance := range []string{pendingVerificationLegacyMigrated, pendingVerificationLegacyCompatibility} {
+		t.Run(provenance, func(t *testing.T) {
+			root := t.TempDir()
+			updatesDir := filepath.Join(root, "updates")
+			if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			binary := []byte("explicit validated legacy executable")
+			pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+			targetPath := filepath.Join(root, "gift-panel.exe")
+			if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(binary)
+			updater := newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "1.0.0", ExecutablePath: targetPath, UpdatesDir: updatesDir,
+				ReleaseSources: []updateReleaseSource{{Name: "test", URL: "https://example.com/release"}}, AssetName: updateAssetName,
+				TrustStore:       &updateTrustStore{},
+				VerifyExecutable: func(string) error { return errors.New("legacy publisher mismatch") },
+				LaunchInstaller:  func(string, int, bool) error { t.Fatal("legacy verification failure launched installer"); return nil },
+			})
+			pending := pendingUpdate{
+				SchemaVersion: pendingUpdateSchemaVersion, Version: "1.1.0", Size: int64(len(binary)), SHA256: hex.EncodeToString(digest[:]),
+				PendingPath: pendingPath, TargetPath: targetPath, Verification: pendingUpdateVerification{Provenance: provenance},
+			}
+			if err := updater.writePendingMetadata(pending); err != nil {
+				t.Fatal(err)
+			}
+			validated, err := readPendingUpdateMetadata(updater.metadataPath(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !validated.legacyDiagnosticsApproved || validated.Verification.Provenance != provenance {
+				t.Fatalf("validated legacy pending = %#v", validated)
+			}
+			updater.pending = &validated
+
+			paths := []string{pendingPath, updater.metadataPath(), targetPath + ".old", targetPath + ".new"}
+			for _, path := range paths[2:] {
+				if err := os.WriteFile(path, []byte("legacy retry artifact"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			attempts := make(map[string]int)
+			updater.removeFile = func(path string) error {
+				path = filepath.Clean(path)
+				attempts[path]++
+				if path == filepath.Clean(pendingPath) {
+					return errors.New("locked legacy pending executable")
+				}
+				return os.Remove(path)
+			}
+
+			if err := updater.InstallOnExit(false); err == nil {
+				t.Fatal("legacy verification failure was accepted")
+			}
+			if !updater.HasPending() {
+				t.Fatal("validated legacy retry state was cleared after locked artifact cleanup")
+			}
+			if attempts[filepath.Clean(pendingPath)] != updateCleanupAttempts {
+				t.Fatalf("pending cleanup attempts = %d, want %d", attempts[filepath.Clean(pendingPath)], updateCleanupAttempts)
+			}
+			for _, path := range paths[1:] {
+				if attempts[filepath.Clean(path)] != 0 {
+					t.Fatalf("retry-preserving cleanup unexpectedly attempted %q", path)
+				}
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("retry artifact %q was not preserved: %v", path, err)
+				}
+			}
+			if _, err := os.Stat(pendingUpdateEnrollmentFloorPath(updater.metadataPath())); err != nil {
+				t.Fatalf("legacy retry cleanup removed enrollment floor: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnrollmentHelperDefinitiveTrustFailureClearsPending(t *testing.T) {
+	tests := []struct {
+		name     string
+		context  bool
+		failAt   int
+		wantCode string
+	}{
+		{name: "context resolver", context: true, wantCode: "pending_policy_context_changed"},
+		{name: "source verification", failAt: 1, wantCode: "artifact_verification_failed"},
+		{name: "new verification", failAt: 2, wantCode: "artifact_verification_failed"},
+		{name: "final verification", failAt: 3, wantCode: "artifact_verification_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			pending, metadataPath := writeWindowsEnrollmentPending(t, root)
+			previousApply := applyPendingUpdate
+			previousResolver := pendingUpdateVerifierForBuild
+			applyPendingUpdate = func(got pendingUpdate, waitPID int) error {
+				return replaceDownloadedExecutable(got.PendingPath, got, waitPID)
+			}
+			calls := 0
+			pendingUpdateVerifierForBuild = func(pendingUpdate) (func(string) error, error) {
+				if test.context {
+					return nil, updateResultError("pending_policy_context_changed")
+				}
+				return func(string) error {
+					calls++
+					if calls == test.failAt {
+						return updateResultError("artifact_verification_failed")
+					}
+					return nil
+				}, nil
+			}
+			t.Cleanup(func() {
+				applyPendingUpdate = previousApply
+				pendingUpdateVerifierForBuild = previousResolver
+			})
+
+			var helperErr error
+			diagnostics := captureAutoUpdateStderr(t, func() {
+				_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+			})
+			assertUpdateCode(t, helperErr, test.wantCode)
+			if !strings.Contains(diagnostics, "update_result="+test.wantCode) {
+				t.Fatalf("helper diagnostics = %q, want primary code %q", diagnostics, test.wantCode)
+			}
+			for _, path := range []string{pending.PendingPath, metadataPath, pending.TargetPath + ".new"} {
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("definitive helper failure left stale path %q: %v", path, statErr)
+				}
+			}
+			if _, statErr := os.Stat(pendingUpdateEnrollmentFloorPath(metadataPath)); statErr != nil {
+				t.Fatalf("helper cleanup removed enrollment floor: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestEnrollmentHelperCleanupFailureKeepsPrimaryTrustCode(t *testing.T) {
+	root := t.TempDir()
+	_, metadataPath := writeWindowsEnrollmentPending(t, root)
+	previousApply := applyPendingUpdate
+	previousRemove := removeUpdateHelperArtifact
+	applyPendingUpdate = func(pendingUpdate, int) error { return updateResultError("pending_policy_context_changed") }
+	removeUpdateHelperArtifact = func(string) error { return errors.New(`recognizable C:\Users\private-user\cleanup failure`) }
+	t.Cleanup(func() {
+		applyPendingUpdate = previousApply
+		removeUpdateHelperArtifact = previousRemove
+	})
+	var helperErr error
+	diagnostics := captureAutoUpdateStderr(t, func() {
+		_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+	})
+	assertUpdateCode(t, helperErr, "pending_policy_context_changed")
+	if strings.Contains(diagnostics, "recognizable") || strings.Contains(diagnostics, "private-user") {
+		t.Fatalf("helper cleanup diagnostics leaked sensitive error: %q", diagnostics)
+	}
+	for _, code := range []string{"pending_policy_context_changed", "artifact_cleanup_failed"} {
+		if !strings.Contains(diagnostics, "update_result="+code) {
+			t.Fatalf("helper cleanup diagnostics = %q, want %s", diagnostics, code)
+		}
+	}
+}
+
+func TestEnrollmentHelperTransientApplyFailureRetainsPending(t *testing.T) {
+	root := t.TempDir()
+	pending, metadataPath := writeWindowsEnrollmentPending(t, root)
+	previousApply := applyPendingUpdate
+	applyPendingUpdate = func(pendingUpdate, int) error { return errors.New("transient filesystem failure") }
+	t.Cleanup(func() { applyPendingUpdate = previousApply })
+	_, helperErr := runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+	if helperErr == nil || helperErr.Error() != "应用待安装更新失败" {
+		t.Fatalf("transient helper error = %v", helperErr)
+	}
+	for _, path := range []string{pending.PendingPath, metadataPath} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("transient helper failure removed retryable path %q: %v", path, statErr)
+		}
+	}
+}
+
+func TestEnrollmentTransientInstallerLaunchFailureRetainsPending(t *testing.T) {
+	fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+	fixture.Updater.launchInstaller = func(string, int, bool) error { return errors.New("transient CreateProcess failure") }
+	if err := fixture.Updater.InstallOnExit(false); err == nil {
+		t.Fatal("transient installer launch failure was accepted")
+	}
+	if !fixture.Updater.HasPending() {
+		t.Fatal("transient installer launch failure discarded retryable pending state")
+	}
+	for _, path := range []string{filepath.Join(fixture.UpdatesDir, "gift-panel-pending.exe"), filepath.Join(fixture.UpdatesDir, "pending-update.json")} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("retryable pending missing at %q: %v", path, statErr)
+		}
+	}
+}
+
+func TestUnknownAndCorruptPendingDiagnosticsDefaultBounded(t *testing.T) {
+	const sensitive = `recognizable-secret C:\Users\private-user\pending.exe`
+	t.Run("zero pending helper", func(t *testing.T) {
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			logPendingUpdateDiagnostic(pendingUpdate{}, "unknown pending", errors.New(sensitive), "artifact_cleanup_failed")
+		})
+		assertBoundedEnrollmentDiagnostics(t, diagnostics, sensitive, "artifact_cleanup_failed")
+	})
+
+	t.Run("restore decode and cleanup", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "private-user")
+		updatesDir := filepath.Join(root, "updates")
+		if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(updatesDir, "pending-update.json"), []byte(`{"schemaVersion":2,"verification":`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(updatesDir, "gift-panel-pending.exe"), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_ = newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "0.4.11", ExecutablePath: filepath.Join(root, "gift-panel.exe"), UpdatesDir: updatesDir,
+				ReleaseSources: []updateReleaseSource{{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true}},
+				RemoveFile:     func(string) error { return errors.New(sensitive) },
+			})
+		})
+		if strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") {
+			t.Fatalf("corrupt restore diagnostics leaked sensitive data: %q", diagnostics)
+		}
+		for _, code := range []string{"pending_metadata_invalid", "artifact_cleanup_failed"} {
+			if !strings.Contains(diagnostics, "update_result="+code) {
+				t.Fatalf("corrupt restore diagnostics = %q, want %s", diagnostics, code)
+			}
+		}
+	})
+
+	t.Run("helper corrupt floor", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "private-user")
+		updatesDir := filepath.Join(root, "updates")
+		if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		metadataPath := filepath.Join(updatesDir, "pending-update.json")
+		if err := os.WriteFile(metadataPath, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pendingUpdateEnrollmentFloorPath(metadataPath), []byte("corrupt recognizable-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var helperErr error
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_, helperErr = runUpdateHelper([]string{"--apply-update", "--state", metadataPath, "2147483647"})
+		})
+		if helperErr == nil || strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") || !strings.Contains(diagnostics, "update_result=pending_enrollment_floor_invalid") {
+			t.Fatalf("corrupt floor result = error %v, diagnostics %q", helperErr, diagnostics)
+		}
+	})
+
+	t.Run("combined deletion cleanup", func(t *testing.T) {
+		fixture := newDurablePolicyPendingFixture(t, testTrustNow.Add(time.Hour))
+		metadataPath := filepath.Join(fixture.UpdatesDir, "pending-update.json")
+		data, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal(data, &document); err != nil {
+			t.Fatal(err)
+		}
+		delete(document, "schemaVersion")
+		delete(document, "verification")
+		tampered, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(metadataPath, tampered, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		diagnostics := captureAutoUpdateStderr(t, func() {
+			_ = newAutoUpdater(autoUpdaterOptions{
+				CurrentVersion: "0.4.11", ExecutablePath: fixture.TargetPath, UpdatesDir: fixture.UpdatesDir,
+				ReleaseSources: []updateReleaseSource{fixture.Source}, AssetName: updateAssetName,
+				TrustStore: &updateTrustStore{Root: &fixture.Key.PublicKey, EmbeddedPolicy: fixture.Policy, CacheDir: fixture.Store.CacheDir},
+				Now:        func() time.Time { return testTrustNow },
+				RemoveFile: func(string) error { return errors.New(sensitive) },
+			})
+		})
+		if strings.Contains(diagnostics, "recognizable-secret") || strings.Contains(diagnostics, "private-user") {
+			t.Fatalf("combined deletion diagnostics leaked sensitive data: %q", diagnostics)
+		}
+		for _, code := range []string{"pending_verification_invalid", "artifact_cleanup_failed"} {
+			if !strings.Contains(diagnostics, "update_result="+code) {
+				t.Fatalf("combined deletion diagnostics = %q, want %s", diagnostics, code)
+			}
+		}
+	})
+}
+
+func writeWindowsEnrollmentPending(t testing.TB, root string) (pendingUpdate, string) {
+	t.Helper()
+	updatesDir := filepath.Join(root, "updates")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("Windows enrollment pending executable")
+	pendingPath := filepath.Join(updatesDir, "gift-panel-pending.exe")
+	targetPath := filepath.Join(root, "gift-panel.exe")
+	if err := os.WriteFile(pendingPath, binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, []byte("previous executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(binary)
+	github := false
+	pending := pendingUpdate{
+		SchemaVersion: pendingUpdateSchemaVersion, Version: "0.4.12", Size: int64(len(binary)), SHA256: hex.EncodeToString(digest[:]),
+		PendingPath: pendingPath, TargetPath: targetPath,
+		Verification: pendingUpdateVerification{
+			Provenance: pendingVerificationSignedPolicy, SourceName: "domestic", SourceURLSHA256: strings.Repeat("b", 64), SourceGitHub: &github,
+			Tag: "v0.4.12", Channel: updateChannelStable, ArtifactSHA256: hex.EncodeToString(digest[:]),
+			PolicyEpoch: 7, PolicySHA256: strings.Repeat("c", 64), PolicyMode: updateTrustModeCurrent,
+		},
+	}
+	writer := &autoUpdater{updatesDir: updatesDir}
+	if err := writer.writePendingMetadata(pending); err != nil {
+		t.Fatal(err)
+	}
+	return pending, writer.metadataPath()
+}
+
+func assertBoundedEnrollmentDiagnostics(t testing.TB, diagnostics, sensitive, code string) {
+	t.Helper()
+	if strings.Contains(diagnostics, sensitive) || strings.Contains(diagnostics, "private-user") {
+		t.Fatalf("enrollment diagnostics leaked sensitive text: %q", diagnostics)
+	}
+	if !strings.Contains(diagnostics, "update_result="+code) {
+		t.Fatalf("enrollment diagnostics = %q, want code %q", diagnostics, code)
 	}
 }
 
@@ -493,9 +1522,7 @@ func TestReplaceDownloadedExecutableRevalidatesFinalTargetAfterRename(t *testing
 	t.Cleanup(func() { renameWindowsUpdateFile = previousRename })
 
 	err := replaceDownloadedExecutable(pendingPath, pending, 2147483647)
-	if err == nil || !strings.Contains(err.Error(), "安全校验") {
-		t.Fatalf("error = %v, want final target verification failure", err)
-	}
+	assertUpdateCode(t, err, "artifact_verification_failed")
 	restored, readErr := os.ReadFile(targetPath)
 	if readErr != nil || string(restored) != string(oldBinary) {
 		t.Fatalf("restored target = %q, err = %v", restored, readErr)
@@ -534,7 +1561,7 @@ func TestStartVerifiedUpdatedExecutableRejectsTamperedTarget(t *testing.T) {
 	}
 }
 
-func TestStartVerifiedUpdatedExecutableLogsStartDetailButReturnsGenericError(t *testing.T) {
+func TestStartVerifiedUpdatedExecutableBoundsUnknownPendingStartError(t *testing.T) {
 	root := t.TempDir()
 	targetPath := filepath.Join(root, "gift-panel.exe")
 	binary := []byte("verified final executable")
@@ -559,12 +1586,12 @@ func TestStartVerifiedUpdatedExecutableLogsStartDetailButReturnsGenericError(t *
 	if strings.Contains(startErr.Error(), "CreateProcess") || strings.Contains(startErr.Error(), "sensitive") {
 		t.Fatalf("user-visible error leaked restart diagnostic: %v", startErr)
 	}
-	if !strings.Contains(diagnostics, "CreateProcess") || !strings.Contains(diagnostics, "sensitive") {
-		t.Fatalf("diagnostics = %q, want raw restart cause", diagnostics)
+	if strings.Contains(diagnostics, "CreateProcess") || strings.Contains(diagnostics, "sensitive") || !strings.Contains(diagnostics, "update_result=restart_launch_failed") {
+		t.Fatalf("unknown pending restart diagnostics were not bounded: %q", diagnostics)
 	}
 }
 
-func TestRunUpdateHelperLogsStateReadDetailButReturnsGenericError(t *testing.T) {
+func TestRunUpdateHelperBoundsMissingStateDiagnostics(t *testing.T) {
 	missingStatePath := filepath.Join(t.TempDir(), "missing-update-state.json")
 	stderr := captureAutoUpdateStderr(t, func() {
 		handled, helperErr := runUpdateHelper([]string{"--apply-update", "--state", missingStatePath, "123"})
@@ -575,7 +1602,7 @@ func TestRunUpdateHelperLogsStateReadDetailButReturnsGenericError(t *testing.T) 
 			t.Fatalf("expected stable generic state-read error, got %v", helperErr)
 		}
 	})
-	if !strings.Contains(stderr, missingStatePath) {
-		t.Fatalf("expected detailed state-read diagnostic on stderr, got %q", stderr)
+	if strings.Contains(stderr, missingStatePath) || !strings.Contains(stderr, "update_result=pending_metadata_unavailable") {
+		t.Fatalf("state-read diagnostics were not bounded: %q", stderr)
 	}
 }

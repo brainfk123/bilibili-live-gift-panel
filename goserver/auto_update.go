@@ -28,25 +28,92 @@ var (
 	updateExpectedPublisherHex = ""
 )
 
+type updateResultError string
+
+func (err updateResultError) Error() string { return string(err) }
+
+func boundedUpdateResult(err error, fallback string) error {
+	if err == nil {
+		return nil
+	}
+	var resultErr updateResultError
+	if errors.As(err, &resultErr) {
+		return resultErr
+	}
+	var policyErr *updateTrustPolicyError
+	if errors.As(err, &policyErr) {
+		return policyErr
+	}
+	return updateResultError(fallback)
+}
+
+func pendingFailureRequiresRedownload(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch boundedUpdateResult(err, "").Error() {
+	case "pending_policy_context_changed", "pending_verification_invalid", "pending_metadata_invalid", "pending_metadata_unavailable", "pending_enrollment_floor_invalid", "artifact_verification_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func logUpdateResult(err error) {
+	if err == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "update_result=%s\n", boundedUpdateResult(err, "update_failed"))
+}
+
+func pendingUsesSignedPolicy(pending pendingUpdate) bool {
+	return pending.SchemaVersion == pendingUpdateSchemaVersion && pending.Verification.Provenance == pendingVerificationSignedPolicy
+}
+
+func logPendingUpdateDiagnostic(pending pendingUpdate, legacyPrefix string, err error, enrollmentCode string) {
+	if pending.legacyDiagnosticsApproved && pending.SchemaVersion == pendingUpdateSchemaVersion &&
+		(pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility) {
+		_, _ = fmt.Fprintf(os.Stderr, "%s：%v\n", legacyPrefix, err)
+		return
+	}
+	logUpdateResult(boundedUpdateResult(err, enrollmentCode))
+}
+
 const (
-	updateGitHubReleaseURL = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-update.json"
-	updateReleaseURL       = updateGitHubReleaseURL
-	updateAssetName        = "gift-panel-windows-x64.exe"
-	updateMaxBytes         = int64(256 << 20)
-	updateCheckPeriod      = 6 * time.Hour
-	updateSourceTimeout    = 20 * time.Second
-	updateVerifyNoticeWait = 300 * time.Millisecond
-	updateInstallCountdown = 3 * time.Second
-	updateChecksumMaxBytes = int64(4096)
-	updateInstalledMarker  = "installed-update.json"
-	updateCleanupAttempts  = 3
-	updateCleanupRetryWait = 10 * time.Millisecond
+	updateGitHubReleaseURL               = "https://github.com/brainfk123/bilibili-live-gift-panel/releases/latest/download/gift-panel-update.json"
+	updateGitHubTrustURL                 = "https://raw.githubusercontent.com/brainfk123/bilibili-live-gift-panel/publisher-trust/gift-panel-publisher-policy.json"
+	updateReleaseURL                     = updateGitHubReleaseURL
+	updateAssetName                      = "gift-panel-windows-x64.exe"
+	updateMaxBytes                       = int64(256 << 20)
+	updateCheckPeriod                    = 6 * time.Hour
+	updateSourceTimeout                  = 20 * time.Second
+	updateVerifyNoticeWait               = 300 * time.Millisecond
+	updateInstallCountdown               = 3 * time.Second
+	updateChecksumMaxBytes               = int64(4096)
+	updateInstalledMarker                = "installed-update.json"
+	updateCleanupAttempts                = 3
+	updateCleanupRetryWait               = 10 * time.Millisecond
+	pendingUpdateSchemaVersion           = 2
+	pendingUpdateEnrollmentFloorFilename = "pending-update-enrollment-floor.json"
+)
+
+var pendingUpdateEnrollmentFloorBytes = []byte("{\"schemaVersion\":2,\"enrollmentRequired\":true}\n")
+
+const (
+	pendingVerificationLegacyMigrated      = "legacy-migrated"
+	pendingVerificationLegacyCompatibility = "legacy-compatibility"
+	pendingVerificationSignedPolicy        = "signed-policy"
 )
 
 var (
-	errUpdateArtifactCleanup     = errors.New("更新文件清理失败")
-	errPendingExecutableCleanup  = errors.New("待安装更新可执行文件清理失败")
-	startUpdatedTargetExecutable = startDetachedExecutable
+	errUpdateArtifactCleanup              = errors.New("更新文件清理失败")
+	errPendingExecutableCleanup           = errors.New("待安装更新可执行文件清理失败")
+	startUpdatedTargetExecutable          = startDetachedExecutable
+	applyPendingUpdate                    = applyDownloadedUpdate
+	pendingUpdateVerifierForBuild         = defaultPendingUpdateVerifier
+	writePendingEnrollmentFloorAtomically = writeFileAtomically
+	writePendingMetadataAtomically        = writeFileAtomically
+	removeUpdateHelperArtifact            = os.Remove
 )
 
 type updateStatus struct {
@@ -77,11 +144,29 @@ type githubAsset struct {
 }
 
 type pendingUpdate struct {
-	Version     string `json:"version"`
-	Size        int64  `json:"size"`
-	SHA256      string `json:"sha256"`
-	PendingPath string `json:"pendingPath"`
-	TargetPath  string `json:"targetPath"`
+	SchemaVersion             int                       `json:"schemaVersion"`
+	Version                   string                    `json:"version"`
+	Tag                       string                    `json:"tag,omitempty"`
+	Channel                   updateChannel             `json:"channel,omitempty"`
+	Size                      int64                     `json:"size"`
+	SHA256                    string                    `json:"sha256"`
+	PendingPath               string                    `json:"pendingPath"`
+	TargetPath                string                    `json:"targetPath"`
+	Verification              pendingUpdateVerification `json:"verification"`
+	legacyDiagnosticsApproved bool
+}
+
+type pendingUpdateVerification struct {
+	Provenance      string                `json:"provenance"`
+	SourceName      string                `json:"sourceName,omitempty"`
+	SourceURLSHA256 string                `json:"sourceUrlSha256,omitempty"`
+	SourceGitHub    *bool                 `json:"sourceGitHub,omitempty"`
+	Tag             string                `json:"tag,omitempty"`
+	Channel         updateChannel         `json:"channel,omitempty"`
+	ArtifactSHA256  string                `json:"artifactSha256,omitempty"`
+	PolicyEpoch     uint64                `json:"policyEpoch,omitempty"`
+	PolicySHA256    string                `json:"policySha256,omitempty"`
+	PolicyMode      updateTrustPolicyMode `json:"policyMode,omitempty"`
 }
 
 type installedUpdate struct {
@@ -89,15 +174,18 @@ type installedUpdate struct {
 }
 
 type updateReleaseSource struct {
-	Name   string
-	URL    string
-	GitHub bool
+	Name           string
+	URL            string
+	GitHub         bool
+	DefaultChannel updateChannel
 }
 
 type updateReleaseCandidate struct {
 	Source  updateReleaseSource
 	Release githubRelease
 	Version string
+	Channel updateChannel
+	Policy  resolvedUpdateTrustPolicy
 }
 
 type autoUpdaterOptions struct {
@@ -108,10 +196,13 @@ type autoUpdaterOptions struct {
 	UpdatesDir              string
 	ReleaseURL              string
 	ReleaseSources          []updateReleaseSource
+	TrustSources            []updateTrustSource
+	TrustStore              *updateTrustStore
 	AssetName               string
 	CheckPeriod             time.Duration
 	Now                     func() time.Time
 	VerifyExecutable        func(string) error
+	InspectAuthenticode     func(string) (inspectedUpdateCertificate, error)
 	LaunchInstaller         func(string, int, bool) error
 	RemoveFile              func(string) error
 	VerificationNoticeDelay time.Duration
@@ -124,6 +215,8 @@ type autoUpdater struct {
 	executablePath          string
 	updatesDir              string
 	releaseSources          []updateReleaseSource
+	trustSources            []updateTrustSource
+	trustStore              *updateTrustStore
 	assetName               string
 	checkPeriod             time.Duration
 	now                     func() time.Time
@@ -131,6 +224,7 @@ type autoUpdater struct {
 	onReady                 func(string)
 	onInstallNow            func()
 	verifyExecutable        func(string) error
+	inspectAuthenticode     func(string) (inspectedUpdateCertificate, error)
 	launchInstaller         func(string, int, bool) error
 	removeFile              func(string) error
 	verificationNoticeDelay time.Duration
@@ -143,9 +237,9 @@ type autoUpdater struct {
 func defaultUpdateReleaseSources() []updateReleaseSource {
 	sources := make([]updateReleaseSource, 0, 2)
 	if domesticURL := domesticUpdateReleaseURL(); domesticURL != "" {
-		sources = append(sources, updateReleaseSource{Name: "国内镜像", URL: domesticURL})
+		sources = append(sources, updateReleaseSource{Name: "国内镜像", URL: domesticURL, DefaultChannel: updateChannelStable})
 	}
-	return append(sources, updateReleaseSource{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true})
+	return append(sources, updateReleaseSource{Name: "GitHub", URL: updateGitHubReleaseURL, GitHub: true, DefaultChannel: updateChannelStable})
 }
 
 func domesticUpdateReleaseURL() string {
@@ -230,6 +324,8 @@ func updateAPIHostnameIsIPLiteral(hostname string) bool {
 func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 	root, rootErr := os.UserConfigDir()
 	executablePath, executableErr := os.Executable()
+	updatesDir := filepath.Join(root, "BilibiliLiveGiftPanel", "updates")
+	trustStore, trustSources, trustErr := defaultEmbeddedUpdateTrust(filepath.Join(updatesDir, "update-trust"), time.Now)
 	if strings.TrimSpace(updateAPIBaseURLHex) != "" && domesticUpdateReleaseURL() == "" {
 		_, _ = fmt.Fprintln(os.Stderr, "自动更新国内镜像配置无效，已使用 GitHub 回退。")
 	}
@@ -238,16 +334,54 @@ func newDefaultAutoUpdater(store *configStore) *autoUpdater {
 		Client:         newUpdateHTTPClient(10 * time.Minute),
 		CurrentVersion: appVersion,
 		ExecutablePath: executablePath,
-		UpdatesDir:     filepath.Join(root, "BilibiliLiveGiftPanel", "updates"),
+		UpdatesDir:     updatesDir,
 		ReleaseSources: defaultUpdateReleaseSources(),
+		TrustSources:   trustSources,
+		TrustStore:     trustStore,
 		AssetName:      updateAssetName,
 		CheckPeriod:    updateCheckPeriod,
 		Now:            time.Now,
 	})
 	if rootErr != nil || executableErr != nil {
 		updater.setStatus("error", "", "无法确定自动更新目录或程序路径。", 0, false)
+	} else if trustErr != nil {
+		updater.setStatus("error", "", "更新信任配置无效，已停止自动更新。", 0, false)
+		logUpdateResult(updateResultError("policy_embedded_invalid"))
 	}
 	return updater
+}
+
+func defaultEmbeddedUpdateTrust(cacheDir string, now func() time.Time) (*updateTrustStore, []updateTrustSource, error) {
+	if now == nil {
+		now = time.Now
+	}
+	hasRoot := strings.TrimSpace(updateTrustRootSPKIBase64) != ""
+	hasPolicy := strings.TrimSpace(updateTrustBootstrapPolicyBase64) != ""
+	if !hasRoot && !hasPolicy {
+		return nil, nil, nil
+	}
+	sources := defaultUpdateTrustSources()
+	root, policy, err := embeddedUpdateTrust()
+	if err != nil {
+		return &updateTrustStore{CacheDir: cacheDir, Now: now}, sources, policyError("policy_embedded_invalid")
+	}
+	if _, err := verifyUpdateTrustPolicyAtAnyExpiry(policy, root); err != nil {
+		return &updateTrustStore{Root: root, EmbeddedPolicy: policy, CacheDir: cacheDir, Now: now}, sources, policyError("policy_embedded_invalid")
+	}
+	return &updateTrustStore{Root: root, EmbeddedPolicy: policy, CacheDir: cacheDir, Now: now}, sources, nil
+}
+
+func embeddedUpdateTrustConfigured() bool {
+	return strings.TrimSpace(updateTrustRootSPKIBase64) != "" || strings.TrimSpace(updateTrustBootstrapPolicyBase64) != ""
+}
+
+func defaultUpdateTrustSources() []updateTrustSource {
+	sources := make([]updateTrustSource, 0, 2)
+	if domesticURL := domesticUpdateReleaseURL(); domesticURL != "" {
+		origin := strings.TrimSuffix(domesticURL, "/api/v1/releases/latest")
+		sources = append(sources, updateTrustSource{Name: "国内镜像", URL: origin + "/api/v1/trust/publisher-policy"})
+	}
+	return append(sources, updateTrustSource{Name: "GitHub", URL: updateGitHubTrustURL})
 }
 
 func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
@@ -267,6 +401,10 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	if verifyExecutable == nil {
 		verifyExecutable = defaultVerifyUpdateExecutable
 	}
+	inspectCertificate := options.InspectAuthenticode
+	if inspectCertificate == nil {
+		inspectCertificate = inspectAuthenticode
+	}
 	launchInstaller := options.LaunchInstaller
 	if launchInstaller == nil {
 		launchInstaller = launchUpdateInstaller
@@ -281,10 +419,15 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 	}
 	releaseSources := append([]updateReleaseSource(nil), options.ReleaseSources...)
 	if len(releaseSources) == 0 && strings.TrimSpace(options.ReleaseURL) != "" {
-		releaseSources = []updateReleaseSource{{Name: "更新源", URL: options.ReleaseURL, GitHub: true}}
+		releaseSources = []updateReleaseSource{{Name: "更新源", URL: options.ReleaseURL, GitHub: true, DefaultChannel: updateChannelStable}}
 	}
 	if len(releaseSources) == 0 {
 		releaseSources = defaultUpdateReleaseSources()
+	}
+	trustSources := append([]updateTrustSource(nil), options.TrustSources...)
+	trustStore := options.TrustStore
+	if trustStore != nil && trustStore.Now == nil {
+		trustStore.Now = now
 	}
 	updater := &autoUpdater{
 		store:                   options.Store,
@@ -293,11 +436,14 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		executablePath:          options.ExecutablePath,
 		updatesDir:              options.UpdatesDir,
 		releaseSources:          releaseSources,
+		trustSources:            trustSources,
+		trustStore:              trustStore,
 		assetName:               options.AssetName,
 		checkPeriod:             period,
 		now:                     now,
 		trigger:                 make(chan bool, 1),
 		verifyExecutable:        verifyExecutable,
+		inspectAuthenticode:     inspectCertificate,
 		launchInstaller:         launchInstaller,
 		removeFile:              removeFile,
 		verificationNoticeDelay: verificationNoticeDelay,
@@ -323,6 +469,44 @@ func newAutoUpdater(options autoUpdaterOptions) *autoUpdater {
 		updater.restorePendingUpdate()
 	}
 	return updater
+}
+
+type updateUserAgentTransport struct {
+	base      http.RoundTripper
+	userAgent string
+}
+
+func (transport updateUserAgentTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	cloned := request.Clone(request.Context())
+	cloned.Header = request.Header.Clone()
+	cloned.Header.Set("User-Agent", transport.userAgent)
+	return transport.base.RoundTrip(cloned)
+}
+
+func (updater *autoUpdater) resolveUpdateTrustPolicy(ctx context.Context) (resolvedUpdateTrustPolicy, error) {
+	return updater.resolveUpdateTrustPolicyFrom(ctx, updater.trustSources)
+}
+
+func (updater *autoUpdater) resolveUpdateTrustPolicyFrom(ctx context.Context, sources []updateTrustSource) (resolvedUpdateTrustPolicy, error) {
+	if updater.trustStore == nil {
+		return resolvedUpdateTrustPolicy{}, policyError("policy_unavailable")
+	}
+	store := *updater.trustStore
+	client := store.Client
+	if client == nil {
+		client = updater.client
+	}
+	if client == nil {
+		client = newUpdateHTTPClient(maxUpdateTrustSourceWait)
+	}
+	clientCopy := *client
+	base := clientCopy.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	clientCopy.Transport = updateUserAgentTransport{base: base, userAgent: "bilibili-live-gift-panel/" + updater.currentVersion}
+	store.Client = &clientCopy
+	return store.Resolve(ctx, sources...)
 }
 
 func decodeExpectedUpdatePublisher(version, encoded string) (string, error) {
@@ -461,28 +645,51 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	if pending == nil {
 		return nil
 	}
+	validated, metadataErr := readPendingUpdateMetadata(updater.metadataPath(), updater.trustStore != nil)
+	if metadataErr != nil {
+		return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, metadataErr, "pending_verification_invalid")
+	}
+	pending = &validated
+	updater.mu.Lock()
+	updater.pending = pending
+	updater.mu.Unlock()
+	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
+		if updater.trustStore != nil {
+			if err := ensurePendingUpdateEnrollmentFloor(updater.metadataPath()); err != nil {
+				return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, updateResultError("pending_enrollment_floor_invalid"), "pending_enrollment_floor_invalid")
+			}
+		}
+		pending.legacyDiagnosticsApproved = true
+	}
 	// This revalidation narrows accidental replacement and ordinary tampering windows.
 	// A malicious process running as the same user can still race path-based checks;
 	// defending that boundary requires a handle-based installer protocol and is outside
 	// the updater's current threat model.
-	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "待安装更新执行前安全校验失败：%v\n", err)
-		cleanupErr := updater.cleanupPendingUpdate(*pending)
-		if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
-			updater.mu.Lock()
-			updater.pending = nil
-			updater.mu.Unlock()
+	verifyExecutable, verificationErr := updater.pendingUpdateVerifier(context.Background(), *pending, updater.trustSources)
+	if verificationErr == nil {
+		verificationErr = verifyPendingExecutable(*pending, verifyExecutable)
+	}
+	if verificationErr != nil {
+		if pendingAllowsRetryPreservingCleanup(*pending) {
+			logPendingUpdateDiagnostic(*pending, "待安装更新执行前安全校验失败", verificationErr, "artifact_verification_failed")
+			cleanupErr := updater.cleanupPendingUpdateForRetry(*pending)
+			if !errors.Is(cleanupErr, errPendingExecutableCleanup) {
+				updater.mu.Lock()
+				updater.pending = nil
+				updater.mu.Unlock()
+			}
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(*pending, "待安装更新拒绝后清理失败", cleanupErr, "artifact_cleanup_failed")
+				updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
+				return errors.New("待安装更新清理失败，已拒绝执行")
+			}
+			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
+			return errors.New("待安装更新安全校验失败，已拒绝执行")
 		}
-		if cleanupErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "待安装更新拒绝后清理失败：%v\n", cleanupErr)
-			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
-			return errors.New("待安装更新清理失败，已拒绝执行")
-		}
-		updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
-		return errors.New("待安装更新安全校验失败，已拒绝执行")
+		return updater.discardPendingUpdateAfterDefinitiveFailure(*pending, verificationErr, "artifact_verification_failed")
 	}
 	if err := updater.preparePendingInstall(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器前残留文件清理失败：%v\n", err)
+		logPendingUpdateDiagnostic(*pending, "启动更新替换器前残留文件清理失败", err, "artifact_cleanup_failed")
 		updater.mu.Lock()
 		updater.pending = nil
 		updater.mu.Unlock()
@@ -491,10 +698,48 @@ func (updater *autoUpdater) InstallOnExit(restart bool) error {
 	}
 	metadataPath := updater.metadataPath()
 	if err := updater.launchInstaller(metadataPath, os.Getpid(), restart); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "启动更新替换器诊断：%v\n", err)
+		resultErr := boundedUpdateResult(err, "installer_launch_failed")
+		if pendingFailureRequiresRedownload(resultErr) {
+			cleanupErr := updater.cleanupPendingUpdate(*pending)
+			updater.mu.Lock()
+			updater.pending = nil
+			updater.mu.Unlock()
+			logUpdateResult(resultErr)
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(*pending, "更新验证上下文变化后的清理诊断", cleanupErr, "artifact_cleanup_failed")
+				updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载；残留文件清理失败。", 0, false)
+				return resultErr
+			}
+			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载。", 0, false)
+			return resultErr
+		}
+		logPendingUpdateDiagnostic(*pending, "启动更新替换器诊断", err, "installer_launch_failed")
 		return errors.New("启动更新替换器失败")
 	}
 	return nil
+}
+
+func pendingAllowsRetryPreservingCleanup(pending pendingUpdate) bool {
+	if !pending.legacyDiagnosticsApproved || pending.SchemaVersion != pendingUpdateSchemaVersion {
+		return false
+	}
+	return pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility
+}
+
+func (updater *autoUpdater) discardPendingUpdateAfterDefinitiveFailure(pending pendingUpdate, primary error, fallback string) error {
+	resultErr := boundedUpdateResult(primary, fallback)
+	cleanupErr := updater.cleanupPendingUpdate(pending)
+	updater.mu.Lock()
+	updater.pending = nil
+	updater.mu.Unlock()
+	logUpdateResult(resultErr)
+	if cleanupErr != nil {
+		logUpdateResult(updateResultError("artifact_cleanup_failed"))
+		updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载；残留文件清理失败。", 0, false)
+		return resultErr
+	}
+	updater.setStatus("error", pending.Version, "待安装更新安全校验失败，需要重新下载。", 0, false)
+	return resultErr
 }
 
 func (updater *autoUpdater) preparePendingInstall() error {
@@ -634,12 +879,12 @@ func (updater *autoUpdater) markChecked() {
 	updater.mu.Unlock()
 }
 
-func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
+func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) error {
 	if !updater.canCheck() {
-		return
+		return nil
 	}
 	if !manual && (!updater.autoUpdateEnabled() || !updater.automaticCheckDue()) {
-		return
+		return nil
 	}
 	updater.mu.Lock()
 	pending := updater.pending
@@ -647,26 +892,30 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 	if pending != nil {
 		updater.setReadyStatus(pending.Version)
 		updater.notifyReady(pending.Version)
-		return
+		return nil
 	}
 	if updater.Status().State == "downloading" {
-		return
+		return nil
 	}
 	updater.setStatus("checking", updater.Status().LatestVersion, "正在检查最新版本…", 0, false)
 	var sourceErrors []string
 	foundCurrentRelease := false
 	latestVersion := ""
 	var candidates []updateReleaseCandidate
+	var lastResultErr error
 	for _, source := range updater.releaseSources {
-		release, err := updater.fetchReleaseFromSource(ctx, source)
+		release, channel, err := updater.fetchReleaseCandidateFromSource(ctx, source)
 		if err != nil {
-			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：%v", source.Name, err))
+			resultErr := boundedUpdateResult(err, "release_unavailable")
+			lastResultErr = resultErr
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：%s", source.Name, resultErr))
 			continue
 		}
 		sourceVersion := strings.TrimPrefix(strings.TrimSpace(release.TagName), "v")
 		comparison, err := compareStableVersions(sourceVersion, updater.currentVersion)
 		if err != nil {
 			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：Release 版本号无效：%v", source.Name, err))
+			lastResultErr = updateResultError("release_version_invalid")
 			continue
 		}
 		if comparison <= 0 {
@@ -675,47 +924,79 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		}
 		if latestVersion == "" {
 			latestVersion = sourceVersion
-			candidates = []updateReleaseCandidate{{Source: source, Release: release, Version: sourceVersion}}
+			candidates = []updateReleaseCandidate{{Source: source, Release: release, Version: sourceVersion, Channel: channel}}
 			continue
 		}
 		comparison, _ = compareStableVersions(sourceVersion, latestVersion)
 		if comparison > 0 {
 			latestVersion = sourceVersion
-			candidates = []updateReleaseCandidate{{Source: source, Release: release, Version: sourceVersion}}
+			candidates = []updateReleaseCandidate{{Source: source, Release: release, Version: sourceVersion, Channel: channel}}
 		} else if comparison == 0 {
-			candidates = append(candidates, updateReleaseCandidate{Source: source, Release: release, Version: sourceVersion})
+			candidates = append(candidates, updateReleaseCandidate{Source: source, Release: release, Version: sourceVersion, Channel: channel})
 		}
 	}
 	if len(candidates) == 0 {
 		updater.markChecked()
 		if foundCurrentRelease {
 			updater.setStatus("up-to-date", updater.currentVersion, "当前已经是最新版本。", 0, false)
-			return
+			return nil
 		}
 		updater.setStatus("error", "", "检查更新失败："+strings.Join(sourceErrors, "；"), 0, false)
-		return
+		if lastResultErr != nil {
+			return lastResultErr
+		}
+		return updateResultError("release_unavailable")
+	}
+	var resolvedPolicy resolvedUpdateTrustPolicy
+	if updater.trustStore != nil {
+		var err error
+		resolvedPolicy, err = updater.resolveUpdateTrustPolicy(ctx)
+		if err != nil {
+			resultErr := boundedUpdateResult(err, "policy_unavailable")
+			updater.markChecked()
+			updater.setStatus("error", latestVersion, "更新信任策略不可用（"+resultErr.Error()+"）。", 0, false)
+			logUpdateResult(resultErr)
+			return resultErr
+		}
+		for index := range candidates {
+			candidates[index].Policy = resolvedPolicy
+		}
 	}
 	for _, candidate := range candidates {
 		asset, err := updater.resolveReleaseAsset(ctx, candidate.Release, updater.assetName)
 		if err != nil {
 			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：%v", candidate.Source.Name, err))
+			lastResultErr = boundedUpdateResult(err, "asset_metadata_invalid")
 			continue
 		}
 		if err := ensureUpdateTargetWritable(updater.executablePath); err != nil {
 			updater.markChecked()
-			updater.setStatus("error", candidate.Version, "程序所在目录不可写，无法静默更新："+err.Error(), 0, false)
-			return
+			resultErr := updateResultError("update_target_unavailable")
+			updater.setStatus("error", candidate.Version, "程序所在目录不可写，无法静默更新。", 0, false)
+			logUpdateResult(resultErr)
+			return resultErr
 		}
 		updater.setStatus("downloading", candidate.Version, fmt.Sprintf("正在通过 %s 静默下载 v%s…", candidate.Source.Name, candidate.Version), 0, false)
-		pending, err = updater.downloadAsset(ctx, candidate.Version, asset)
+		if updater.trustStore == nil {
+			pending, err = updater.downloadAsset(ctx, candidate.Version, asset)
+		} else {
+			pending, err = updater.downloadCandidate(ctx, candidate, asset)
+		}
 		if err != nil {
+			resultErr := boundedUpdateResult(err, "download_failed")
+			lastResultErr = resultErr
 			if errors.Is(err, errUpdateArtifactCleanup) {
-				_, _ = fmt.Fprintf(os.Stderr, "更新文件清理失败，已停止自动更新：%v\n", err)
 				updater.markChecked()
 				updater.setStatus("error", candidate.Version, "更新文件清理失败，已停止安装。", 0, false)
-				return
+				logUpdateResult(updateResultError("artifact_cleanup_failed"))
+				return updateResultError("artifact_cleanup_failed")
 			}
-			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：下载更新失败：%v", candidate.Source.Name, err))
+			failureMessage := "下载更新失败"
+			if resultErr.Error() == "artifact_verification_failed" || resultErr.Error() == "authenticode_invalid" || resultErr.Error() == "authenticode_unavailable" || resultErr.Error() == "publisher_not_authorized" {
+				failureMessage = "更新文件安全校验失败"
+			}
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s：%s（%s）", candidate.Source.Name, failureMessage, resultErr))
+			logUpdateResult(resultErr)
 			updater.setStatus("checking", candidate.Version, "当前更新源下载失败，正在尝试备用源…", 0, false)
 			continue
 		}
@@ -725,21 +1006,31 @@ func (updater *autoUpdater) checkAndDownload(ctx context.Context, manual bool) {
 		updater.mu.Unlock()
 		updater.setReadyStatus(candidate.Version)
 		updater.notifyReady(candidate.Version)
-		return
+		logUpdateResult(updateResultError("ready"))
+		return nil
 	}
 	updater.markChecked()
 	updater.setStatus("error", latestVersion, "检查更新失败："+strings.Join(sourceErrors, "；"), 0, false)
+	if lastResultErr != nil {
+		return lastResultErr
+	}
+	return updateResultError("update_failed")
 }
 
 func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source updateReleaseSource) (githubRelease, error) {
+	release, _, err := updater.fetchReleaseCandidateFromSource(ctx, source)
+	return release, err
+}
+
+func (updater *autoUpdater) fetchReleaseCandidateFromSource(ctx context.Context, source updateReleaseSource) (githubRelease, updateChannel, error) {
 	if strings.TrimSpace(source.URL) == "" {
-		return githubRelease{}, errors.New("更新地址为空")
+		return githubRelease{}, "", errors.New("更新地址为空")
 	}
 	requestContext, cancel := context.WithTimeout(ctx, updateSourceTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, source.URL, nil)
 	if err != nil {
-		return githubRelease{}, errors.New("更新地址无效")
+		return githubRelease{}, "", errors.New("更新地址无效")
 	}
 	request.Header.Set("Accept", "application/json")
 	if source.GitHub {
@@ -749,24 +1040,43 @@ func (updater *autoUpdater) fetchReleaseFromSource(ctx context.Context, source u
 	request.Header.Set("User-Agent", "bilibili-live-gift-panel/"+updater.currentVersion)
 	response, err := updater.client.Do(request)
 	if err != nil {
-		return githubRelease{}, safeUpdateNetworkError(err)
+		return githubRelease{}, "", safeUpdateNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
-		return githubRelease{}, errors.New("尚未发布正式版本")
+		return githubRelease{}, "", errors.New("尚未发布正式版本")
 	}
 	if response.StatusCode != http.StatusOK {
-		return githubRelease{}, fmt.Errorf("返回 HTTP %d", response.StatusCode)
+		return githubRelease{}, "", fmt.Errorf("返回 HTTP %d", response.StatusCode)
+	}
+	channel, err := releaseChannelFromResponse(source, response)
+	if err != nil {
+		return githubRelease{}, "", err
 	}
 	var release githubRelease
 	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&release); err != nil {
-		return githubRelease{}, fmt.Errorf("解析 Release 失败：%w", err)
+		return githubRelease{}, "", fmt.Errorf("解析 Release 失败：%w", err)
 	}
 	if release.Draft || release.Prerelease || strings.TrimSpace(release.TagName) == "" {
-		return githubRelease{}, errors.New("最新正式 Release 无效")
+		return githubRelease{}, "", errors.New("最新正式 Release 无效")
 	}
 	release.SourceName = source.Name
-	return release, nil
+	return release, channel, nil
+}
+
+func releaseChannelFromResponse(source updateReleaseSource, response *http.Response) (updateChannel, error) {
+	if source.GitHub {
+		return updateChannelStable, nil
+	}
+	values := response.Header.Values("X-Gift-Panel-Update-Channel")
+	if len(values) != 1 {
+		return "", updateResultError("update_channel_invalid")
+	}
+	channel := updateChannel(values[0])
+	if channel != updateChannelStable && channel != updateChannelLegacyRushRush {
+		return "", updateResultError("update_channel_invalid")
+	}
+	return channel, nil
 }
 
 func findReleaseAsset(release githubRelease, assetName string) (githubAsset, error) {
@@ -847,7 +1157,77 @@ func (updater *autoUpdater) fetchChecksum(ctx context.Context, downloadURL strin
 	return digest, nil
 }
 
-func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (_ *pendingUpdate, resultErr error) {
+type updateArtifactVerifier func(string, string) error
+
+func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, asset githubAsset) (*pendingUpdate, error) {
+	return updater.downloadAssetVerified(ctx, version, asset, pendingUpdateVerification{Provenance: pendingVerificationLegacyCompatibility}, func(path, _ string) error {
+		return updater.verifyExecutable(path)
+	})
+}
+
+func (updater *autoUpdater) downloadCandidate(ctx context.Context, candidate updateReleaseCandidate, asset githubAsset) (*pendingUpdate, error) {
+	verification, err := pendingVerificationForCandidate(candidate, strings.TrimPrefix(strings.ToLower(asset.Digest), "sha256:"), candidate.Policy)
+	if err != nil {
+		return nil, err
+	}
+	return updater.downloadAssetVerified(ctx, candidate.Version, asset, verification, func(path, sha256Hex string) error {
+		return verifyUpdateArtifactWithInspector(path, candidate, sha256Hex, candidate.Policy, updater.inspectAuthenticode)
+	})
+}
+
+func verifyUpdateArtifact(path string, candidate updateReleaseCandidate, sha256Hex string, policy resolvedUpdateTrustPolicy) error {
+	return verifyUpdateArtifactWithInspector(path, candidate, sha256Hex, policy, inspectAuthenticode)
+}
+
+func verifyUpdateArtifactWithInspector(path string, candidate updateReleaseCandidate, sha256Hex string, policy resolvedUpdateTrustPolicy, inspect func(string) (inspectedUpdateCertificate, error)) error {
+	if inspect == nil {
+		return updateResultError("authenticode_unavailable")
+	}
+	certificate, err := inspect(path)
+	if err != nil {
+		return updateResultError("authenticode_invalid")
+	}
+	return policy.Authorize(updateArtifactIdentity{
+		Tag: candidate.Release.TagName, Channel: candidate.Channel,
+		SHA256: sha256Hex, Certificate: certificate.LegalIdentity,
+	})
+}
+
+func pendingVerificationForCandidate(candidate updateReleaseCandidate, artifactSHA string, policy resolvedUpdateTrustPolicy) (pendingUpdateVerification, error) {
+	artifactSHA, err := normalizeSHA256(artifactSHA)
+	if err != nil || policy.Policy.Epoch == 0 || len(policy.Policy.SignedRaw) == 0 ||
+		(policy.Mode != updateTrustModeCurrent && policy.Mode != updateTrustModeExpiredIdentityFallback) ||
+		strings.TrimSpace(candidate.Source.Name) == "" || strings.TrimSpace(candidate.Source.URL) == "" {
+		return pendingUpdateVerification{}, updateResultError("pending_verification_invalid")
+	}
+	policyDigest := sha256.Sum256(policy.Policy.SignedRaw)
+	sourceDigest := sha256.Sum256([]byte(candidate.Source.URL))
+	github := candidate.Source.GitHub
+	verification := pendingUpdateVerification{
+		Provenance: pendingVerificationSignedPolicy,
+		SourceName: candidate.Source.Name, SourceURLSHA256: hex.EncodeToString(sourceDigest[:]), SourceGitHub: &github,
+		Tag: candidate.Release.TagName, Channel: candidate.Channel, ArtifactSHA256: artifactSHA,
+		PolicyEpoch: policy.Policy.Epoch, PolicySHA256: hex.EncodeToString(policyDigest[:]), PolicyMode: policy.Mode,
+	}
+	pending := pendingUpdate{Version: candidate.Version, SHA256: artifactSHA, Verification: verification}
+	if err := validatePendingUpdateVerification(pending); err != nil {
+		return pendingUpdateVerification{}, err
+	}
+	return verification, nil
+}
+
+func verifyPendingResolvedPolicyContext(verification pendingUpdateVerification, policy resolvedUpdateTrustPolicy) error {
+	if verification.Provenance != pendingVerificationSignedPolicy || policy.Policy.Epoch == 0 || len(policy.Policy.SignedRaw) == 0 {
+		return updateResultError("pending_policy_context_changed")
+	}
+	digest := sha256.Sum256(policy.Policy.SignedRaw)
+	if verification.PolicyEpoch != policy.Policy.Epoch || verification.PolicySHA256 != hex.EncodeToString(digest[:]) || verification.PolicyMode != policy.Mode {
+		return updateResultError("pending_policy_context_changed")
+	}
+	return nil
+}
+
+func (updater *autoUpdater) downloadAssetVerified(ctx context.Context, version string, asset githubAsset, verification pendingUpdateVerification, verify updateArtifactVerifier) (_ *pendingUpdate, resultErr error) {
 	if err := os.MkdirAll(updater.updatesDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建更新目录失败：%w", err)
 	}
@@ -886,7 +1266,7 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 			return
 		}
 		if err := updater.removeUpdateArtifact(temporaryPath); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "更新临时文件清理失败：%v\n", err)
+			logUpdateResult(updateResultError("artifact_cleanup_failed"))
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
@@ -908,12 +1288,15 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	}
 	verificationTimer := time.AfterFunc(updater.verificationNoticeDelay, updater.showVerificationIfDownloading)
 	defer verificationTimer.Stop()
-	if err := verifyFileSHA256(temporaryPath, expectedSHA); err != nil {
+	computedSHA, err := verifiedFileSHA256(temporaryPath, expectedSHA)
+	if err != nil {
 		return nil, fmt.Errorf("SHA-256 校验不通过，已丢弃下载文件：%w", err)
 	}
-	if err := updater.verifyExecutable(temporaryPath); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "下载更新 Authenticode 诊断：%v\n", err)
-		return nil, errors.New("更新文件安全校验失败")
+	if verify == nil {
+		return nil, updateResultError("artifact_verifier_unavailable")
+	}
+	if err := verify(temporaryPath, computedSHA); err != nil {
+		return nil, boundedUpdateResult(err, "artifact_verification_failed")
 	}
 	pendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
 	if err := updater.removeUpdateArtifact(pendingPath); err != nil {
@@ -924,15 +1307,16 @@ func (updater *autoUpdater) downloadAsset(ctx context.Context, version string, a
 	}
 	temporaryNeedsCleanup = false
 	pending := &pendingUpdate{
-		Version:     version,
-		Size:        expectedSize,
-		SHA256:      expectedSHA,
-		PendingPath: pendingPath,
-		TargetPath:  updater.executablePath,
+		SchemaVersion: pendingUpdateSchemaVersion,
+		Version:       version,
+		Size:          expectedSize,
+		SHA256:        expectedSHA,
+		PendingPath:   pendingPath,
+		TargetPath:    updater.executablePath,
+		Verification:  verification,
 	}
-	if err := verifyPendingExecutable(*pending, updater.verifyExecutable); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "rename 后待安装更新安全校验诊断：%v\n", err)
-		verificationErr := errors.New("更新文件安全校验失败")
+	if err := verifyPendingExecutable(*pending, func(path string) error { return verify(path, computedSHA) }); err != nil {
+		verificationErr := boundedUpdateResult(err, "artifact_verification_failed")
 		if cleanupErr := updater.removeUpdateArtifact(pendingPath); cleanupErr != nil {
 			return nil, errors.Join(verificationErr, cleanupErr)
 		}
@@ -990,6 +1374,49 @@ func verifyPendingExecutable(pending pendingUpdate, verifyExecutable func(string
 		return errors.New("待安装更新缺少签名验证器")
 	}
 	return verifyExecutable(pending.PendingPath)
+}
+
+func (updater *autoUpdater) pendingUpdateVerifier(ctx context.Context, pending pendingUpdate, sources []updateTrustSource) (func(string) error, error) {
+	if pending.SchemaVersion != pendingUpdateSchemaVersion {
+		return nil, updateResultError("pending_verification_invalid")
+	}
+	if err := validatePendingUpdateVerification(pending); err != nil {
+		return nil, err
+	}
+	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
+		return updater.verifyExecutable, nil
+	}
+	verification := pending.Verification
+	if updater.trustStore == nil || !updater.pendingSourceMatches(verification) {
+		return nil, updateResultError("pending_policy_context_changed")
+	}
+	policy, err := updater.resolveUpdateTrustPolicyFrom(ctx, sources)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyPendingResolvedPolicyContext(verification, policy); err != nil {
+		return nil, err
+	}
+	candidate := updateReleaseCandidate{
+		Source:  updateReleaseSource{Name: verification.SourceName, GitHub: *verification.SourceGitHub},
+		Release: githubRelease{TagName: verification.Tag}, Version: strings.TrimPrefix(pending.Version, "v"), Channel: verification.Channel,
+	}
+	return func(path string) error {
+		return verifyUpdateArtifactWithInspector(path, candidate, verification.ArtifactSHA256, policy, updater.inspectAuthenticode)
+	}, nil
+}
+
+func (updater *autoUpdater) pendingSourceMatches(verification pendingUpdateVerification) bool {
+	if len(updater.releaseSources) == 0 {
+		return true
+	}
+	for _, source := range updater.releaseSources {
+		digest := sha256.Sum256([]byte(source.URL))
+		if source.Name == verification.SourceName && source.GitHub == *verification.SourceGitHub && hex.EncodeToString(digest[:]) == verification.SourceURLSHA256 {
+			return true
+		}
+	}
+	return false
 }
 
 func (updater *autoUpdater) metadataPath() string {
@@ -1067,24 +1494,172 @@ func writeInstalledUpdateMarker(metadataPath, version string) error {
 }
 
 func (updater *autoUpdater) writePendingMetadata(pending pendingUpdate) error {
+	var err error
+	pending, migrated, err := normalizePendingUpdateMetadata(pending)
+	if err != nil {
+		return err
+	}
+	requiresFloor := pendingUsesSignedPolicy(pending) || updater.trustStore != nil && (migrated || pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility)
+	if requiresFloor {
+		if err := ensurePendingUpdateEnrollmentFloor(updater.metadataPath()); err != nil {
+			return err
+		}
+	}
 	data, err := json.MarshalIndent(pending, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	if err := writeFileAtomically(updater.metadataPath(), data); err != nil {
-		return fmt.Errorf("保存更新状态失败：%w", err)
+	if err := writePendingMetadataAtomically(updater.metadataPath(), data); err != nil {
+		return updateResultError("pending_metadata_write_failed")
+	}
+	return nil
+}
+
+func decodePendingUpdateMetadata(data []byte) (pendingUpdate, bool, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var pending pendingUpdate
+	if err := decoder.Decode(&pending); err != nil {
+		return pendingUpdate{}, false, updateResultError("pending_metadata_invalid")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return pendingUpdate{}, false, updateResultError("pending_metadata_invalid")
+	}
+	return normalizePendingUpdateMetadata(pending)
+}
+
+func pendingUpdateEnrollmentFloorPath(metadataPath string) string {
+	return filepath.Join(filepath.Dir(metadataPath), pendingUpdateEnrollmentFloorFilename)
+}
+
+func readPendingUpdateEnrollmentFloor(metadataPath string) (bool, error) {
+	data, err := os.ReadFile(pendingUpdateEnrollmentFloorPath(metadataPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || string(data) != string(pendingUpdateEnrollmentFloorBytes) {
+		return false, updateResultError("pending_enrollment_floor_invalid")
+	}
+	return true, nil
+}
+
+func ensurePendingUpdateEnrollmentFloor(metadataPath string) error {
+	exists, err := readPendingUpdateEnrollmentFloor(metadataPath)
+	if err != nil || exists {
+		return err
+	}
+	if err := writePendingEnrollmentFloorAtomically(pendingUpdateEnrollmentFloorPath(metadataPath), pendingUpdateEnrollmentFloorBytes); err != nil {
+		return updateResultError("pending_enrollment_floor_write_failed")
+	}
+	exists, err = readPendingUpdateEnrollmentFloor(metadataPath)
+	if err != nil || !exists {
+		return updateResultError("pending_enrollment_floor_write_failed")
+	}
+	return nil
+}
+
+func readPendingUpdateMetadata(path string, enrollmentRequired bool) (pendingUpdate, error) {
+	floorExists, err := readPendingUpdateEnrollmentFloor(path)
+	if err != nil {
+		return pendingUpdate{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return pendingUpdate{}, updateResultError("pending_metadata_unavailable")
+	}
+	var schema struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return pendingUpdate{}, updateResultError("pending_metadata_invalid")
+	}
+	if schema.SchemaVersion == 0 && floorExists {
+		return pendingUpdate{}, updateResultError("pending_verification_invalid")
+	}
+	pending, migrated, err := decodePendingUpdateMetadata(data)
+	if err != nil {
+		return pendingUpdate{}, err
+	}
+	requiresFloor := enrollmentRequired || pendingUsesSignedPolicy(pending)
+	if requiresFloor && !floorExists {
+		if err := ensurePendingUpdateEnrollmentFloor(path); err != nil {
+			return pendingUpdate{}, err
+		}
+		floorExists = true
+	}
+	if migrated {
+		encoded, err := json.MarshalIndent(pending, "", "  ")
+		if err != nil {
+			return pendingUpdate{}, updateResultError("pending_metadata_invalid")
+		}
+		encoded = append(encoded, '\n')
+		if enrollmentRequired && !floorExists {
+			return pendingUpdate{}, updateResultError("pending_enrollment_floor_write_failed")
+		}
+		if err := writePendingMetadataAtomically(path, encoded); err != nil {
+			return pendingUpdate{}, updateResultError("pending_metadata_migration_failed")
+		}
+	}
+	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
+		pending.legacyDiagnosticsApproved = true
+	}
+	return pending, nil
+}
+
+func normalizePendingUpdateMetadata(pending pendingUpdate) (pendingUpdate, bool, error) {
+	if pending.SchemaVersion == 0 {
+		if pending.Tag != "" || pending.Channel != "" || pending.Verification.Provenance != "" {
+			return pendingUpdate{}, false, updateResultError("pending_verification_invalid")
+		}
+		pending.SchemaVersion = pendingUpdateSchemaVersion
+		pending.Verification = pendingUpdateVerification{Provenance: pendingVerificationLegacyMigrated}
+		return pending, true, nil
+	}
+	if pending.SchemaVersion != pendingUpdateSchemaVersion {
+		return pendingUpdate{}, false, updateResultError("pending_verification_invalid")
+	}
+	if err := validatePendingUpdateVerification(pending); err != nil {
+		return pendingUpdate{}, false, err
+	}
+	return pending, false, nil
+}
+
+func validatePendingUpdateVerification(pending pendingUpdate) error {
+	if pending.Tag != "" || pending.Channel != "" {
+		return updateResultError("pending_verification_invalid")
+	}
+	verification := pending.Verification
+	switch verification.Provenance {
+	case pendingVerificationLegacyMigrated, pendingVerificationLegacyCompatibility:
+		if verification.SourceName != "" || verification.SourceURLSHA256 != "" || verification.SourceGitHub != nil || verification.Tag != "" || verification.Channel != "" ||
+			verification.ArtifactSHA256 != "" || verification.PolicyEpoch != 0 || verification.PolicySHA256 != "" || verification.PolicyMode != "" {
+			return updateResultError("pending_verification_invalid")
+		}
+	case pendingVerificationSignedPolicy:
+		if strings.TrimSpace(verification.SourceName) == "" || verification.SourceName != strings.TrimSpace(verification.SourceName) ||
+			!sha256Hex.MatchString(verification.SourceURLSHA256) || verification.SourceGitHub == nil || !canonicalPolicyTag.MatchString(verification.Tag) ||
+			(verification.Channel != updateChannelStable && verification.Channel != updateChannelLegacyRushRush) ||
+			!sha256Hex.MatchString(verification.ArtifactSHA256) || verification.ArtifactSHA256 != strings.ToLower(strings.TrimSpace(pending.SHA256)) ||
+			verification.PolicyEpoch == 0 || !sha256Hex.MatchString(verification.PolicySHA256) ||
+			(verification.PolicyMode != updateTrustModeCurrent && verification.PolicyMode != updateTrustModeExpiredIdentityFallback) ||
+			strings.TrimPrefix(verification.Tag, "v") != strings.TrimPrefix(pending.Version, "v") {
+			return updateResultError("pending_verification_invalid")
+		}
+	default:
+		return updateResultError("pending_verification_invalid")
 	}
 	return nil
 }
 
 func (updater *autoUpdater) restorePendingUpdate() {
-	data, err := os.ReadFile(updater.metadataPath())
-	if err != nil {
+	if _, err := os.Stat(updater.metadataPath()); errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	var pending pendingUpdate
-	if json.Unmarshal(data, &pending) != nil || pending.PendingPath != filepath.Join(updater.updatesDir, "gift-panel-pending.exe") || pending.TargetPath != updater.executablePath {
+	pending, decodeErr := readPendingUpdateMetadata(updater.metadataPath(), updater.trustStore != nil)
+	if decodeErr != nil || pending.PendingPath != filepath.Join(updater.updatesDir, "gift-panel-pending.exe") || pending.TargetPath != updater.executablePath {
+		logPendingUpdateDiagnostic(pending, "恢复待安装更新元数据诊断", decodeErr, "pending_metadata_invalid")
 		updater.cleanupRestoredPending(pending)
 		return
 	}
@@ -1093,10 +1668,14 @@ func (updater *autoUpdater) restorePendingUpdate() {
 		updater.cleanupRestoredPending(pending)
 		return
 	}
-	if err := verifyPendingExecutable(pending, updater.verifyExecutable); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新安全校验诊断：%v\n", err)
+	verifier, verificationErr := updater.pendingUpdateVerifier(context.Background(), pending, nil)
+	if verificationErr == nil {
+		verificationErr = verifyPendingExecutable(pending, verifier)
+	}
+	if verificationErr != nil {
+		logPendingUpdateDiagnostic(pending, "恢复待安装更新安全校验诊断", verificationErr, "artifact_verification_failed")
 		if cleanupErr := updater.cleanupPendingUpdate(pending); cleanupErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新校验失败后的清理诊断：%v\n", cleanupErr)
+			logUpdateResult(updateResultError("artifact_cleanup_failed"))
 			updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
 		} else {
 			updater.setStatus("error", pending.Version, "待安装更新安全校验失败，已拒绝执行。", 0, false)
@@ -1117,12 +1696,20 @@ func (updater *autoUpdater) restorePendingUpdate() {
 
 func (updater *autoUpdater) cleanupRestoredPending(pending pendingUpdate) {
 	if err := updater.cleanupPendingUpdate(pending); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "恢复待安装更新时清理失败：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "恢复待安装更新时清理失败", err, "artifact_cleanup_failed")
 		updater.setStatus("error", pending.Version, "待安装更新清理失败，已拒绝执行。", 0, false)
 	}
 }
 
 func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
+	return updater.cleanupPendingUpdateWithRetryPolicy(pending, false)
+}
+
+func (updater *autoUpdater) cleanupPendingUpdateForRetry(pending pendingUpdate) error {
+	return updater.cleanupPendingUpdateWithRetryPolicy(pending, true)
+}
+
+func (updater *autoUpdater) cleanupPendingUpdateWithRetryPolicy(pending pendingUpdate, preserveMetadataOnPendingFailure bool) error {
 	knownPendingPath := filepath.Join(updater.updatesDir, "gift-panel-pending.exe")
 	pendingPath := ""
 	if pending.PendingPath == "" || filepath.Clean(pending.PendingPath) == filepath.Clean(knownPendingPath) {
@@ -1130,16 +1717,20 @@ func (updater *autoUpdater) cleanupPendingUpdate(pending pendingUpdate) error {
 	} else if filepath.Dir(pending.PendingPath) == filepath.Clean(updater.updatesDir) {
 		pendingPath = pending.PendingPath
 	}
+	var cleanupErr error
 	if pendingPath != "" {
 		if err := updater.removeUpdateArtifact(pendingPath); err != nil {
-			return errors.Join(errPendingExecutableCleanup, err)
+			pendingCleanupErr := errors.Join(errPendingExecutableCleanup, err)
+			if preserveMetadataOnPendingFailure {
+				return pendingCleanupErr
+			}
+			cleanupErr = errors.Join(cleanupErr, pendingCleanupErr)
 		}
 	}
 	paths := []string{updater.metadataPath()}
 	if updater.executablePath != "" {
 		paths = append(paths, updater.executablePath+".old", updater.executablePath+".new")
 	}
-	var cleanupErr error
 	for _, path := range paths {
 		cleanupErr = errors.Join(cleanupErr, updater.removeUpdateArtifact(path))
 	}
@@ -1158,23 +1749,29 @@ func normalizeSHA256(value string) (string, error) {
 }
 
 func verifyFileSHA256(path, expected string) error {
+	_, err := verifiedFileSHA256(path, expected)
+	return err
+}
+
+func verifiedFileSHA256(path, expected string) (string, error) {
 	normalized, err := normalizeSHA256(expected)
 	if err != nil {
-		return err
+		return "", err
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer file.Close()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, io.LimitReader(file, updateMaxBytes+1)); err != nil {
-		return err
+		return "", err
 	}
-	if hex.EncodeToString(hasher.Sum(nil)) != normalized {
-		return errors.New("SHA-256 不匹配")
+	computed := hex.EncodeToString(hasher.Sum(nil))
+	if computed != normalized {
+		return "", errors.New("SHA-256 不匹配")
 	}
-	return nil
+	return computed, nil
 }
 
 func ensureUpdateTargetWritable(executablePath string) error {
@@ -1249,48 +1846,93 @@ func runUpdateHelper(args []string) (bool, error) {
 	if err != nil || waitPID <= 0 {
 		return true, errors.New("更新等待进程无效")
 	}
-	data, err := os.ReadFile(args[2])
+	pending, err := readPendingUpdateMetadata(args[2], embeddedUpdateTrustConfigured())
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "读取更新状态诊断：%v\n", err)
-		return true, errors.New("读取更新状态失败")
-	}
-	var pending pendingUpdate
-	if err := json.Unmarshal(data, &pending); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "解析更新状态诊断：%v\n", err)
+		logUpdateResult(boundedUpdateResult(err, "pending_metadata_invalid"))
+		if err.Error() == "pending_metadata_unavailable" {
+			return true, errors.New("读取更新状态失败")
+		}
 		return true, errors.New("解析更新状态失败")
 	}
-	if err := applyDownloadedUpdate(pending, waitPID); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "应用待安装更新诊断：%v\n", err)
+	if err := applyPendingUpdate(pending, waitPID); err != nil {
+		resultErr := boundedUpdateResult(err, "update_apply_failed")
+		if pendingFailureRequiresRedownload(resultErr) {
+			cleanupErr := cleanupDefinitiveUpdateHelper(args[2], pending)
+			logPendingUpdateDiagnostic(pending, "应用待安装更新诊断", resultErr, resultErr.Error())
+			if cleanupErr != nil {
+				logPendingUpdateDiagnostic(pending, "确定性更新失败后的清理诊断", cleanupErr, "artifact_cleanup_failed")
+			}
+			return true, resultErr
+		}
+		logPendingUpdateDiagnostic(pending, "应用待安装更新诊断", err, "update_apply_failed")
 		return true, errors.New("应用待安装更新失败")
 	}
 	if err := writeInstalledUpdateMarker(args[2], pending.Version); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "记录已安装更新诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "记录已安装更新诊断", err, "installed_marker_failed")
 		return true, errors.New("记录已安装更新失败")
 	}
 	if err := os.Remove(args[2]); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_, _ = fmt.Fprintf(os.Stderr, "清理更新状态诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "清理更新状态诊断", err, "pending_metadata_cleanup_failed")
 	}
 	if restart {
 		if err := startVerifiedUpdatedExecutable(pending); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "重新启动更新后的程序诊断：%v\n", err)
+			logPendingUpdateDiagnostic(pending, "重新启动更新后的程序诊断", err, "restart_failed")
 			return true, errors.New("重新启动更新后的程序失败")
 		}
 	}
 	return true, nil
 }
 
+func cleanupDefinitiveUpdateHelper(metadataPath string, pending pendingUpdate) error {
+	var cleanupErr error
+	for _, path := range []string{metadataPath, pending.TargetPath + ".new", pending.PendingPath} {
+		cleanupErr = errors.Join(cleanupErr, removeUpdateArtifactWith(removeUpdateHelperArtifact, path))
+	}
+	return cleanupErr
+}
+
 func startVerifiedUpdatedExecutable(pending pendingUpdate) error {
+	verifier, err := pendingUpdateVerifierForBuild(pending)
+	if err != nil {
+		logUpdateResult(boundedUpdateResult(err, "artifact_verification_failed"))
+		return errors.New("更新后程序安全校验失败")
+	}
 	target := pending
 	target.PendingPath = pending.TargetPath
-	if err := verifyPendingExecutable(target, defaultVerifyUpdateExecutable); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "重新启动更新后程序前安全校验诊断：%v\n", err)
+	if err := verifyPendingExecutable(target, verifier); err != nil {
+		logUpdateResult(boundedUpdateResult(err, "artifact_verification_failed"))
 		return errors.New("更新后程序安全校验失败")
 	}
 	if err := startUpdatedTargetExecutable(pending.TargetPath); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "启动更新后程序诊断：%v\n", err)
+		logPendingUpdateDiagnostic(pending, "启动更新后程序诊断", err, "restart_launch_failed")
 		return errors.New("启动更新后程序失败")
 	}
 	return nil
+}
+
+func defaultPendingUpdateVerifier(pending pendingUpdate) (func(string) error, error) {
+	normalized, _, err := normalizePendingUpdateMetadata(pending)
+	if err != nil {
+		return nil, err
+	}
+	pending = normalized
+	if pending.Verification.Provenance == pendingVerificationLegacyMigrated || pending.Verification.Provenance == pendingVerificationLegacyCompatibility {
+		return defaultVerifyUpdateExecutable, nil
+	}
+	cacheDir := filepath.Join(filepath.Dir(pending.PendingPath), "update-trust")
+	store, _, err := defaultEmbeddedUpdateTrust(cacheDir, time.Now)
+	if err != nil || store == nil {
+		return nil, policyError("policy_embedded_invalid")
+	}
+	updater := &autoUpdater{
+		currentVersion:      strings.TrimPrefix(pending.Version, "v"),
+		client:              newUpdateHTTPClient(maxUpdateTrustSourceWait),
+		trustStore:          store,
+		releaseSources:      defaultUpdateReleaseSources(),
+		verifyExecutable:    defaultVerifyUpdateExecutable,
+		inspectAuthenticode: inspectAuthenticode,
+	}
+	return updater.pendingUpdateVerifier(context.Background(), pending, nil)
 }
 
 func startDetachedExecutable(path string, args ...string) error {

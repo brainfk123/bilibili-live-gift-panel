@@ -69,13 +69,13 @@ func TestLatestCachesManifestButPresignsEveryResponse(t *testing.T) {
 		},
 	}
 
-	sut := service.New(store, channelKey, func() time.Time { return clock })
-	first, err := sut.Latest(context.Background())
+	sut := service.New(store, func() time.Time { return clock })
+	first, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(30 * time.Second)
-	second, err := sut.Latest(context.Background())
+	second, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +105,13 @@ func TestLatestUsesLastValidManifestWhenRefreshFails(t *testing.T) {
 		},
 		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/signed", nil },
 	}
-	sut := service.New(store, channelKey, func() time.Time { return clock })
-	if _, err := sut.Latest(context.Background()); err != nil {
+	sut := service.New(store, func() time.Time { return clock })
+	if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
 		t.Fatal(err)
 	}
 
 	clock = clock.Add(61 * time.Second)
-	got, err := sut.Latest(context.Background())
+	got, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatalf("Latest after refresh failure: %v", err)
 	}
@@ -136,13 +136,13 @@ func TestLatestUsesLastValidManifestWhenRefreshIsInvalid(t *testing.T) {
 		},
 		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/signed", nil },
 	}
-	sut := service.New(store, channelKey, func() time.Time { return clock })
-	if _, err := sut.Latest(context.Background()); err != nil {
+	sut := service.New(store, func() time.Time { return clock })
+	if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
 		t.Fatal(err)
 	}
 
 	clock = clock.Add(61 * time.Second)
-	got, err := sut.Latest(context.Background())
+	got, err := sut.Latest(context.Background(), release.ChannelStable)
 	if err != nil {
 		t.Fatalf("Latest after invalid refresh: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 				return "", nil
 			},
 		}
-		_, err := service.New(store, channelKey, time.Now).Latest(context.Background())
+		_, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 		if !errors.Is(err, service.ErrReleaseUnavailable) {
 			t.Fatalf("Latest() error = %v, want ErrReleaseUnavailable", err)
 		}
@@ -174,7 +174,7 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 				return "", nil
 			},
 		}
-		_, err := service.New(store, channelKey, time.Now).Latest(context.Background())
+		_, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 		if !errors.Is(err, service.ErrReleaseInvalid) {
 			t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
 		}
@@ -185,7 +185,7 @@ func TestLatestClassifiesColdStartAndSignerFailures(t *testing.T) {
 			get:     func(string, int64) ([]byte, string, error) { return validManifest(t), "etag", nil },
 			presign: func(string, time.Duration) (string, error) { return "", errors.New("signer unavailable") },
 		}
-		_, err := service.New(store, channelKey, time.Now).Latest(context.Background())
+		_, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 		if !errors.Is(err, service.ErrDownloadUnavailable) {
 			t.Fatalf("Latest() error = %v, want ErrDownloadUnavailable", err)
 		}
@@ -233,7 +233,7 @@ func TestInvalidManifestErrorsExposeSanitizedReasonCodes(t *testing.T) {
 				},
 			}
 
-			_, err = service.New(store, channelKey, time.Now).Latest(context.Background())
+			_, err = service.New(store, time.Now).Latest(context.Background(), release.ChannelStable)
 			if !errors.Is(err, service.ErrReleaseInvalid) {
 				t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
 			}
@@ -247,19 +247,428 @@ func TestInvalidManifestErrorsExposeSanitizedReasonCodes(t *testing.T) {
 	}
 }
 
-func TestLatestRejectsChannelKeysOtherThanStableLatest(t *testing.T) {
+func TestLatestReadsOnlySelectedChannelPointer(t *testing.T) {
+	store := &fakeStore{
+		get: func(key string, maxBytes int64) ([]byte, string, error) {
+			if key != "channels/legacy-rushrush/latest.json" || maxBytes != 64<<10 {
+				t.Fatalf("Get(%q, %d), want legacy pointer and 64 KiB", key, maxBytes)
+			}
+			return validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11"), "legacy-etag", nil
+		},
+		presign: func(string, time.Duration) (string, error) { return "https://cos.example.invalid/legacy", nil },
+	}
+
+	got, err := service.New(store, time.Now).Latest(context.Background(), release.ChannelLegacyRushRush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TagName != "v0.4.11" || len(store.gets) != 1 {
+		t.Fatalf("Latest() = %#v, reads=%#v", got, store.gets)
+	}
+}
+
+func TestLatestRejectsAndDoesNotCachePointerManifestForAnotherChannel(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested release.Channel
+		body      func(*testing.T) []byte
+	}{
+		{
+			name:      "schema 1 stable under legacy pointer",
+			requested: release.ChannelLegacyRushRush,
+			body:      validManifest,
+		},
+		{
+			name:      "schema 2 legacy under stable pointer",
+			requested: release.ChannelStable,
+			body: func(t *testing.T) []byte {
+				return validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11")
+			},
+		},
+		{
+			name:      "schema 2 stable under legacy pointer",
+			requested: release.ChannelLegacyRushRush,
+			body: func(t *testing.T) []byte {
+				return validManifestForChannel(t, release.ChannelStable, "v1.2.3")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := test.body(t)
+			store := &fakeStore{
+				get: func(string, int64) ([]byte, string, error) { return body, "etag", nil },
+				presign: func(string, time.Duration) (string, error) {
+					t.Fatal("wrong-channel manifest reached download signing")
+					return "", nil
+				},
+			}
+			sut := service.New(store, time.Now)
+			for attempt := 0; attempt < 2; attempt++ {
+				_, err := sut.Latest(context.Background(), test.requested)
+				if !errors.Is(err, service.ErrReleaseInvalid) || service.InvalidReason(err) != "manifest_channel" {
+					t.Fatalf("attempt %d error=%v reason=%q", attempt, err, service.InvalidReason(err))
+				}
+			}
+			if len(store.gets) != 2 {
+				t.Fatalf("storage reads=%d, want 2 rejected uncached reads", len(store.gets))
+			}
+		})
+	}
+}
+
+func TestLatestRejectsUnknownTypedChannelWithoutStorageAccess(t *testing.T) {
 	store := &fakeStore{
 		get: func(string, int64) ([]byte, string, error) {
-			t.Fatal("Get should not be called for an untrusted channel key")
+			t.Fatal("unknown channel reached Store.Get")
 			return nil, "", nil
+		},
+		presign: func(string, time.Duration) (string, error) {
+			t.Fatal("unknown channel reached Store.PresignGet")
+			return "", nil
+		},
+	}
+
+	_, err := service.New(store, time.Now).Latest(context.Background(), release.Channel("private/arbitrary-key"))
+	if !errors.Is(err, service.ErrReleaseInvalid) || service.InvalidReason(err) != "unsupported_channel_key" {
+		t.Fatalf("Latest() error = %v reason=%q", err, service.InvalidReason(err))
+	}
+}
+
+func TestPublisherPolicyReadsCompleteBoundedEnvelope(t *testing.T) {
+	policy := []byte(`{"signed":{"epoch":7},"signatures":[{"algorithm":"ecdsa-p256-sha256","signature":"opaque"}]}`)
+	store := &fakeStore{
+		get: func(key string, maxBytes int64) ([]byte, string, error) {
+			if key != "trust/publisher/latest.json" || maxBytes != 256<<10 {
+				t.Fatalf("Get(%q, %d), want publisher policy key and 256 KiB", key, maxBytes)
+			}
+			return policy, "policy-etag", nil
+		},
+		presign: func(string, time.Duration) (string, error) {
+			t.Fatal("PublisherPolicy must not presign an object")
+			return "", nil
+		},
+	}
+
+	got, err := service.New(store, time.Now).PublisherPolicy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(policy) {
+		t.Fatalf("PublisherPolicy() = %s, want complete envelope %s", got, policy)
+	}
+	got[0] = 'x'
+	if policy[0] == 'x' {
+		t.Fatal("PublisherPolicy returned aliased storage bytes")
+	}
+}
+
+func TestPublisherPolicyRejectsOversizedEnvelope(t *testing.T) {
+	store := &fakeStore{
+		get: func(string, int64) ([]byte, string, error) {
+			return []byte(strings.Repeat("x", (256<<10)+1)), "", nil
 		},
 		presign: func(string, time.Duration) (string, error) { return "", nil },
 	}
-
-	_, err := service.New(store, "channels/beta/latest.json", time.Now).Latest(context.Background())
-	if !errors.Is(err, service.ErrReleaseInvalid) {
-		t.Fatalf("Latest() error = %v, want ErrReleaseInvalid", err)
+	_, err := service.New(store, time.Now).PublisherPolicy(context.Background())
+	if !errors.Is(err, service.ErrReleaseInvalid) || service.InvalidReason(err) != "publisher_policy_size" {
+		t.Fatalf("PublisherPolicy() error=%v reason=%q", err, service.InvalidReason(err))
 	}
+}
+
+func TestObjectKeysDriveEveryConfiguredServiceRead(t *testing.T) {
+	keys := service.ObjectKeys{
+		StableChannel:   "fixtures/channels/stable.json",
+		LegacyChannel:   "fixtures/channels/legacy.json",
+		PublisherPolicy: "fixtures/trust/policy.json",
+	}
+
+	t.Run("stable", func(t *testing.T) {
+		store := &fakeStore{
+			get: func(key string, maxBytes int64) ([]byte, string, error) {
+				if key != keys.StableChannel || maxBytes != 64<<10 {
+					t.Fatalf("unexpected configured read %q (%d)", key, maxBytes)
+				}
+				return validManifestForChannel(t, release.ChannelStable, "v0.4.12"), "stable-etag", nil
+			},
+			presign: func(string, time.Duration) (string, error) { return "https://fixture.invalid/stable", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("changelog starts from stable pointer", func(t *testing.T) {
+		store := &fakeStore{
+			get: func(key string, maxBytes int64) ([]byte, string, error) {
+				switch key {
+				case keys.StableChannel:
+					return validManifestForChannel(t, release.ChannelStable, "v0.4.12"), "stable-etag", nil
+				case "releases/v0.4.12/gift-panel-changelog.json":
+					return []byte(`{"schemaVersion":1,"releases":[{"version":"0.4.12"}]}`), "changelog-etag", nil
+				default:
+					t.Fatalf("unexpected configured read %q (%d)", key, maxBytes)
+					return nil, "", nil
+				}
+			},
+			presign: func(string, time.Duration) (string, error) { return "", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.Changelog(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		store := &fakeStore{
+			get: func(key string, _ int64) ([]byte, string, error) {
+				if key != keys.LegacyChannel {
+					t.Fatalf("legacy read key = %q, want injected key", key)
+				}
+				return validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11"), "legacy-etag", nil
+			},
+			presign: func(string, time.Duration) (string, error) { return "https://fixture.invalid/legacy", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.Latest(context.Background(), release.ChannelLegacyRushRush); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("publisher policy", func(t *testing.T) {
+		policy := []byte(`{"signed":{"epoch":1},"signatures":[{"algorithm":"ecdsa-p256-sha256","signature":"fixture"}]}`)
+		store := &fakeStore{
+			get: func(key string, _ int64) ([]byte, string, error) {
+				if key != keys.PublisherPolicy {
+					t.Fatalf("policy read key = %q, want injected key", key)
+				}
+				return policy, "policy-etag", nil
+			},
+			presign: func(string, time.Duration) (string, error) { return "", nil },
+		}
+		sut, err := service.NewWithObjectKeys(store, time.Now, keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sut.PublisherPolicy(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestObjectKeysRejectEmptyOrAliasedConfiguredReads(t *testing.T) {
+	valid := service.ObjectKeys{StableChannel: "stable", LegacyChannel: "legacy", PublisherPolicy: "policy"}
+	tests := []service.ObjectKeys{
+		{},
+		{StableChannel: "", LegacyChannel: valid.LegacyChannel, PublisherPolicy: valid.PublisherPolicy},
+		{StableChannel: valid.StableChannel, LegacyChannel: valid.StableChannel, PublisherPolicy: valid.PublisherPolicy},
+		{StableChannel: valid.StableChannel, LegacyChannel: valid.LegacyChannel, PublisherPolicy: valid.StableChannel},
+	}
+	for _, keys := range tests {
+		if _, err := service.NewWithObjectKeys(&fakeStore{}, time.Now, keys); err == nil {
+			t.Fatalf("NewWithObjectKeys(%#v) error = nil, want rejection", keys)
+		}
+	}
+}
+
+func TestChannelRefreshesDoNotBlockEachOther(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		blockedChannel release.Channel
+		blockedKey     string
+		freeChannel    release.Channel
+		stale          bool
+	}{
+		{name: "legacy cold does not block stable cold", blockedChannel: release.ChannelLegacyRushRush, blockedKey: "channels/legacy-rushrush/latest.json", freeChannel: release.ChannelStable},
+		{name: "stable cold does not block legacy cold", blockedChannel: release.ChannelStable, blockedKey: "channels/stable/latest.json", freeChannel: release.ChannelLegacyRushRush},
+		{name: "legacy stale does not block stable stale", blockedChannel: release.ChannelLegacyRushRush, blockedKey: "channels/legacy-rushrush/latest.json", freeChannel: release.ChannelStable, stale: true},
+		{name: "stable stale does not block legacy stale", blockedChannel: release.ChannelStable, blockedKey: "channels/stable/latest.json", freeChannel: release.ChannelLegacyRushRush, stale: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clock := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+			blockedKey := test.blockedKey
+			if test.stale {
+				blockedKey = ""
+			}
+			store := newChannelBlockingStore(
+				validManifest(t),
+				validManifestForChannel(t, release.ChannelLegacyRushRush, "v0.4.11"),
+				blockedKey,
+			)
+			defer store.unblock()
+			sut := service.New(store, func() time.Time { return clock })
+			if test.stale {
+				if _, err := sut.Latest(context.Background(), release.ChannelStable); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := sut.Latest(context.Background(), release.ChannelLegacyRushRush); err != nil {
+					t.Fatal(err)
+				}
+				clock = clock.Add(61 * time.Second)
+				store.blockedKey = test.blockedKey
+			}
+			blockedDone := make(chan error, 1)
+			go func() {
+				_, err := sut.Latest(context.Background(), test.blockedChannel)
+				blockedDone <- err
+			}()
+			select {
+			case <-store.started:
+			case <-time.After(time.Second):
+				t.Fatal("blocked channel read did not start")
+			}
+
+			freeDone := make(chan error, 1)
+			go func() {
+				_, err := sut.Latest(context.Background(), test.freeChannel)
+				freeDone <- err
+			}()
+			select {
+			case err := <-freeDone:
+				if err != nil {
+					t.Fatalf("independent channel refresh: %v", err)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("independent channel refresh waited for blocked channel")
+			}
+
+			store.unblock()
+			if err := <-blockedDone; err != nil {
+				t.Fatalf("blocked channel after release: %v", err)
+			}
+		})
+	}
+}
+
+func TestSameChannelColdRefreshRemainsSingleflight(t *testing.T) {
+	store := newBlockingStore(validManifest(t), "channels/stable/latest.json")
+	defer store.unblock()
+	sut := service.New(store, time.Now)
+	const callers = 12
+	done := make(chan error, callers)
+	for range callers {
+		go func() {
+			_, err := sut.Latest(context.Background(), release.ChannelStable)
+			done <- err
+		}()
+	}
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("stable channel read did not start")
+	}
+	store.unblock()
+	for range callers {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := store.getCount("channels/stable/latest.json"); got != 1 {
+		t.Fatalf("stable pointer reads = %d, want one singleflight read", got)
+	}
+}
+
+func TestPublisherPolicyDoesNotWaitForBlockedChannelRefresh(t *testing.T) {
+	store := newBlockingStore(validManifest(t), "channels/stable/latest.json")
+	defer store.unblock()
+	sut := service.New(store, time.Now)
+	channelDone := make(chan error, 1)
+	go func() {
+		_, err := sut.Latest(context.Background(), release.ChannelStable)
+		channelDone <- err
+	}()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("stable channel read did not start")
+	}
+
+	policyDone := make(chan error, 1)
+	go func() {
+		_, err := sut.PublisherPolicy(context.Background())
+		policyDone <- err
+	}()
+	select {
+	case err := <-policyDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("publisher policy read waited for blocked channel")
+	}
+	store.unblock()
+	if err := <-channelDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type blockingStore struct {
+	manifests   map[string][]byte
+	blockedKey  string
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	gets        map[string]int
+}
+
+func newBlockingStore(manifest []byte, blockedKey string) *blockingStore {
+	return newChannelBlockingStore(manifest, nil, blockedKey)
+}
+
+func newChannelBlockingStore(stable, legacy []byte, blockedKey string) *blockingStore {
+	return &blockingStore{
+		manifests: map[string][]byte{
+			"channels/stable/latest.json":          append([]byte(nil), stable...),
+			"channels/legacy-rushrush/latest.json": append([]byte(nil), legacy...),
+		},
+		blockedKey: blockedKey,
+		started:    make(chan struct{}), release: make(chan struct{}), gets: make(map[string]int),
+	}
+}
+
+func (store *blockingStore) Get(ctx context.Context, key string, _ int64) ([]byte, string, error) {
+	store.mu.Lock()
+	store.gets[key]++
+	store.mu.Unlock()
+	if key == store.blockedKey {
+		store.startOnce.Do(func() { close(store.started) })
+		select {
+		case <-store.release:
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+	}
+	if key == "trust/publisher/latest.json" {
+		return []byte(`{"signed":{},"signatures":[]}`), "policy-etag", nil
+	}
+	return append([]byte(nil), store.manifests[key]...), "manifest-etag", nil
+}
+
+func (store *blockingStore) PresignGet(context.Context, string, time.Duration) (string, error) {
+	return "https://cos.example.invalid/signed", nil
+}
+
+func (store *blockingStore) unblock() {
+	store.releaseOnce.Do(func() { close(store.release) })
+}
+
+func (store *blockingStore) getCount(key string) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.gets[key]
 }
 
 func TestChangelogReturnsBodyAndUpstreamETag(t *testing.T) {
@@ -283,7 +692,7 @@ func TestChangelogReturnsBodyAndUpstreamETag(t *testing.T) {
 		presign: func(string, time.Duration) (string, error) { return "", nil },
 	}
 
-	document, err := service.New(store, channelKey, time.Now).Changelog(context.Background())
+	document, err := service.New(store, time.Now).Changelog(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +723,7 @@ func TestChangelogRejectsOversizedAndInvalidDocuments(t *testing.T) {
 				presign: func(string, time.Duration) (string, error) { return "", nil },
 			}
 
-			_, err := service.New(store, channelKey, time.Now).Changelog(context.Background())
+			_, err := service.New(store, time.Now).Changelog(context.Background())
 			if !errors.Is(err, service.ErrReleaseInvalid) {
 				t.Fatalf("Changelog() error = %v, want ErrReleaseInvalid", err)
 			}
@@ -335,6 +744,27 @@ func validManifest(t *testing.T) []byte {
 			SHA256:    strings.Repeat("a", 64),
 		},
 		ChangelogObjectKey: "releases/v0.4.4/gift-panel-changelog.json",
+	})
+	if err != nil {
+		t.Fatal(fmt.Errorf("marshal manifest: %w", err))
+	}
+	return body
+}
+
+func validManifestForChannel(t *testing.T, channel release.Channel, tag string) []byte {
+	t.Helper()
+	body, err := json.Marshal(release.ChannelManifest{
+		SchemaVersion: 2,
+		Channel:       channel,
+		TagName:       tag,
+		PublishedAt:   "2026-08-14T12:00:00Z",
+		Asset: release.AssetManifest{
+			Name:      "gift-panel-windows-x64.exe",
+			ObjectKey: "releases/" + tag + "/gift-panel-windows-x64.exe",
+			Size:      12345678,
+			SHA256:    strings.Repeat("a", 64),
+		},
+		ChangelogObjectKey: "releases/" + tag + "/gift-panel-changelog.json",
 	})
 	if err != nil {
 		t.Fatal(fmt.Errorf("marshal manifest: %w", err))

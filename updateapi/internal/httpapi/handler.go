@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release"
 	"github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/service"
@@ -17,12 +18,15 @@ import (
 const (
 	latestPath    = "/api/v1/releases/latest"
 	changelogPath = "/api/v1/changelog"
+	policyPath    = "/api/v1/trust/publisher-policy"
 	healthPath    = "/healthz"
 )
 
-// ReleaseService supplies public release metadata and the public changelog.
+// ReleaseService supplies routed public release metadata, the publisher policy,
+// and the stable-only changelog. Changelog is not a release discovery endpoint.
 type ReleaseService interface {
-	Latest(context.Context) (release.PublicRelease, error)
+	Latest(context.Context, release.Channel) (release.PublicRelease, error)
+	PublisherPolicy(context.Context) ([]byte, error)
 	Changelog(context.Context) (service.Document, error)
 }
 
@@ -33,8 +37,10 @@ type Logger interface {
 
 type handler struct {
 	service   ReleaseService
+	router    service.ChannelRouter
 	requestID func() (string, error)
 	logger    Logger
+	metrics   Metrics
 }
 
 type errorResponse struct {
@@ -47,25 +53,76 @@ type discardLogger struct{}
 
 func (discardLogger) Error(string, string, error) {}
 
+type VersionBucket = service.VersionBucket
+
+const (
+	VersionInvalid = service.VersionInvalid
+	Version047     = service.Version047
+	Version049     = service.Version049
+	Version0410    = service.Version0410
+	Version0411    = service.Version0411
+	Version0412    = service.Version0412
+)
+
+type Outcome string
+
+const (
+	OutcomeOK                  Outcome = "ok"
+	OutcomeClientInvalid       Outcome = "client_invalid"
+	OutcomeLegacyUnavailable   Outcome = "legacy_unavailable"
+	OutcomeMethodNotAllowed    Outcome = "method_not_allowed"
+	OutcomeReleaseInvalid      Outcome = "release_invalid"
+	OutcomeReleaseUnavailable  Outcome = "release_unavailable"
+	OutcomeDownloadUnavailable Outcome = "download_unavailable"
+	OutcomeEncodingFailed      Outcome = "encoding_failed"
+)
+
+type LatencyBucket string
+
+const (
+	LatencyUnder100ms LatencyBucket = "lt_100ms"
+	LatencyUnder500ms LatencyBucket = "lt_500ms"
+	LatencyUnder2s    LatencyBucket = "lt_2s"
+	LatencyOver2s     LatencyBucket = "gte_2s"
+)
+
+type Observation struct {
+	Version VersionBucket
+	Channel release.Channel
+	Outcome Outcome
+	Latency LatencyBucket
+}
+
+type Metrics interface {
+	Observe(Observation)
+}
+
+type discardMetrics struct{}
+
+func (discardMetrics) Observe(Observation) {}
+
 // New creates the exact public update API routes.
-func New(service ReleaseService, requestID func() string, logger Logger) http.Handler {
+func New(releaseService ReleaseService, router service.ChannelRouter, requestID func() string, logger Logger, metrics Metrics) http.Handler {
 	if requestID == nil {
-		return newHandler(service, newRequestID, logger)
+		return newHandler(releaseService, router, newRequestID, logger, metrics)
 	}
-	return newHandler(service, func() (string, error) {
+	return newHandler(releaseService, router, func() (string, error) {
 		generated := requestID()
 		if !validRequestID(generated) {
 			return "", errors.New("request ID generator returned an invalid value")
 		}
 		return generated, nil
-	}, logger)
+	}, logger, metrics)
 }
 
-func newHandler(service ReleaseService, requestID func() (string, error), logger Logger) http.Handler {
+func newHandler(releaseService ReleaseService, router service.ChannelRouter, requestID func() (string, error), logger Logger, metrics Metrics) http.Handler {
 	if logger == nil {
 		logger = discardLogger{}
 	}
-	return handler{service: service, requestID: requestID, logger: logger}
+	if metrics == nil {
+		metrics = discardMetrics{}
+	}
+	return handler{service: releaseService, router: router, requestID: requestID, logger: logger, metrics: metrics}
 }
 
 func (handler handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -88,6 +145,8 @@ func (handler handler) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 		handler.latest(writer, request, requestID)
 	case changelogPath:
 		handler.changelog(writer, request, requestID)
+	case policyPath:
+		handler.publisherPolicy(writer, request, requestID)
 	case healthPath:
 		handler.health(writer, request, requestID)
 	default:
@@ -96,20 +155,57 @@ func (handler handler) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 }
 
 func (handler handler) latest(writer http.ResponseWriter, request *http.Request, requestID string) {
+	started := time.Now()
+	version := service.VersionBucketForUserAgent(request.Header.Values("User-Agent"))
+	channel := release.Channel("")
+	outcome := OutcomeOK
+	defer func() {
+		handler.metrics.Observe(Observation{Version: version, Channel: channel, Outcome: outcome, Latency: latencyBucket(time.Since(started))})
+	}()
+	writer.Header().Set("Cache-Control", "private, no-store")
+	writer.Header().Set("Vary", "User-Agent")
+	if !getOrHead(writer, request, requestID, handler) {
+		outcome = OutcomeMethodNotAllowed
+		return
+	}
+	selected, err := handler.router.Select(request.Context(), request.Header.Values("User-Agent"))
+	if err != nil {
+		if errors.Is(err, service.ErrClientVersionInvalid) {
+			outcome = OutcomeClientInvalid
+			handler.writeError(writer, request, requestID, http.StatusBadRequest, "client_version_invalid", "客户端版本不受支持")
+			return
+		}
+		outcome = OutcomeLegacyUnavailable
+		handler.writeError(writer, request, requestID, http.StatusServiceUnavailable, "legacy_channel_unavailable", "更新通道暂时不可用")
+		return
+	}
+	channel = selected
+	writer.Header().Set("X-Gift-Panel-Update-Channel", string(channel))
+	publicRelease, err := handler.service.Latest(request.Context(), channel)
+	if err != nil {
+		outcome = serviceOutcome(err)
+		handler.serviceError(writer, request, requestID, err)
+		return
+	}
+	body, err := json.Marshal(publicRelease)
+	if err != nil {
+		outcome = OutcomeEncodingFailed
+		handler.writeLoggedError(writer, request, requestID, "release_unavailable", errors.New("release encoding failed"))
+		return
+	}
+	handler.writeBody(writer, request, http.StatusOK, "application/json", body)
+}
+
+func (handler handler) publisherPolicy(writer http.ResponseWriter, request *http.Request, requestID string) {
+	writer.Header().Set("Cache-Control", "private, no-store")
 	if !getOrHead(writer, request, requestID, handler) {
 		return
 	}
-	release, err := handler.service.Latest(request.Context())
+	body, err := handler.service.PublisherPolicy(request.Context())
 	if err != nil {
 		handler.serviceError(writer, request, requestID, err)
 		return
 	}
-	body, err := json.Marshal(release)
-	if err != nil {
-		handler.writeLoggedError(writer, request, requestID, "release_unavailable", errors.New("release encoding failed"))
-		return
-	}
-	writer.Header().Set("Cache-Control", "private, no-store")
 	handler.writeBody(writer, request, http.StatusOK, "application/json", body)
 }
 
@@ -159,6 +255,30 @@ func (handler handler) serviceError(writer http.ResponseWriter, request *http.Re
 		handler.writeLoggedError(writer, request, requestID, "download_unavailable", service.ErrDownloadUnavailable)
 	default:
 		handler.writeLoggedError(writer, request, requestID, "release_unavailable", service.ErrReleaseUnavailable)
+	}
+}
+
+func serviceOutcome(err error) Outcome {
+	switch {
+	case errors.Is(err, service.ErrReleaseInvalid):
+		return OutcomeReleaseInvalid
+	case errors.Is(err, service.ErrDownloadUnavailable):
+		return OutcomeDownloadUnavailable
+	default:
+		return OutcomeReleaseUnavailable
+	}
+}
+
+func latencyBucket(latency time.Duration) LatencyBucket {
+	switch {
+	case latency < 100*time.Millisecond:
+		return LatencyUnder100ms
+	case latency < 500*time.Millisecond:
+		return LatencyUnder500ms
+	case latency < 2*time.Second:
+		return LatencyUnder2s
+	default:
+		return LatencyOver2s
 	}
 }
 

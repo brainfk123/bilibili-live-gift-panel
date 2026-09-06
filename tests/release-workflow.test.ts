@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isScalar, parseDocument } from 'yaml';
+import { parseDocument } from 'yaml';
 
 interface ReleaseStep {
   env?: Record<string, string>;
@@ -17,7 +17,28 @@ interface ReleaseStep {
   'working-directory'?: string;
 }
 
-const auditedSetupMSYS2Commit = '66cd2cce69caa17b53920067426061ca1de3a884';
+interface WorkflowJob {
+  environment?: string;
+  env?: Record<string, string>;
+  if?: string;
+  needs?: string | string[];
+  permissions?: Record<string, string>;
+  steps?: ReleaseStep[];
+}
+
+interface PublisherRotationWorkflow {
+  on?: Record<string, { inputs?: Record<string, Record<string, unknown>> }>;
+  permissions?: Record<string, string>;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  jobs?: Record<string, WorkflowJob>;
+}
+
+interface BridgeReleaseWorkflow {
+  on?: Record<string, { inputs?: Record<string, Record<string, unknown>> }>;
+  permissions?: Record<string, string>;
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
+  jobs?: Record<string, WorkflowJob>;
+}
 
 function releaseWorkflow() {
   const source = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
@@ -27,26 +48,172 @@ function releaseWorkflow() {
   expect(document.errors).toEqual([]);
 
   const workflow = document.toJS() as {
+	on?: Record<string, { inputs?: Record<string, Record<string, unknown>> }>;
     concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
-    on?: Record<string, unknown>;
-    jobs?: {
-      release?: {
-        env?: Record<string, string>;
-        environment?: string;
-        steps?: ReleaseStep[];
-      };
-    };
+	permissions?: Record<string, string>;
+	jobs?: Record<string, WorkflowJob>;
   };
-  const release = workflow.jobs?.release;
-  const steps = release?.steps;
-  expect(Array.isArray(steps)).toBe(true);
-  return { concurrency: workflow.concurrency, document, release, source, steps: steps ?? [], trigger: workflow.on };
+	const release = workflow.jobs?.['prepare-candidate'];
+	const steps = ['classify', 'historical-verify', 'prepare-candidate', 'publish-candidate']
+	  .flatMap((name) => workflow.jobs?.[name]?.steps ?? []);
+	expect(steps.length).toBeGreaterThan(0);
+	return { concurrency: workflow.concurrency, document, release, source, steps, workflow };
+}
+
+function publisherRotationWorkflow(): PublisherRotationWorkflow {
+  const source = readFileSync(new URL('../.github/workflows/publisher-rotation.yml', import.meta.url), 'utf8');
+  const document = parseDocument(source);
+  expect(document.errors).toEqual([]);
+  return document.toJS() as PublisherRotationWorkflow;
+}
+
+function publisherDiscoveryWorkflow(): PublisherRotationWorkflow {
+  const source = readFileSync(new URL('../.github/workflows/publisher-discovery.yml', import.meta.url), 'utf8');
+  const document = parseDocument(source);
+  expect(document.errors).toEqual([]);
+  return document.toJS() as PublisherRotationWorkflow;
+}
+
+function bridgeReleaseWorkflow(): BridgeReleaseWorkflow & { source: string } {
+  const source = readFileSync(new URL('../.github/workflows/bridge-release.yml', import.meta.url), 'utf8');
+  const document = parseDocument(source);
+  expect(document.errors).toEqual([]);
+  return { ...(document.toJS() as BridgeReleaseWorkflow), source };
+}
+
+function jobSteps(job: WorkflowJob | undefined): ReleaseStep[] {
+  expect(Array.isArray(job?.steps)).toBe(true);
+  return job?.steps ?? [];
+}
+
+function semanticCommands(job: WorkflowJob | undefined): string[] {
+  return jobSteps(job).flatMap((step) => {
+    const commands: string[] = [];
+    if (step.uses) commands.push(`uses:${step.uses.split('@', 1)[0]}`);
+    for (const line of step.run?.split(/\r?\n/) ?? []) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#')) commands.push(`run:${trimmed}`);
+    }
+    return commands;
+  });
 }
 
 function stepIndex(steps: ReleaseStep[], name: string): number {
   const index = steps.findIndex((step) => step.name === name);
   expect(index, `missing workflow step ${name}`).toBeGreaterThanOrEqual(0);
   return index;
+}
+
+interface ChangelogReleaseFixture {
+  version: string;
+  date: string;
+  title: string;
+  summary: string;
+  highlights: Array<{ label: string; title: string; description: string }>;
+  visuals: string[];
+}
+
+interface ChangelogHistoryFixture {
+  schemaVersion: number;
+  releases: ChangelogReleaseFixture[];
+}
+
+const reviewedChangelogHistoryURL = new URL('../.github/changelog-history.json', import.meta.url);
+
+function reviewedChangelogHistory() {
+  const bytes = readFileSync(reviewedChangelogHistoryURL);
+  return {
+    bytes,
+    digest: createHash('sha256').update(bytes).digest('hex'),
+    document: JSON.parse(bytes.toString('utf8')) as ChangelogHistoryFixture,
+  };
+}
+
+function firstEnrollmentHistory(): Buffer {
+  const document = structuredClone(reviewedChangelogHistory().document);
+  document.releases = document.releases.filter((release) => release.version !== '0.4.12');
+  return Buffer.from(JSON.stringify(document));
+}
+
+function mutateReviewedChangelogHistory(
+  mutate: (releases: ChangelogReleaseFixture[]) => void,
+): Buffer {
+  const document = structuredClone(reviewedChangelogHistory().document);
+  mutate(document.releases);
+  return Buffer.from(JSON.stringify(document));
+}
+
+function changelogRelease(version: string): ChangelogReleaseFixture {
+  return {
+    version,
+    date: '2026-09-01',
+    title: `Release ${version}`,
+    summary: `Summary ${version}`,
+    highlights: [],
+    visuals: [],
+  };
+}
+
+function runCandidateChangelogStep(options: {
+  target: readonly ChangelogReleaseFixture[];
+  history?: Buffer;
+  omitHistory?: boolean;
+  sourceHistory?: readonly ChangelogReleaseFixture[];
+  expectedHistorySHA256?: string;
+  releaseTag?: string;
+  releaseVersion?: string;
+  omitDist?: boolean;
+}) {
+  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+  const steps = jobSteps(jobs['prepare-candidate']);
+  const step = steps[stepIndex(steps, 'Build canonical candidate changelog')];
+  const root = mkdtempSync(join(tmpdir(), 'canonical-changelog-'));
+  try {
+    const tooling = join(root, 'tooling');
+    const runnerTemp = join(root, 'runner-temp');
+    const githubEnv = join(root, 'github-env.txt');
+    mkdirSync(join(root, '.github'), { recursive: true });
+    if (!options.omitDist) mkdirSync(join(root, 'dist'));
+    mkdirSync(runnerTemp);
+    mkdirSync(join(tooling, '.github'), { recursive: true });
+    writeFileSync(join(root, 'gift-panel-changelog.json'), JSON.stringify({ schemaVersion: 1, releases: options.target }));
+    const historyBytes = options.history ?? (options.releaseVersion === '0.4.13' ? reviewedChangelogHistory().bytes : firstEnrollmentHistory());
+    if (!options.omitHistory) writeFileSync(join(tooling, '.github', 'changelog-history.json'), historyBytes);
+    writeFileSync(join(root, '.github', 'changelog-history.json'), JSON.stringify({
+      schemaVersion: 1,
+      releases: options.sourceHistory ?? [changelogRelease('0.3.0')],
+    }));
+    const outputPath = join(runnerTemp, 'canonical-gift-panel-changelog.json');
+    const githubOutput = join(root, 'github-output.txt');
+    const expectedHistorySHA256 = options.expectedHistorySHA256
+      ?? createHash('sha256').update(historyBytes).digest('hex');
+    const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', '-'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_ENV: githubEnv,
+        GITHUB_OUTPUT: githubOutput,
+        RUNNER_TEMP: runnerTemp,
+        RELEASE_TAG: options.releaseTag ?? 'v0.4.12',
+        RELEASE_VERSION: options.releaseVersion ?? '0.4.12',
+        RELEASE_TOOL_ROOT: tooling,
+        RELEASE_TOOLING_COMMIT_SHA: 'a'.repeat(40),
+        STABLE_CHANGELOG_HISTORY_SHA256: expectedHistorySHA256,
+      },
+      input: `$ErrorActionPreference='Stop'\ntrap { Write-Error $_; exit 1 }\nfunction git { if($args.Count -eq 4 -and $args[0] -eq '-C' -and $args[2] -eq 'rev-parse' -and $args[3] -eq 'HEAD'){$env:RELEASE_TOOLING_COMMIT_SHA;$global:LASTEXITCODE=0;return};throw 'dynamic git changelog selection is forbidden' }\nfunction gh { throw 'dynamic GitHub changelog access is forbidden' }\nfunction Invoke-RestMethod { throw 'dynamic GitHub changelog access is forbidden' }\n${step?.run ?? ''}\n`,
+      timeout: 30_000,
+    });
+    return {
+      result,
+      output: existsSync(outputPath) ? readFileSync(outputPath) : undefined,
+      outputPath,
+      githubEnv: existsSync(githubEnv) ? readFileSync(githubEnv, 'utf8') : undefined,
+      githubOutput: existsSync(githubOutput) ? readFileSync(githubOutput, 'utf8') : undefined,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function publishedManifestFixture(): Record<string, unknown> {
@@ -71,8 +238,8 @@ function runPublishedReleaseValidation(
 ) {
   const temporaryRoot = mkdtempSync(join(tmpdir(), 'gift-panel-release-validation-'));
   try {
-    const dist = join(temporaryRoot, 'dist');
-    mkdirSync(dist);
+    const dist = join(temporaryRoot, 'dist', 'historical');
+    mkdirSync(dist, { recursive: true });
     const asset = Buffer.from('signed-executable-fixture');
     const digest = createHash('sha256').update(asset).digest('hex');
     writeFileSync(join(dist, 'gift-panel-windows-x64.exe'), asset);
@@ -87,14 +254,14 @@ function runPublishedReleaseValidation(
         join(dist, 'ffmpeg-windows-x64.exe.sha256'),
         standalone.checksum ?? `${ffmpegDigest}  ffmpeg-windows-x64.exe`,
       );
-      writeFileSync(join(dist, 'standalone-component-manifest.json'), JSON.stringify({
+      writeFileSync(join(temporaryRoot, 'dist', 'historical-component-manifest.json'), JSON.stringify({
         version: '9.0', authenticode: true, size: ffmpeg.length,
         sha256: standalone.componentHash ?? ffmpegDigest,
       }));
     }
 
     const { steps } = releaseWorkflow();
-    const validation = steps[stepIndex(steps, 'Validate published release assets')]?.run;
+    const validation = steps[stepIndex(steps, 'Verify historical Release without mutation')]?.run;
     expect(validation).toBeTypeOf('string');
     const script = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -105,6 +272,9 @@ function Get-AuthenticodeSignature {
     SignerCertificate = [pscustomobject]@{ Subject = 'CN=Release Test' }
   }
 }
+function go { $global:LASTEXITCODE = 0 }
+function Mock-Inspector { $global:LASTEXITCODE = 0 }
+
 ${validation}
 `;
     return spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'], {
@@ -113,10 +283,10 @@ ${validation}
       env: {
         ...process.env,
         EVSIGN_EXPECTED_SUBJECT: 'CN=Release Test',
+        AUTHENTICODE_INSPECTOR_PATH: 'Mock-Inspector',
         GITHUB_REPOSITORY: 'example/repository',
         RELEASE_TAG: 'v1.2.3',
-        RELEASE_EXISTS: 'true',
-        RELEASE_STANDALONE_FFMPEG: standalone ? 'true' : 'false',
+        RELEASE_VERSION: standalone ? '0.4.10' : '0.4.9',
       },
       input: script,
       timeout: 30_000,
@@ -127,544 +297,739 @@ ${validation}
 }
 
 describe('release workflow supply-chain contract', () => {
-  it('pins every external Action to an immutable commit SHA', () => {
-    const { steps } = releaseWorkflow();
-    const externalActions = steps
+	it('runs an ordinary stable release from one manual same-run metadata handoff', () => {
+	  const { workflow, source } = releaseWorkflow();
+	  const jobs = workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const inputs = workflow.on?.workflow_dispatch?.inputs;
+	  expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
+	  expect(inputs?.operation?.options).toEqual(['release', 'verify-existing']);
+	  expect(jobs['publish-candidate']?.needs).toEqual(['classify', 'prepare-candidate', 'sign-candidate']);
+	  expect(JSON.stringify(jobs['publish-candidate'])).not.toContain('vars.STABLE_CANDIDATE_');
+	  expect(source).not.toContain('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
+	  const signOutputs = (jobs['sign-candidate'] as WorkflowJob & { outputs?: Record<string, string> })?.outputs;
+	  expect(signOutputs).toMatchObject({
+		'candidate-sha256': '${{ steps.candidate.outputs.sha256 }}',
+		'candidate-size': '${{ steps.candidate.outputs.size }}',
+		'artifact-id': '${{ steps.upload.outputs.artifact-id }}',
+		'artifact-digest': '${{ steps.upload.outputs.artifact-digest }}',
+		'artifact-name': '${{ steps.candidate.outputs.artifact-name }}',
+		'inspector-sha256': '${{ steps.candidate.outputs.inspector-sha256 }}',
+		'verifier-sha256': '${{ steps.candidate.outputs.verifier-sha256 }}',
+	  });
+	  const publishCommands = semanticCommands(jobs['publish-candidate']).join('\n');
+	  expect(publishCommands).toContain('stable-release-transaction.mjs');
+	  expect(publishCommands).not.toMatch(/gh release (?:create|upload|edit)|\bDELETE\b/i);
+	});
+
+	it('loads the reusable signed policy bundle without a rotation key or per-release policy bytes', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const load=steps[stepIndex(steps,'Load reusable publisher authorization policy')];
+	  expect(load?.env).toMatchObject({
+		STABLE_AUTHORIZATION_POLICY_EPOCH:'${{ vars.STABLE_AUTHORIZATION_POLICY_EPOCH }}',
+		STABLE_TRUST_ROOT_SPKI_SHA256:'${{ vars.STABLE_TRUST_ROOT_SPKI_SHA256 }}',
+	  });
+	  for(const asset of ['gift-panel-publisher-policy.json','gift-panel-publisher-policy.audit.json','gift-panel-publisher-policy.commit.json']) expect(load?.run).toContain(asset);
+	  expect(load?.run).toContain('import-bundle');
+	  expect(load?.run).toContain('verify-bundle');
+	  const source=releaseWorkflow().source;
+	  expect(source).not.toMatch(/STABLE_AUTHORIZATION_POLICY_B64|vars\.STABLE_AUTHORIZATION_POLICY_SHA256|PUBLISHER_ROTATION_PRIVATE_KEY_PEM/);
+	});
+
+	it('captures an unexpected actual EVSign legal identity before sealing a publishable candidate', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['sign-candidate']);
+	  const inspect=steps[stepIndex(steps,'Inspect actual stable publisher')];
+	  const upload=steps[stepIndex(steps,'Upload unexpected publisher change request')];
+	  const active=steps[stepIndex(steps,'Load active stable publisher identity')];
+	  const resolve=steps[stepIndex(steps,'Resolve protected stable signer')];
+	  const seal=steps[stepIndex(steps,'Seal and close signed stable candidate')];
+	  expect(stepIndex(steps,'Load active stable publisher identity')).toBeLessThan(stepIndex(steps,'Resolve protected stable signer'));
+	  expect(active?.run).toContain('verify-bundle');
+	  expect(active?.run).toContain('ACTIVE_PRIMARY_ORGANIZATION');
+	  expect(resolve?.run).toContain('active signed policy');
+	  expect(stepIndex(steps,'Inspect actual stable publisher')).toBeLessThan(stepIndex(steps,'Seal and close signed stable candidate'));
+	  expect(inspect?.run).toContain('inspect-authenticode');
+	  expect(inspect?.run).toContain('ACTIVE_PRIMARY_ORGANIZATION_ID');
+	  expect(inspect?.run).toContain('PUBLISHER_CHANGE_REQUEST_PATH');
+	  expect(inspect?.run).toContain('publisher-change-request-$env:RELEASE_TAG-$artifactHash');
+	  expect(upload?.if).toContain('failure()');
+	  expect(upload?.with?.name).toBe('${{ steps.publisher.outputs.request-name }}');
+	  expect(seal?.run).toContain('--primary-organization $env:ACTIVE_PRIMARY_ORGANIZATION');
+	});
+	it('builds the reviewed inspector before sealing the downloaded FFmpeg closure', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['prepare-candidate']);
+	  const step=steps[stepIndex(steps,'Download reviewed signed FFmpeg closure')];
+	  const root=mkdtempSync(join(tmpdir(),'stable-ffmpeg-closure-'));
+	  try{
+		const githubEnv=join(root,'github-env.txt');
+		const manifest=Buffer.from('reviewed-manifest-fixture');
+		const names=['ffmpeg.zip','manifest.json','gift-clip-test-tools.zip','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','SHA256SUMS.txt'];
+		const release={draft:false,prerelease:false,tag_name:'ffmpeg-component-v2-'+ 'a'.repeat(64),assets:names.map((name)=>({name}))};
+		const script=`$ErrorActionPreference='Stop'\nfunction Invoke-RestMethod { $env:RELEASE_JSON|ConvertFrom-Json }\nfunction gh { if($args[0] -eq 'release'){ $index=[Array]::IndexOf($args,'--pattern');$name=$args[$index+1];$path=Join-Path 'dist/ffmpeg-component' $name;if($name -eq 'manifest.json'){[IO.File]::WriteAllBytes($path,[Convert]::FromBase64String($env:MANIFEST_B64))}else{Set-Content -NoNewline -Encoding ascii $path 'fixture'} };$global:LASTEXITCODE=0 }\nfunction go { $index=[Array]::IndexOf($args,'-o');$path=$args[$index+1];Set-Content -NoNewline -Encoding ascii $path 'inspector';$global:LASTEXITCODE=0 }\nfunction node { if($args -contains 'install'){if(-not $env:AUTHENTICODE_INSPECTOR_PATH){throw 'missing reviewed inspector'};$kindIndex=[Array]::IndexOf($args,'--kind');if($args[$kindIndex+1] -ne 'fixed'){throw 'immutable component must use fixed policy'};$index=[Array]::IndexOf($args,'--sealed-output');$out=$args[$index+1];New-Item -ItemType Directory -Path $out -ErrorAction Stop|Out-Null;Copy-Item dist/ffmpeg-component/manifest.json (Join-Path $out 'manifest.json');Set-Content -NoNewline -Encoding ascii (Join-Path $out 'ffmpeg.zip') 'fixture'};$global:LASTEXITCODE=0 }\n${step?.run??''}`;
+		const execution=spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,GITHUB_ENV:githubEnv,GITHUB_REPOSITORY:'example/repository',GH_TOKEN:'test',RELEASE_JSON:JSON.stringify(release),MANIFEST_B64:manifest.toString('base64'),RUNNER_TEMP:root,RELEASE_TOOL_ROOT:root,STABLE_FFMPEG_COMPONENT_TAG:release.tag_name,STABLE_FFMPEG_COMPONENT_MANIFEST_SHA256:createHash('sha256').update(manifest).digest('hex')},input:script});
+		expect(execution.status,execution.stderr).toBe(0);
+		expect(existsSync(join(root,'dist','release-ffmpeg-sealed','manifest.json'))).toBe(true);
+		expect(existsSync(githubEnv)).toBe(true);
+		expect(readFileSync(githubEnv,'utf8').trim()).toBe(`AUTHENTICODE_INSPECTOR_PATH=${join(root,'candidate-ffmpeg-artifact-inspector.exe')}`);
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('hands an unsigned closed candidate to a fresh protected stable signing runner', () => {
+	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const build = jobs['prepare-candidate'];
+	  const sign = jobs['sign-candidate'];
+	  expect(build?.environment).toBeUndefined();
+	  expect(build?.permissions).toEqual({ contents: 'read' });
+	  expect(semanticCommands(build).join('\n')).not.toMatch(/EVSIGN_|sign-evsign|signed-candidate/i);
+	  expect(sign?.environment).toBe('stable-sign');
+	  expect(sign?.permissions).toEqual({ contents: 'read' });
+	  expect(sign?.needs).toEqual(['classify', 'prepare-candidate']);
+	  const steps = jobSteps(sign);
+	  expect(stepIndex(steps, 'Download exact unsigned stable handoff')).toBeLessThan(stepIndex(steps, 'Check out reviewed stable signing tools'));
+	  expect(stepIndex(steps, 'Validate unsigned stable handoff')).toBeLessThan(stepIndex(steps, 'Check out reviewed stable signing tools'));
+	  const commands = semanticCommands(sign).join('\n');
+	  expect(commands).toContain('sign-evsign');
+	  expect(commands).not.toMatch(/working-directory: source|npm (?:ci|test|run)|build:exe|refs\/tags\/\$\{\{/i);
+	});
+
+	it('splits stable classification, historical verification, candidate preparation, and publication into isolated capabilities', () => {
+	  const { workflow } = releaseWorkflow();
+	  const jobs = workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  expect(workflow.permissions).toEqual({ contents: 'read' });
+	  expect(releaseWorkflow().source).not.toContain('STABLE_TRUST_ROOT_KEY_ID');
+	  expect(Object.keys(jobs)).toEqual(['classify', 'historical-verify', 'prepare-candidate', 'sign-candidate', 'publish-candidate']);
+	  expect(jobs.classify?.permissions).toEqual({ contents: 'read' });
+	  expect(jobs['historical-verify']?.permissions).toEqual({ contents: 'read' });
+	  expect(jobs['historical-verify']?.environment).toBeUndefined();
+	  expect(jobs['prepare-candidate']?.permissions).toEqual({ contents: 'read' });
+	  expect(jobs['prepare-candidate']?.environment).toBeUndefined();
+	  expect(jobs['sign-candidate']?.environment).toBe('stable-sign');
+	  expect(jobs['publish-candidate']?.permissions).toEqual({ actions: 'read', contents: 'write', 'id-token': 'write', attestations: 'write' });
+	  expect(jobs['publish-candidate']?.environment).toBe('stable-publish');
+	});
+
+	it('uses gh only for the reviewed policy download and transacts the stable Release through the bounded module', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const publish=jobs['publish-candidate'];
+	  expect(publish?.env).toMatchObject({GH_REPO:'${{ github.repository }}'});
+	  const releaseCommands=jobSteps(publish).filter((step)=>step.run?.includes('gh release'));
+	  expect(releaseCommands.map((step)=>step.name)).toEqual(['Load reusable publisher authorization policy']);
+	  const transaction=jobSteps(publish)[stepIndex(jobSteps(publish),'Run resumable stable Release transaction')];
+	  expect(transaction?.run).toContain('STABLE_RELEASE_TRANSACTION_PATH');
+	  expect(transaction?.run).not.toContain('gh release');
+	});
+
+	it('binds candidate retrieval to public outputs from the same workflow run', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const validate=steps[stepIndex(steps,'Validate same-run public publish metadata')];
+	  const metadata=steps[stepIndex(steps,'Verify exact same-run candidate artifact provenance')];
+	  const download=steps[stepIndex(steps,'Download exact reviewed stable candidate')];
+	  expect(jobs['publish-candidate']?.env).toMatchObject({
+		STABLE_CANDIDATE_RUN_ID:'${{ github.run_id }}',
+		STABLE_CANDIDATE_RUN_ATTEMPT:'${{ github.run_attempt }}',
+		STABLE_CANDIDATE_ARTIFACT_ID:'${{ needs.sign-candidate.outputs.artifact-id }}',
+		STABLE_CANDIDATE_ARTIFACT_DIGEST:'${{ needs.sign-candidate.outputs.artifact-digest }}',
+	  });
+	  expect(validate?.run).toContain('Same-run candidate publication metadata');
+	  const run=metadata?.run??'';
+	  expect(run).toContain('artifact.workflow_run.id');
+	  expect(run).toContain("'${{ github.run_id }}'");
+	  expect(run).not.toContain('/actions/runs/');
+	  expect(download?.with).toMatchObject({'artifact-ids':'${{ needs.sign-candidate.outputs.artifact-id }}'});
+	  expect(download?.with).not.toHaveProperty('run-id');
+	});
+
+	it('uses a separately pinned corrected publish verifier without trusting the candidate copy', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const validate=steps[stepIndex(steps,'Validate same-run public publish metadata')];
+	  const checkout=steps[stepIndex(steps,'Check out reviewed stable publish verifier')];
+	  const reviewed=steps[stepIndex(steps,'Validate reviewed stable publish verifier')];
+	  const revalidate=steps[stepIndex(steps,'Revalidate reviewed stable candidate')];
+	  expect(validate?.env).toMatchObject({
+		STABLE_PUBLISH_VERIFIER_COMMIT_SHA:'${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}',
+		STABLE_PUBLISH_VERIFIER_SHA256:'${{ vars.STABLE_PUBLISH_VERIFIER_SHA256 }}',
+	  });
+	  expect(checkout?.uses).toMatch(/^actions\/checkout@[0-9a-f]{40}$/);
+	  expect(checkout?.with).toMatchObject({
+		ref:'${{ vars.STABLE_PUBLISH_VERIFIER_COMMIT_SHA }}',path:'publish-verifier-source','persist-credentials':false,
+	  });
+	  expect(reviewed?.run).toContain('rev-parse HEAD');
+	  expect(reviewed?.run).toContain('STABLE_PUBLISH_VERIFIER_SHA256');
+	  expect(revalidate?.run).toContain("$candidateVerifier='candidate/tools/verify-enrollment-build.mjs'");
+	  expect(revalidate?.run).toContain('$env:STABLE_PUBLISH_VERIFIER_PATH');
+	  expect(revalidate?.run).not.toContain("$verifier='candidate/tools/verify-enrollment-build.mjs'");
+	  expect(stepIndex(steps,'Validate reviewed stable publish verifier')).toBeLessThan(stepIndex(steps,'Revalidate reviewed stable candidate'));
+	});
+
+	it('executes same-run candidate provenance validation and rejects inaccessible or moved artifacts', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const step=jobSteps(jobs['publish-candidate'])[stepIndex(jobSteps(jobs['publish-candidate']),'Verify exact same-run candidate artifact provenance')];
+	  const baseRun={id:123,repository:{full_name:'example/repository'},head_repository:{full_name:'example/repository'},path:'.github/workflows/release.yml',workflow_id:55,event:'push',status:'completed',conclusion:'success',head_sha:'a'.repeat(40),head_branch:'v0.4.12',run_attempt:1,pull_requests:[]};
+	  const baseArtifact={id:456,workflow_run:{id:'${{ github.run_id }}'},name:`stable-candidate-v0.4.12-${'b'.repeat(64)}`,expired:false,digest:`sha256:${'c'.repeat(64)}`};
+	  const execute=(run:unknown,artifact:unknown,forbidden=false)=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{encoding:'utf8',env:{...process.env,RUN_JSON:JSON.stringify(run),ARTIFACT_JSON:JSON.stringify(artifact),GITHUB_REPOSITORY:'example/repository',GH_TOKEN:'test',STABLE_CANDIDATE_RUN_ID:'123',STABLE_CANDIDATE_WORKFLOW_ID:'55',STABLE_CANDIDATE_RUN_ATTEMPT:'1',STABLE_CANDIDATE_ARTIFACT_ID:'456',STABLE_CANDIDATE_ARTIFACT_DIGEST:'c'.repeat(64),STABLE_CANDIDATE_ARTIFACT_NAME:`stable-candidate-v0.4.12-${'b'.repeat(64)}`,STABLE_CANDIDATE_SHA256:'b'.repeat(64),STABLE_CANDIDATE_COMMIT_SHA:'a'.repeat(40),RELEASE_TAG:'v0.4.12'},input:`$ErrorActionPreference='Stop'\nfunction Invoke-RestMethod { param([Parameter(Position=0)][string]$Uri,[hashtable]$Headers) if(${forbidden?'$true':'$false'}){throw '403 Forbidden'}; return $env:ARTIFACT_JSON|ConvertFrom-Json }\n${step?.run??''}`});
+	  const valid=execute(baseRun,baseArtifact);expect(valid.status,valid.stderr).toBe(0);
+	  const rejected=(result:ReturnType<typeof execute>)=>result.status!==0||/403 Forbidden|provenance mismatch|artifact metadata mismatch|artifact is expired/.test(result.stderr);
+	  const forbidden=execute(baseRun,baseArtifact,true);expect(rejected(forbidden),forbidden.stderr).toBe(true);
+	  for(const mutate of [(artifact:any)=>{artifact.workflow_run.id=999;},(artifact:any)=>{artifact.digest=`sha256:${'0'.repeat(64)}`;},(artifact:any)=>{artifact.name='moved';},(artifact:any)=>{artifact.expired=true;}]){const artifact=structuredClone(baseArtifact);mutate(artifact);const result=execute(baseRun,artifact);expect(rejected(result),result.stderr).toBe(true);}
+	});
+
+	it('uses separate persistent tooling and target checkout roots that survive source cleanup', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  for(const name of ['historical-verify','prepare-candidate']){
+		const steps=jobSteps(jobs[name]);
+		const checkouts=steps.filter((step)=>step.uses?.startsWith('actions/checkout'));
+		expect(checkouts.map((step)=>step.with?.path)).toEqual(['tooling','source']);
+		expect(steps[0]?.name).toContain('Validate reviewed tooling SHA');
+		expect(semanticCommands(jobs[name]).join('\n')).toContain('RELEASE_TOOL_ROOT=$env:GITHUB_WORKSPACE/tooling');
+	  }
+	  const root=mkdtempSync(join(tmpdir(),'checkout-root-isolation-'));
+	  try{mkdirSync(join(root,'tooling'),{recursive:true});mkdirSync(join(root,'source'),{recursive:true});writeFileSync(join(root,'tooling','marker'),'reviewed');rmSync(join(root,'source'),{recursive:true,force:true});mkdirSync(join(root,'source'));expect(readFileSync(join(root,'tooling','marker'),'utf8')).toBe('reviewed');}finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('keeps target build and test environments free of every EVSign secret or selector', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['prepare-candidate']);
+	  const build=steps[stepIndex(steps,'Build stable candidate executable')];
+	  const signSteps=jobSteps(jobs['sign-candidate']);
+	  const sign=signSteps[stepIndex(signSteps,'Sign stable executable on protected runner')];
+	  for(const key of Object.keys(build?.env??{})) expect(key).not.toMatch(/^EVSIGN_/);
+	  expect(build?.run).toContain('npm run build:exe');
+	  expect(build?.run).not.toContain('sign-evsign');
+	  expect(sign?.env).toMatchObject({EVSIGN_ATTEMPT_TIMEOUT_MS:'1200000',EVSIGN_CERTIFICATE:'${{ vars.EVSIGN_CERTIFICATE }}',EVSIGN_PUBLISHER_IDENTITY:'${{ vars.EVSIGN_PUBLISHER_IDENTITY }}',EVSIGN_KEY:'${{ secrets.EVSIGN_KEY }}',EVSIGN_PASSWORD:'${{ secrets.EVSIGN_PASSWORD }}'});
+	  expect(sign?.run).toContain('$env:EVSIGN_SCRIPT_PATH --profile stable');
+	  expect(sign?.run).not.toMatch(/npm|go\s+-C/);
+	  const root=mkdtempSync(join(tmpdir(),'candidate-env-isolation-'));try{
+		const dumper=join(root,'dump-env.mjs');writeFileSync(dumper,"process.stdout.write(JSON.stringify(Object.keys(process.env).filter((name)=>name.startsWith('EVSIGN_')).sort()))");
+		const run=(environment:Record<string,string>)=>spawnSync(process.execPath,[dumper],{encoding:'utf8',env:environment});
+		const buildDump=run(Object.fromEntries(Object.keys(build?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(buildDump.stdout)).toEqual([]);
+		const signDump=run(Object.fromEntries(Object.keys(sign?.env??{}).map((name)=>[name,'fixture'])));expect(JSON.parse(signDump.stdout)).toEqual(['EVSIGN_ATTEMPT_TIMEOUT_MS','EVSIGN_CERTIFICATE','EVSIGN_KEY','EVSIGN_PASSWORD','EVSIGN_PUBLISHER_IDENTITY']);
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('re-verifies every published asset after latest mutation and detects concurrent closure changes', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const final=steps[stepIndex(steps,'Run resumable stable Release transaction')];
+	  const run=final?.run??'';
+	  expect(run).toContain('STABLE_RELEASE_TRANSACTION_PATH');
+	  expect(run).toContain('STABLE_RELEASE_ASSET_DESCRIPTOR');
+	  const transaction=readFileSync(new URL('../scripts/stable-release-transaction.mjs',import.meta.url),'utf8');
+	  for(const binding of ['getReleaseById','getReleaseByTag','getLatest','downloadAsset','sha256','make_latest']) expect(transaction).toContain(binding);
+	  expect(transaction).not.toMatch(/method:\s*['"]DELETE/i);
+	});
+
+	it('uses a closed supported historical tag to structured signer identity map', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const classify=semanticCommands(jobs.classify).join('\n');
+	  const historical=jobSteps(jobs['historical-verify']);
+	  const identity=historical[stepIndex(historical,'Resolve exact historical signer identity')];
+	  expect(classify).toContain("v0.4.7|v0.4.9|v0.4.10");
+	  expect(classify).toContain('unsupported historical stable tag');
+	  expect(identity?.run).toContain("'v0.4.7'");
+	  expect(identity?.run).toContain('RushRush Network Technology Ltd');
+	  expect(identity?.run).toContain("'v0.4.9'");
+	  expect(identity?.run).toContain("'v0.4.10'");
+	  expect(identity?.run).toContain('NaisNet Technology Co., Ltd.');
+	  expect(semanticCommands(jobs['historical-verify']).join('\n')).toContain('--organization $env:HISTORICAL_SIGNER_ORGANIZATION');
+	});
+
+	it('derives the reviewed-tooling changelog history digest before target build', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['prepare-candidate']);
+	  const merge=steps[stepIndex(steps,'Build canonical candidate changelog')];
+	  const run=merge?.run??'';
+	  expect(stepIndex(steps,'Build canonical candidate changelog')).toBeLessThan(stepIndex(steps,'Install and test candidate source'));
+	  expect(merge?.env).toMatchObject({
+		RELEASE_TOOLING_COMMIT_SHA:'${{ vars.RELEASE_TOOLING_COMMIT_SHA }}',
+	  });
+	  expect(merge?.env).not.toHaveProperty('STABLE_CHANGELOG_HISTORY_SHA256');
+	  expect(run).toContain('gift-panel-changelog.json');
+	  expect(run).toContain('.github/changelog-history.json');
+	  expect(run).toContain('$env:RELEASE_TOOL_ROOT');
+	  expect(run).toContain('$historyHash=');
+	  expect(run).not.toContain('$env:STABLE_CHANGELOG_HISTORY_SHA256');
+	  expect(run).toContain('262144');
+	  expect(run).toContain('duplicate changelog version');
+	  expect(run).toContain('changelog version order');
+	  expect(run).not.toMatch(/\bgit\s+(?:tag|show)\b|\bgh\s+release\s+download\b|Invoke-RestMethod/);
+	  const signSteps=jobSteps(jobs['sign-candidate']);
+	  const prepare=signSteps[stepIndex(signSteps,'Seal and close signed stable candidate')];
+	  expect(prepare?.run).toContain('historySha256');
+	  expect(prepare?.run).toContain('toolingCommit');
+	  const publishSteps=jobSteps(jobs['publish-candidate']);
+	  expect(jobs['publish-candidate']?.env).toMatchObject({STABLE_CHANGELOG_HISTORY_SHA256:'${{ needs.prepare-candidate.outputs.changelog-history-sha256 }}'});
+	  expect(publishSteps[stepIndex(publishSteps,'Revalidate reviewed stable candidate')]?.run).toContain('historySha256');
+	});
+
+	it('deterministically prepends v0.4.13 to the exact checked-in reviewed history', () => {
+	  const reviewed=reviewedChangelogHistory();
+	  const options={target:[changelogRelease('0.4.13')],history:reviewed.bytes,sourceHistory:[changelogRelease('0.3.0')],releaseTag:'v0.4.13',releaseVersion:'0.4.13'};
+	  const first=runCandidateChangelogStep(options);expect(first.result.status,`${first.result.stdout}${first.result.stderr}`).toBe(0);
+	  const second=runCandidateChangelogStep(options);expect(second.result.status,`${second.result.stdout}${second.result.stderr}`).toBe(0);
+	  expect(first.output).toEqual(second.output);
+	  expect(first.githubOutput).toContain(`history_sha256=${reviewed.digest}`);
+	  const merged=JSON.parse(first.output!.toString('utf8')) as ChangelogHistoryFixture;
+	  const versions=merged.releases.map((release)=>release.version);
+	  expect(versions.slice(0,5)).toEqual(['0.4.13','0.4.12','0.4.10','0.4.9','0.4.7']);
+	  expect(versions.slice(1)).toEqual(reviewed.document.releases.map((release)=>release.version));
+	  expect(versions).not.toContain('0.4.8');
+	});
+
+	it('keeps the canonical changelog outside a clean candidate dist directory', () => {
+	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],omitDist:true});
+	  expect(execution.result.status,execution.result.stderr).toBe(0);
+	  expect(execution.output).toBeDefined();
+	  expect(execution.githubEnv?.trim()).toBe(`CANDIDATE_CHANGELOG_PATH=${execution.outputPath}`);
+	});
+
+	it('keeps later stable history derived without reusing the v0.4.12 sequence invariant', () => {
+	  const history=reviewedChangelogHistory().bytes;
+	  const execution=runCandidateChangelogStep({
+		target:[changelogRelease('0.4.13')],history,releaseTag:'v0.4.13',releaseVersion:'0.4.13',
+	  });
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).toBe(0);
+	  const merged=JSON.parse(execution.output!.toString('utf8')) as ChangelogHistoryFixture;
+	  expect(merged.releases.slice(0,5).map((release)=>release.version)).toEqual(['0.4.13','0.4.12','0.4.10','0.4.9','0.4.7']);
+	});
+
+	it.each(['0.4.10','0.4.9','0.4.7'])('rejects checked-in reviewed history missing %s for first enrollment', (version) => {
+	  const document=JSON.parse(firstEnrollmentHistory().toString('utf8')) as ChangelogHistoryFixture;
+	  const history=Buffer.from(JSON.stringify((()=>{
+		const releases=document.releases;
+		const index=releases.findIndex((release)=>release.version===version);
+		expect(index,`checked-in reviewed history must contain ${version}`).toBeGreaterThanOrEqual(0);
+		releases.splice(index,1);
+		return document;
+	  })()));
+	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],history});
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);
+	});
+
+	it.each([
+	  ['an inserted v0.4.8',()=>mutateReviewedChangelogHistory((releases)=>releases.splice(2,0,changelogRelease('0.4.8'))),undefined],
+	  ['reordered required recent versions',()=>mutateReviewedChangelogHistory((releases)=>{[releases[0],releases[1]]=[releases[1],releases[0]];}),undefined],
+	  ['changed reviewed history content',()=>mutateReviewedChangelogHistory((releases)=>{releases[0].summary=`${releases[0].summary} changed`;}),reviewedChangelogHistory().digest],
+	  ['reviewed history from a higher moved tag',()=>mutateReviewedChangelogHistory((releases)=>releases.unshift(changelogRelease('0.4.13'))),undefined],
+	  ['duplicate reviewed history versions',()=>mutateReviewedChangelogHistory((releases)=>releases.splice(1,0,structuredClone(releases[0]))),undefined],
+	  ['a current-version history collision',()=>mutateReviewedChangelogHistory((releases)=>releases.unshift(changelogRelease('0.4.12'))),undefined],
+	] as const)('rejects %s',(_name,historyFactory,expectedHistorySHA256)=>{
+	  const execution=runCandidateChangelogStep({target:[changelogRelease('0.4.12')],history:historyFactory(),expectedHistorySHA256});
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);
+	});
+
+	it.each([
+	  ['an extra target entry',{target:[changelogRelease('0.4.12'),changelogRelease('0.4.11')]}],
+	  ['missing reviewed history',{target:[changelogRelease('0.4.12')],omitHistory:true}],
+	  ['malformed reviewed history',{target:[changelogRelease('0.4.12')],history:Buffer.from('{"schemaVersion":1,"releases":')}],
+	] as const)('rejects %s',(_name,options)=>{
+	  const execution=runCandidateChangelogStep(options);
+	  expect(execution.result.status,`${execution.result.stdout}${execution.result.stderr}`).not.toBe(0);
+	});
+
+	it('validates extracted candidate directories before executing downloaded tools', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['publish-candidate']);
+	  const extraction=steps[stepIndex(steps,'Validate extracted candidate tree')];
+	  expect(stepIndex(steps,'Validate extracted candidate tree')).toBeLessThan(stepIndex(steps,'Revalidate reviewed stable candidate'));
+	  const run=extraction?.run??'';
+	  expect(run).toContain('ReparsePoint');
+	  expect(run).toContain('unexpected candidate directory');
+	  expect(run).toContain('empty candidate directory');
+	  expect(run).toContain("@('sealed','tools')");
+	  const root=mkdtempSync(join(tmpdir(),'candidate-extraction-'));try{
+		const candidate=join(root,'candidate');mkdirSync(join(candidate,'sealed'),{recursive:true});mkdirSync(join(candidate,'tools'));
+		const hash='b'.repeat(64);const files=[`sealed/${hash}.exe`,'stable-artifact-inspection.json','candidate-evidence.json','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-windows-x64.exe.sha256','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1','tools/artifact-inspector.exe','tools/artifact-inspector.exe.sha256','tools/verify-enrollment-build.mjs','tools/verify-enrollment-build.mjs.sha256'];
+		for(const relative of files)writeFileSync(join(candidate,relative),Buffer.from(relative));
+		const execute=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,STABLE_CANDIDATE_SHA256:hash},input:`$ErrorActionPreference='Stop'\n${run}`});
+		const valid=execute();expect(valid.status,valid.stderr).toBe(0);
+		for(const file of ['artifact-inspector.exe','artifact-inspector.exe.sha256','verify-enrollment-build.mjs','verify-enrollment-build.mjs.sha256'])rmSync(join(candidate,'tools',file));
+		const empty=execute();expect(empty.status!==0||`${empty.stdout}${empty.stderr}`.includes('empty candidate directory'),`${empty.stdout}${empty.stderr}`).toBe(true);
+		for(const file of ['artifact-inspector.exe','artifact-inspector.exe.sha256','verify-enrollment-build.mjs','verify-enrollment-build.mjs.sha256'])writeFileSync(join(candidate,'tools',file),file);
+		const outside=join(root,'outside');mkdirSync(outside);let linked=false;try{symlinkSync(outside,join(candidate,'junction'),process.platform==='win32'?'junction':'dir');linked=true;}catch{/* junction creation is host-policy dependent */}if(linked){const reparse=execute();expect(reparse.status!==0||`${reparse.stdout}${reparse.stderr}`.includes('ReparsePoint'),`${reparse.stdout}${reparse.stderr}`).toBe(true);}
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('executes the stable unsigned handoff gate and rejects PATH or tool poisoning before checkout', () => {
+	  const jobs=releaseWorkflow().workflow.jobs as unknown as Record<string,WorkflowJob>;
+	  const steps=jobSteps(jobs['sign-candidate']);
+	  const validation=steps[stepIndex(steps,'Validate unsigned stable handoff')];
+	  expect(stepIndex(steps,'Validate unsigned stable handoff')).toBeLessThan(stepIndex(steps,'Check out reviewed stable signing tools'));
+	  const root=mkdtempSync(join(tmpdir(),'stable-unsigned-poison-'));
+	  try{
+		const handoff=join(root,'handoff');mkdirSync(handoff);
+		const unsigned=Buffer.from('unsigned-stable-fixture');const digest=createHash('sha256').update(unsigned).digest('hex');
+		writeFileSync(join(handoff,digest+'.exe'),unsigned);
+		for(const name of ['root-spki.der','bootstrap-policy.json','gift-panel-changelog.json','ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-9.0.tar.xz','ffmpeg-9.0.tar.xz.asc','ffmpeg-build-config.txt','ffmpeg-component-gate.txt','toolchain-lock.json','NOTICE.md','COPYING.LGPLv2.1'])writeFileSync(join(handoff,name),name);
+		writeFileSync(join(handoff,'handoff.json'),JSON.stringify({schemaVersion:1,tag:'v0.4.12',version:'0.4.12',commit:'a'.repeat(40),unsignedSha256:digest,unsignedSize:unsigned.length,changelogSha256:'b'.repeat(64),changelogHistorySha256:'c'.repeat(64),toolingCommit:'d'.repeat(40)}));
+		const githubEnv=join(root,'fresh-github-env');const poison=join(root,'poison');mkdirSync(poison);
+		const execute=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,PATH:poison+';'+(process.env.PATH??''),GITHUB_ENV:githubEnv,EXPECTED_UNSIGNED_SHA256:digest,EXPECTED_UNSIGNED_SIZE:String(unsigned.length),STABLE_REVIEWED_COMMIT_SHA:'a'.repeat(40)},input:"$ErrorActionPreference='Stop'\n"+(validation?.run??'')});
+		writeFileSync(join(handoff,'PATH.cmd'),'target controlled');const poisoned=execute();expect(poisoned.status!==0||poisoned.stderr.includes('handoff closure'),poisoned.stderr).toBe(true);
+		rmSync(join(handoff,'PATH.cmd'));const valid=execute();expect(valid.status,valid.stderr).toBe(0);expect(readFileSync(githubEnv,'utf8')).not.toContain(poison);
+	  }finally{rmSync(root,{recursive:true,force:true});}
+	});
+
+	it('publishes only an exact protected candidate and has no signer, build, target-code, bridge, KMS, or COS capability', () => {
+	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const publish = jobs['publish-candidate'];
+	  const steps = jobSteps(publish);
+	  const validate = steps[stepIndex(steps, 'Validate same-run public publish metadata')];
+	  expect(publish?.env).toMatchObject({
+		STABLE_CANDIDATE_RUN_ID: '${{ github.run_id }}',
+		STABLE_CANDIDATE_ARTIFACT_ID: '${{ needs.sign-candidate.outputs.artifact-id }}',
+		STABLE_CANDIDATE_ARTIFACT_DIGEST: '${{ needs.sign-candidate.outputs.artifact-digest }}',
+		STABLE_CANDIDATE_SHA256: '${{ needs.sign-candidate.outputs.candidate-sha256 }}',
+		STABLE_CANDIDATE_SIZE: '${{ needs.sign-candidate.outputs.candidate-size }}',
+		STABLE_CANDIDATE_COMMIT_SHA: '${{ needs.classify.outputs.commit }}',
+	  });
+	  expect(validate?.run).not.toContain('vars.STABLE_CANDIDATE_');
+	  expect(steps[stepIndex(steps, 'Download exact reviewed stable candidate')]?.uses)
+		.toBe('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
+	  const commands = semanticCommands(publish).join('\n');
+	  expect(commands).toContain('STABLE_CANDIDATE_ARTIFACT_DIGEST');
+	  expect(commands).toContain('STABLE_CANDIDATE_SHA256');
+	  expect(commands).toContain('verify-enrollment');
+	  expect(commands).toContain('stable-release-transaction.mjs');
+	  expect(commands).not.toMatch(/sign-evsign|EVSIGN_|npm (?:run|ci)|build:exe|SignByAsymmetricKey|TENCENTCLOUD_|BRIDGE_|\bCOS_/i);
+	});
+
+	it('keeps historical verification read-only and selected only from verified existing Release state', () => {
+	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const classify = semanticCommands(jobs.classify).join('\n');
+	  const historical = semanticCommands(jobs['historical-verify']).join('\n');
+	  expect(classify).toContain('/releases?per_page=100&page=');
+	  expect(classify).toContain('historical-verify');
+	  expect(classify).toContain('Release requires an absent v0.4.12+ published Release');
+	  expect(historical).toContain('gh release download');
+	  expect(historical).toContain('verify --kind fixed');
+	  expect(historical).toContain('--manifest-output dist/historical-component-manifest.json');
+	  expect(historical).not.toMatch(/gh release (?:create|upload|edit)|actions\/attest|upload-artifact|sign-evsign|EVSIGN_|SignByAsymmetricKey/i);
+	});
+
+	it('executes strict historical fallback and fixed FFmpeg verification', () => {
+	  expect(runPublishedReleaseValidation(publishedManifestFixture()).status).toBe(0);
+	  expect(runPublishedReleaseValidation(publishedManifestFixture(), undefined, {}).status).toBe(0);
+	  const badChecksum=runPublishedReleaseValidation(publishedManifestFixture(),undefined,{checksum:`${'0'.repeat(64)}  ffmpeg-windows-x64.exe`});
+	  expect(badChecksum.status).not.toBe(0);
+	  expect(badChecksum.stderr).toContain('Historical standalone FFmpeg does not match its checksum');
+	  const badComponent=runPublishedReleaseValidation(publishedManifestFixture(),undefined,{componentHash:'0'.repeat(64)});
+	  expect(badComponent.status).not.toBe(0);
+	  expect(badComponent.stderr).toContain('Historical standalone FFmpeg differs from fixed sealed component');
+	});
+
+	const malformedHistoricalManifestCases: Array<{name:string;mutate:(manifest:Record<string,unknown>)=>unknown;serialize?:(manifest:unknown)=>string}>=[
+	  {name:'an array tag_name',mutate:(manifest)=>{manifest.tag_name=['v1.2.3'];}},
+	  {name:'numeric draft false',mutate:(manifest)=>{manifest.draft=0;}},
+	  {name:'numeric prerelease false',mutate:(manifest)=>{manifest.prerelease=0;}},
+	  {name:'a non-array assets value',mutate:(manifest)=>{manifest.assets=(manifest.assets as unknown[])[0];}},
+	  {name:'an array asset name',mutate:(manifest)=>{(manifest.assets as Record<string,unknown>[])[0]!.name=['gift-panel-windows-x64.exe'];}},
+	  {name:'an array asset download URL',mutate:(manifest)=>{(manifest.assets as Record<string,unknown>[])[0]!.browser_download_url=['https://github.com/example/repository/releases/download/v1.2.3/gift-panel-windows-x64.exe'];}},
+	  {name:'an array asset digest',mutate:(manifest)=>{const asset=(manifest.assets as Record<string,unknown>[])[0]!;asset.digest=[asset.digest];}},
+	  {name:'a string asset size',mutate:(manifest)=>{const asset=(manifest.assets as Record<string,unknown>[])[0]!;asset.size=String(asset.size);}},
+	  {name:'a decimal-form asset size',mutate:(manifest)=>manifest,serialize:(manifest)=>{const serialized=JSON.stringify(manifest);const size=((manifest as Record<string,unknown>).assets as Record<string,unknown>[])[0]!.size;return serialized.replace(`"size":${size}`,`"size":${size}.0`);}},
+	  {name:'an array root',mutate:(manifest)=>[manifest]},
+	  {name:'an unknown root property',mutate:(manifest)=>{manifest.extra=true;}},
+	];
+	it.each(malformedHistoricalManifestCases)('rejects $name in historical fallback metadata',({mutate,serialize})=>{
+	  const manifest=publishedManifestFixture();const replacement=mutate(manifest);const candidate=replacement??manifest;
+	  const result=runPublishedReleaseValidation(candidate,serialize?.(candidate));
+	  expect(result.status).not.toBe(0);
+	  expect(result.stderr).toContain('Historical fallback update manifest');
+	});
+
+	it('rejects unexpected candidate closure entries and rechecks the exact reviewed tag before the transaction', () => {
+	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const prepare = semanticCommands(jobs['sign-candidate']).join('\n');
+	  const publishSteps = jobSteps(jobs['publish-candidate']);
+	  const revalidate = publishSteps[stepIndex(publishSteps, 'Revalidate reviewed stable candidate')];
+	  const beforeTransaction = publishSteps[stepIndex(publishSteps, 'Recheck reviewed tag before stable transaction')];
+	  expect(prepare).toContain('Signed stable candidate closure');
+	  expect(revalidate?.run).toContain('unexpected candidate file');
+	  for (const step of [beforeTransaction]) {
+		expect(step?.run).toContain('/git/ref/tags/');
+		expect(step?.run).toContain('/git/tags/');
+		expect(step?.run).toContain('STABLE_REVIEWED_TAG_OBJECT_SHA');
+		expect(step?.run).toContain('STABLE_CANDIDATE_COMMIT_SHA');
+	  }
+	});
+
+	it('publishes expected-name hard links for stable and bridge without gh label rewriting', () => {
+	  const jobs = releaseWorkflow().workflow.jobs as unknown as Record<string, WorkflowJob>;
+	  const stable = jobSteps(jobs['publish-candidate']);
+	  const stableLink = stable[stepIndex(stable, 'Prepare closed stable Release assets')];
+	  const stableDraft = stable[stepIndex(stable, 'Run resumable stable Release transaction')];
+	  expect(stableLink?.run).toContain('link-sealed-executable');
+	  expect(stableLink?.run).toContain('gift-panel-windows-x64.exe');
+	  expect(stableDraft?.run).toContain('STABLE_RELEASE_ASSET_DESCRIPTOR');
+	  expect(stableDraft?.run).not.toContain('#gift-panel-windows-x64.exe');
+
+	  const bridgeSign = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-sign']);
+	  const bridgeLink = bridgeSign[stepIndex(bridgeSign, 'Seal and close signed bridge candidate')];
+	  const bridgePublish = jobSteps(bridgeReleaseWorkflow().jobs?.['bridge-publish']);
+	  const bridgeDraft = bridgePublish[stepIndex(bridgePublish, 'Create immutable-shaped bridge draft')];
+	  expect(bridgeLink?.run).toContain('link-sealed-executable');
+	  expect(bridgeDraft?.run).not.toContain('#gift-panel-windows-x64.exe');
+	});
+});
+describe('publisher rotation workflow contract', () => {
+  it('pins every external Action to one immutable commit', () => {
+    const workflow = publisherRotationWorkflow();
+    const actions = Object.values(workflow.jobs ?? {}).flatMap(jobSteps)
       .map((step) => step.uses)
       .filter((uses): uses is string => typeof uses === 'string');
-
-    expect(externalActions.length).toBeGreaterThan(0);
-    for (const uses of externalActions) {
-      expect(uses).toMatch(/^[^@\s]+@[0-9a-f]{40}$/);
-    }
+    expect(actions.length).toBeGreaterThan(0);
+    for (const uses of actions) expect(uses).toMatch(/^[^@\s]+@[0-9a-f]{40}$/);
   });
 
-  it('serializes all production releases in one non-canceling global group', () => {
-    const { concurrency } = releaseWorkflow();
-
-    expect(concurrency).toEqual({
-      group: 'gift-panel-production-release',
-      'cancel-in-progress': false,
+  it('has one manual trigger with explicit epoch transition and pointer choice', () => {
+    const workflow = publisherRotationWorkflow();
+    expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
+    const inputs = workflow.on?.workflow_dispatch?.inputs;
+    expect(inputs).toEqual({
+      candidate_epoch: expect.objectContaining({ required: true, type: 'number' }),
+      expected_previous_epoch: expect.objectContaining({ required: true, type: 'number' }),
+      advance_discovery: expect.objectContaining({ required: true, type: 'boolean', default: false }),
     });
   });
 
-  it('remains an isolated, protected publication workflow outside pull requests', () => {
-    const { release, steps, trigger } = releaseWorkflow();
-    const sign = stepIndex(steps, 'Prepare and sign release executable');
-    const publish = stepIndex(steps, 'Create GitHub release');
-
-    expect(Object.keys(trigger ?? {}).sort()).toEqual(['push', 'workflow_dispatch']);
-    expect(trigger?.push).toEqual({ tags: ['v*.*.*'] });
-    expect(trigger?.workflow_dispatch).toBeDefined();
-    expect(trigger).not.toHaveProperty('pull_request');
-    expect(release?.environment).toBe('release');
-    expect(sign).toBeLessThan(publish);
-    expect(steps[sign]?.run).toContain('Get-AuthenticodeSignature');
+  it('separates validation, protected private-key signing, immutable publication, and optional discovery advancement', () => {
+    const workflow = publisherRotationWorkflow();
+    const jobs = workflow.jobs ?? {};
+    expect(Object.keys(jobs)).toEqual([
+      'validate-candidate',
+      'sign-policy',
+      'publish-immutable',
+      'advance-discovery',
+    ]);
+    expect(jobs['validate-candidate']?.environment).toBeUndefined();
+    for (const name of ['sign-policy', 'publish-immutable', 'advance-discovery']) {
+      expect(jobs[name]?.environment, name).toBe('publisher-rotation');
+    }
+    expect(jobs['sign-policy']?.needs).toBe('validate-candidate');
+    expect(jobs['publish-immutable']?.needs).toBe('sign-policy');
+    expect(jobs['advance-discovery']?.needs).toBe('publish-immutable');
+    expect(jobs['advance-discovery']?.if).toBe('${{ inputs.advance_discovery == true }}');
   });
 
-  it('validates a canonical tag before an exact non-credentialed checkout', () => {
-    const { release, source, steps } = releaseWorkflow();
-    const validate = stepIndex(steps, 'Validate release tag');
-    const checkout = stepIndex(steps, 'Check out release tag');
-    const resolveCommit = stepIndex(steps, 'Resolve checked-out release commit');
+  it('keeps the signing root isolated from COS publication and grants no OIDC capability', () => {
+    const workflow = publisherRotationWorkflow();
+    const jobs = workflow.jobs ?? {};
+    expect(workflow.permissions).toEqual({ contents: 'read' });
+    expect(jobs['validate-candidate']?.permissions).toEqual({ contents: 'read' });
+    expect(jobs['sign-policy']?.permissions).toEqual({ contents: 'read' });
+    expect(jobs['publish-immutable']?.permissions).toEqual({ contents: 'write' });
+    expect(jobs['advance-discovery']?.permissions).toEqual({ contents: 'write' });
 
-    expect(release?.environment).toBe('release');
-    expect(validate).toBe(0);
-    expect(validate).toBeLessThan(checkout);
-    expect(steps[validate]?.run).toContain(
-      "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$",
-    );
-    expect(steps[checkout]?.with).toMatchObject({
-      ref: 'refs/tags/${{ env.RELEASE_TAG }}',
-      'persist-credentials': false,
+    const signingSteps = jobSteps(jobs['sign-policy']);
+    const sign = signingSteps.find((step) => step.name === 'Sign publisher policy');
+    expect(sign?.env).toMatchObject({
+      PUBLISHER_ROTATION_PRIVATE_KEY_PEM: '${{ secrets.PUBLISHER_ROTATION_PRIVATE_KEY_PEM }}',
+      PUBLISHER_ROTATION_KEY_ID: '${{ vars.PUBLISHER_ROTATION_KEY_ID }}',
+      PUBLISHER_ROTATION_REQUEST_ID: 'github-run:${{ github.run_id }}:attempt:${{ github.run_attempt }}',
     });
-    expect(checkout).toBeLessThan(resolveCommit);
-    expect(steps[resolveCommit]?.run).toContain('$releaseCommit = git rev-parse HEAD');
-    expect(steps[resolveCommit]?.run).toContain('RELEASE_COMMIT=$releaseCommit');
-    expect(source).not.toContain('github.sha');
-  });
+    expect(sign?.env).not.toHaveProperty('GH_TOKEN');
+    expect(sign?.env).not.toHaveProperty('TENCENTCLOUD_SECRET_ID');
+    expect(sign?.env).not.toHaveProperty('TENCENTCLOUD_SECRET_KEY');
+    expect(sign?.env).not.toHaveProperty('TENCENTCLOUD_SESSION_TOKEN');
+    expect(Object.keys(sign?.env ?? {}).some((name) => name.startsWith('COS_'))).toBe(false);
+    expect(semanticCommands(jobs['sign-policy']).join('\n')).not.toContain('exchange-session');
 
-  it('keeps GitHub Release independent from COS publishers and remote triggers', () => {
-    const { release, source, steps } = releaseWorkflow();
-    const checkoutSteps = steps.filter((step) => step.uses?.startsWith('actions/checkout@'));
-
-    expect(release?.environment).toBe('release');
-    expect(checkoutSteps).toHaveLength(1);
-    expect(checkoutSteps[0]?.name).toBe('Check out release tag');
-    for (const [name, forbidden] of [
-      ['COS release secret ID', /COS_RELEASE_SECRET_ID/i],
-      ['COS release secret key', /COS_RELEASE_SECRET_KEY/i],
-      ['publisher tool pin', /UPDATE_PUBLISHER_TOOL_SHA/i],
-      ['publisher tool checkout', /_update-publisher-tool/i],
-      ['Tencent COS', /Tencent\s+COS/i],
-      ['TAT', /\bTAT\b/i],
-      ['webhook', /\bwebhooks?\b/i],
-      ['connectivity script', /test-cos-connectivity/i],
-    ]) {
-      expect(source, `release workflow must not reference ${name}`).not.toMatch(forbidden);
-    }
-    expect(source).not.toMatch(/\bgo(?:\.exe)?(?:\s+-C\s+\S+)?\s+run\s+\.\/cmd\/publish\b/);
-  });
-
-  it('keeps obsolete direct COS connectivity entry points deleted', () => {
-    expect(existsSync(new URL('../.github/workflows/cos-connectivity-test.yml', import.meta.url)))
-      .toBe(false);
-    expect(existsSync(new URL('../scripts/test-cos-connectivity.mjs', import.meta.url)))
-      .toBe(false);
-  });
-
-  it('validates release publication timestamps without producing unused publisher metadata', () => {
-    const { steps } = releaseWorkflow();
-
-    for (const name of ['Inspect existing GitHub release', 'Create GitHub release']) {
-      const run = steps[stepIndex(steps, name)]?.run ?? '';
-      expect(run, name).toContain('$publishedAt = [DateTimeOffset]$release.published_at');
-      expect(run, name).not.toContain('$publishedAtRFC3339');
-      expect(run, name).toContain('publication timestamp is invalid');
+    for (const jobName of ['publish-immutable', 'advance-discovery']) {
+      const publish = jobSteps(jobs[jobName]).find((step) => step.env?.COS_BUCKET !== undefined);
+      expect(publish?.env).toMatchObject({
+        TENCENTCLOUD_SECRET_ID: '${{ secrets.TENCENT_CLOUD_SECRET_ID }}',
+        TENCENTCLOUD_SECRET_KEY: '${{ secrets.TENCENT_CLOUD_SECRET_KEY }}',
+      });
+      expect(publish?.env).not.toHaveProperty('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
+      expect(publish?.env).not.toHaveProperty('TENCENTCLOUD_SESSION_TOKEN');
+      expect(semanticCommands(jobs[jobName]).join('\n')).not.toContain('exchange-session');
     }
   });
 
-  it('race-tests the update module from the release tag checkout itself', () => {
-    const { steps } = releaseWorkflow();
-    const checkoutRelease = stepIndex(steps, 'Check out release tag');
-    const setupGo = stepIndex(steps, 'Set up Go');
-    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
+  it('runs only the policy CLI and publisher and cannot build or sign an executable', () => {
+    const workflow = publisherRotationWorkflow();
+    const commands = Object.values(workflow.jobs ?? {}).flatMap(semanticCommands);
+    expect(commands.some((command) => command.includes('./cmd/trustpolicy'))).toBe(true);
+    expect(commands.some((command) => command.includes('scripts/publish-trust-policy.mjs'))).toBe(true);
+    for (const command of commands) {
+      expect(command).not.toMatch(/(?:sign-evsign|build-go|gift-panel\.exe|release-stable|legacy-rushrush)/i);
+    }
+  });
 
-    expect(checkoutRelease).toBeLessThan(setupGo);
-    expect(steps[setupGo]?.with).toMatchObject({
-      'go-version-file': 'updateapi/go.mod',
-      'cache-dependency-path': 'updateapi/go.sum',
+  it('keeps the ordinary release workflow unable to sign publisher policy or modify the legacy pointer', () => {
+    const { release } = releaseWorkflow();
+    const commands = semanticCommands(release as WorkflowJob);
+    expect(commands.some((command) => /trustpolicy.*\bsign\b/i.test(command))).toBe(false);
+    expect(commands.some((command) => /trustpolicy.*\bsign\b|legacy-rushrush/i.test(command))).toBe(false);
+    expect(release?.env ?? {}).not.toHaveProperty('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
+  });
+
+  it('requires reviewed public-root configuration instead of embedding a production digest', () => {
+    const workflow = publisherRotationWorkflow();
+    const allSteps = Object.values(workflow.jobs ?? {}).flatMap(jobSteps);
+    const signingStep = jobSteps(workflow.jobs?.['sign-policy']).find((step) => step.name === 'Sign publisher policy');
+    expect(signingStep?.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');
+    const verificationSteps = allSteps.filter((step) => step.env?.PUBLISHER_ROTATION_SPKI_PATH !== undefined);
+    expect(verificationSteps.length).toBeGreaterThan(0);
+    for (const step of verificationSteps) {
+      expect(step.env?.PUBLISHER_ROTATION_SPKI_SHA256).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_SHA256 }}');
+      expect(step.env?.PUBLISHER_ROTATION_SPKI_PATH).toBe('${{ vars.PUBLISHER_ROTATION_SPKI_PATH }}');
+    }
+  });
+});
+
+describe('publisher discovery recovery workflow contract', () => {
+  it('resumes from one exact immutable epoch without signing a new policy', () => {
+    const workflow = publisherDiscoveryWorkflow();
+    expect(Object.keys(workflow.on ?? {})).toEqual(['workflow_dispatch']);
+    expect(workflow.on?.workflow_dispatch?.inputs).toEqual({
+      candidate_epoch: expect.objectContaining({ required: true, type: 'number' }),
+      expected_previous_epoch: expect.objectContaining({ required: true, type: 'number' }),
     });
-    expect(setupGo).toBeLessThan(testUpdateApi);
-    expect(steps[testUpdateApi]?.env?.GOWORK).toBe('off');
-    expect(steps[testUpdateApi]?.run)
-      .toBe('go -C updateapi test ./... -race -count=1');
+    expect(workflow.permissions).toEqual({ contents: 'read' });
+    expect(workflow.concurrency).toEqual({ group: 'publisher-policy-rotation', 'cancel-in-progress': false });
+    expect(Object.keys(workflow.jobs ?? {})).toEqual(['advance-existing']);
+
+    const job = workflow.jobs?.['advance-existing'];
+    expect(job?.environment).toBe('publisher-rotation');
+    expect(job?.permissions).toEqual({ contents: 'write' });
+    const commands = semanticCommands(job).join('\n');
+    expect(commands).not.toMatch(/trustpolicy.*\bsign\b|PUBLISHER_ROTATION_PRIVATE_KEY_PEM/);
   });
 
-  it('uses the audited setup-msys2 v2 commit and rejects mutable refs', () => {
-    const { document, steps } = releaseWorkflow();
-    const setupSteps = steps.filter((step) => step.uses?.startsWith('msys2/setup-msys2@'));
-    expect(setupSteps).toHaveLength(1);
-    expect(setupSteps[0]?.uses).toBe(`msys2/setup-msys2@${auditedSetupMSYS2Commit}`);
-    expect(setupSteps[0]?.uses).toMatch(/^msys2\/setup-msys2@[0-9a-f]{40}$/);
-
-    const setupIndex = steps.indexOf(setupSteps[0]!);
-    const usesNode = document.getIn(['jobs', 'release', 'steps', setupIndex, 'uses'], true);
-    expect(isScalar(usesNode)).toBe(true);
-    expect(isScalar(usesNode) ? usesNode.comment?.trim() : undefined).toBe('v2');
-  });
-
-  it('keeps the exact pinned toolchain and signed-package verification order', () => {
-    const { steps } = releaseWorkflow();
-    const lock = JSON.parse(readFileSync(
-      new URL('../third_party/ffmpeg/toolchain-lock.json', import.meta.url),
-      'utf8',
-    )) as { packages?: unknown[] };
-    expect(lock.packages).toHaveLength(35);
-
-    const buildFrontend = stepIndex(steps, 'Build frontend');
-    const setup = stepIndex(steps, 'Set up MSYS2 host environment');
-    const prepareAssets = stepIndex(steps, 'Prepare backend UI assets');
-    const build = stepIndex(steps, 'Build and verify pinned FFmpeg');
-    const signInner = stepIndex(steps, 'Sign and verify inner FFmpeg');
-    const packageInner = stepIndex(steps, 'Package and verify signed FFmpeg payload');
-    const buildOuter = stepIndex(steps, 'Build release executable');
-    const signOuter = stepIndex(steps, 'Prepare and sign release executable');
-    const e2e = stepIndex(steps, 'Verify deterministic gift clip exports from signed package chain');
-
-    expect(buildFrontend).toBeLessThan(prepareAssets);
-    expect(prepareAssets).toBeLessThan(build);
-    expect(steps[prepareAssets]?.run).toBe('npm run prepare:go-assets');
-    expect([setup, build, signInner, packageInner, buildOuter, signOuter, e2e])
-      .toEqual([...new Set([setup, build, signInner, packageInner, buildOuter, signOuter, e2e])].sort((a, b) => a - b));
-    expect(steps[setup]?.id).toBe('msys2');
-    expect(steps[build]?.run).toContain('${{ steps.msys2.outputs.msys2-location }}');
-    expect(steps[build]?.run).toContain('npm run build:ffmpeg -- -Msys2Root $msys2Root -InstallPinnedToolchain');
-    expect(steps[build]?.run).toContain('npm run verify:ffmpeg');
-    expect(steps[e2e]?.run).toContain('scripts/gift-clip-test-tools.mjs');
-    expect(steps[e2e]?.run).toContain('npm run verify:gift-clip-export');
-  });
-
-  it('reuses an immutable signed FFmpeg component before entering the build path', () => {
-    const { steps } = releaseWorkflow();
-    const identity = stepIndex(steps, 'Resolve FFmpeg component identity');
-    const inspect = stepIndex(steps, 'Inspect signed FFmpeg component');
-    const downloadHit = stepIndex(steps, 'Download signed FFmpeg component');
-    const setup = stepIndex(steps, 'Set up MSYS2 host environment');
-    const build = stepIndex(steps, 'Build and verify pinned FFmpeg');
-    const sign = stepIndex(steps, 'Sign and verify inner FFmpeg');
-    const packageComponent = stepIndex(steps, 'Package signed FFmpeg component');
-    const attestComponent = stepIndex(steps, 'Attest signed FFmpeg component');
-    const publish = stepIndex(steps, 'Publish signed FFmpeg component');
-    const downloadPublished = stepIndex(steps, 'Download published FFmpeg component');
-    const install = stepIndex(steps, 'Verify and install signed FFmpeg component');
-    const buildOuter = stepIndex(steps, 'Build release executable');
-
-    expect([identity, inspect, downloadHit, setup, build, sign, packageComponent, attestComponent, publish, downloadPublished, install, buildOuter])
-      .toEqual([...new Set([identity, inspect, downloadHit, setup, build, sign, packageComponent, attestComponent, publish, downloadPublished, install, buildOuter])].sort((a, b) => a - b));
-    for (const index of [setup, build, sign, packageComponent, publish, downloadPublished]) {
-      expect(steps[index]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS != 'true'");
-    }
-    expect(steps[downloadHit]?.if).toContain("env.FFMPEG_COMPONENT_EXISTS == 'true'");
-    expect(steps[identity]?.env).toBeUndefined();
-    expect(steps[identity]?.run).toContain('$identity.schema -ne 2');
-    expect(steps[identity]?.run).toContain('ffmpeg-component-v2-$($identity.fingerprint)');
-    expect(steps[packageComponent]?.env).toBeUndefined();
-    expect(steps[install]?.run).toContain('scripts/ffmpeg-component-assets.mjs install');
-    expect(steps[install]?.run).toContain('verify-metadata');
-    expect(steps[downloadPublished]?.run).toContain('Invoke-RestMethod');
-    expect(steps[downloadPublished]?.run).toContain('ffmpeg-component-release.json');
-    expect(steps[attestComponent]?.uses).toBe('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
-    expect(steps[install]?.run).toContain('gh attestation verify');
-    expect(steps[install]?.run).toContain('ffmpeg-build-config.txt');
-    expect(steps[publish]?.run).not.toContain('--clobber');
-    expect(steps[publish]?.run).toContain('--latest=false');
-    expect(steps[publish]?.run).toContain('Another publisher created the FFmpeg component');
-    expect(steps[publish]?.run).toContain('Invoke-RestMethod');
-  });
-
-  it('publishes a separately downloadable signed FFmpeg from v0.4.10 without changing the updater manifest', () => {
-    const { steps } = releaseWorkflow();
-    const validateTag = stepIndex(steps, 'Validate release tag');
-    const installComponent = stepIndex(steps, 'Verify and install signed FFmpeg component');
-    const prepareStandalone = stepIndex(steps, 'Prepare standalone FFmpeg release asset');
-    const prepareRelease = stepIndex(steps, 'Prepare release assets');
-    const createRelease = stepIndex(steps, 'Create GitHub release');
-    const redownloadStandalone = stepIndex(steps, 'Redownload published standalone FFmpeg');
-    const verifyRepairComponent = stepIndex(steps, 'Verify standalone FFmpeg repair component');
-    const validatePublished = stepIndex(steps, 'Validate published release assets');
-    const downloadExisting = stepIndex(steps, 'Download existing release assets');
-
-    expect(steps[validateTag]?.run).toContain("[Version]'0.4.10'");
-    expect(steps[validateTag]?.run).toContain('RELEASE_STANDALONE_FFMPEG');
-    expect(installComponent).toBeLessThan(prepareStandalone);
-    expect(prepareStandalone).toBeLessThan(createRelease);
-    expect(createRelease).toBeLessThan(redownloadStandalone);
-    expect(redownloadStandalone).toBeLessThan(validatePublished);
-    expect(steps[prepareStandalone]?.if).toBe("env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
-    expect(steps[prepareStandalone]?.run).toContain('$componentDirectory/ffmpeg.zip');
-    expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe');
-    expect(steps[prepareStandalone]?.run).toContain('dist/ffmpeg-windows-x64.exe.sha256');
-    expect(steps[prepareStandalone]?.run).toContain('Get-AuthenticodeSignature');
-    expect(steps[prepareStandalone]?.run).toContain('$componentManifest.sha256');
-    expect(steps[prepareStandalone]?.run).toContain('$env:EVSIGN_EXPECTED_SUBJECT');
-    expect(steps[createRelease]?.run).toContain('dist/ffmpeg-windows-x64.exe');
-    expect(steps[createRelease]?.run).toContain('dist/ffmpeg-windows-x64.exe.sha256');
-    expect(steps[redownloadStandalone]?.if).toBe("env.RELEASE_EXISTS != 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
-    expect(steps[redownloadStandalone]?.run).toContain('--pattern ffmpeg-windows-x64.exe');
-    expect(steps[downloadExisting]?.run).toContain("$env:RELEASE_STANDALONE_FFMPEG -eq 'true'");
-    expect(steps[downloadExisting]?.run).toContain('--pattern ffmpeg-windows-x64.exe');
-    expect(steps[verifyRepairComponent]?.if).toBe("env.RELEASE_EXISTS == 'true' && env.RELEASE_STANDALONE_FFMPEG == 'true'");
-    expect(steps[verifyRepairComponent]?.run).toContain('verify-metadata');
-    expect(steps[verifyRepairComponent]?.run).toContain('gh attestation verify');
-    expect(steps[verifyRepairComponent]?.run).toContain('standalone-component-manifest.json');
-    expect(steps[validatePublished]?.run).toContain('Get-AuthenticodeSignature -LiteralPath dist/ffmpeg-windows-x64.exe');
-    expect(steps[validatePublished]?.run).toContain('ffmpeg-windows-x64.exe.sha256');
-    expect(steps[validatePublished]?.run).toContain('$componentManifest.sha256');
-    expect(steps[validatePublished]?.run).toContain("'dist/standalone-component-manifest.json'");
-    expect(steps[prepareRelease]?.run).not.toContain('name = "ffmpeg-windows-x64.exe"');
-    expect(steps[prepareRelease]?.run).toContain('assets = @(');
-    expect(steps[prepareRelease]?.run).toContain('name = "gift-panel-windows-x64.exe"');
-  });
-
-  it('resolves one signer profile before component identity and exports one canonical signing pair', () => {
-    const { steps } = releaseWorkflow();
-    const resolveSigner = stepIndex(steps, 'Resolve EVSign signer profile');
-    const identity = stepIndex(steps, 'Resolve FFmpeg component identity');
-    const signInner = stepIndex(steps, 'Sign and verify inner FFmpeg');
-    const buildOuter = stepIndex(steps, 'Build release executable');
-    const signOuter = stepIndex(steps, 'Prepare and sign release executable');
-    const validate = stepIndex(steps, 'Validate published release assets');
-
-    expect(resolveSigner).toBeLessThan(identity);
-    expect(steps[resolveSigner]?.env).toEqual({
-      EVSIGN_ACTIVE_PROFILE: '${{ vars.EVSIGN_ACTIVE_PROFILE }}',
-      EVSIGN_SIGNER_PROFILES_JSON: '${{ vars.EVSIGN_SIGNER_PROFILES_JSON }}',
-      EVSIGN_CERT: '${{ vars.EVSIGN_CERT }}',
-      EVSIGN_EXPECTED_SUBJECT: '${{ vars.EVSIGN_EXPECTED_SUBJECT }}',
-    });
-    expect(steps[resolveSigner]?.run).toContain('node scripts/sign-evsign.mjs --resolve-profile');
-    expect(steps[resolveSigner]?.run).toContain('$profile.schema -ne 1');
-    expect(steps[resolveSigner]?.run).toContain('EVSIGN_CERT=$($profile.cert)');
-    expect(steps[resolveSigner]?.run).toContain('EVSIGN_EXPECTED_SUBJECT=$($profile.subject)');
-    expect(steps[resolveSigner]?.run).toContain('APP_UPDATE_PUBLISHER=$($profile.subject)');
-    for (const [index, step] of steps.entries()) {
-      if (index === resolveSigner) continue;
-      expect(Object.values(step.env ?? {})).not.toContain('${{ vars.EVSIGN_CERT }}');
-      expect(Object.values(step.env ?? {})).not.toContain('${{ vars.EVSIGN_EXPECTED_SUBJECT }}');
-    }
-    for (const index of [identity, signInner, buildOuter, signOuter, validate]) {
-      expect(steps[index]?.env ?? {}).not.toHaveProperty('EVSIGN_CERT');
-      expect(steps[index]?.env ?? {}).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
-    }
-    expect(steps[buildOuter]?.env).not.toHaveProperty('APP_UPDATE_PUBLISHER');
-  });
-
-  it('gates release publication on update tooling tests and the expected signer subject', () => {
-    const { steps } = releaseWorkflow();
-    const testUpdateApi = stepIndex(steps, 'Test domestic update tooling');
-    const signOuter = stepIndex(steps, 'Prepare and sign release executable');
-    const githubRelease = stepIndex(steps, 'Create GitHub release');
-
-    expect(steps[testUpdateApi]?.run)
-      .toBe('go -C updateapi test ./... -race -count=1');
-    expect(testUpdateApi).toBeLessThan(githubRelease);
-    expect(signOuter).toBeLessThan(githubRelease);
-    expect(steps[signOuter]?.env).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
-    expect(steps[signOuter]?.run).toContain(
-      '$signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid',
-    );
-    expect(steps[signOuter]?.run).toContain('$null -eq $signature.SignerCertificate');
-    expect(steps[signOuter]?.run).toContain(
-      '$signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT',
-    );
-    expect(steps[signOuter]?.run).toContain(
-      'Actual signer: $($signature.SignerCertificate.Subject)',
-    );
-  });
-
-  it('builds domestic update identity into the signed executable and ends at a validated GitHub Release', () => {
-    const { steps } = releaseWorkflow();
-    const build = stepIndex(steps, 'Build release executable');
-    const prepareCli = stepIndex(steps, 'Prepare pinned EVSign CLI for outer executable');
-    const sign = stepIndex(steps, 'Prepare and sign release executable');
-    const githubRelease = stepIndex(steps, 'Create GitHub release');
-    const validate = stepIndex(steps, 'Validate published release assets');
-
-    expect(steps[build]?.env).toMatchObject({
-      APP_COMMIT: '${{ env.RELEASE_COMMIT }}',
-      APP_UPDATE_API_URL: '${{ vars.UPDATE_API_BASE_URL }}',
-    });
-    expect(steps[build]?.env).not.toHaveProperty('APP_UPDATE_PUBLISHER');
-    expect(steps[build]?.env).not.toHaveProperty('EVSIGN_EXPECTED_SUBJECT');
-    expect(build).toBeLessThan(prepareCli);
-    expect(prepareCli).toBeLessThan(sign);
-    expect(steps[prepareCli]?.run).toContain('https://mc.evsign.cn/evsign-client-cli-windows-latest');
-    expect(steps[prepareCli]?.run).toContain('b1b2168a1d0ea757f26db18ac2e2b14e06fb74021f0d67add5e6be1a47dffd97');
-    expect(steps[prepareCli]?.run).toContain('6DCBCC70A507DCAE74135DCB57047CC3365E9F03');
-    expect(steps[sign]?.env?.EVSIGN_CLI_PATH).toBe('${{ runner.temp }}\\evsign-client-1.0.1.exe');
-    expect(steps[sign]?.run).toContain('node scripts/sign-evsign-cli.mjs dist/gift-panel-windows-x64.exe');
-    expect(githubRelease).toBeLessThan(validate);
-    expect(validate).toBe(steps.length - 1);
-  });
-
-  it('prepares the release test workspace and pinned browser before running tests', () => {
-    const { steps } = releaseWorkflow();
-    const installDependencies = stepIndex(steps, 'Install dependencies');
-    const prepareBrowser = stepIndex(steps, 'Install pinned Playwright Chromium for release E2E');
-    const runTests = stepIndex(steps, 'Run tests');
-
-    expect(installDependencies).toBeLessThan(prepareBrowser);
-    expect(prepareBrowser).toBeLessThan(runTests);
-    expect(steps[prepareBrowser]?.if).toBe("env.RELEASE_EXISTS != 'true'");
-    expect(steps[prepareBrowser]?.run).toContain(
-      'New-Item -ItemType Directory -Force -Path .cache',
-    );
-    expect(steps[prepareBrowser]?.run).toContain('npm exec -- playwright install chromium');
-    expect(steps[runTests]?.run).toBe(
-      'npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2',
-    );
-  });
-
-  it('reuses complete existing GitHub assets without rebuilding, resigning, or clobbering', () => {
-    const { steps } = releaseWorkflow();
-    const inspect = stepIndex(steps, 'Inspect existing GitHub release');
-    const download = stepIndex(steps, 'Download existing release assets');
-    const build = stepIndex(steps, 'Build release executable');
-    const sign = stepIndex(steps, 'Prepare and sign release executable');
-    const prepare = stepIndex(steps, 'Prepare release assets');
-    const create = stepIndex(steps, 'Create GitHub release');
-    const validate = stepIndex(steps, 'Validate published release assets');
-
-    expect(inspect).toBeLessThan(download);
-    expect(steps[inspect]?.run).toContain('published_at');
-    expect(steps[download]?.if).toBe("env.RELEASE_EXISTS == 'true'");
-    expect(steps[download]?.run).toContain('--pattern gift-panel-windows-x64.exe');
-    expect(steps[download]?.run).toContain('--pattern gift-panel-windows-x64.exe.sha256');
-    expect(steps[download]?.run).toContain('--pattern gift-panel-changelog.json');
-    expect(steps[download]?.run).toContain('--pattern gift-panel-update.json');
-    expect(steps[download]?.run).toContain('Manual recovery required');
+  it('downloads the exact three-asset release into a verified local bundle before advancing both pointers', () => {
+    const steps = jobSteps(publisherDiscoveryWorkflow().jobs?.['advance-existing']);
+    const fetch = steps[stepIndex(steps, 'Fetch immutable publisher bundle')];
     for (const name of [
-      'Install dependencies',
-      'Run tests',
-      'Type check',
-      'Build frontend',
-      'Prepare backend UI assets',
-      'Set up MSYS2 host environment',
-      'Build and verify pinned FFmpeg',
-      'Sign and verify inner FFmpeg',
-      'Package and verify signed FFmpeg payload',
-      'Build release executable',
-      'Run backend tests',
-      'Prepare and sign release executable',
-      'Install pinned Playwright Chromium for release E2E',
-      'Verify deterministic gift clip exports from signed package chain',
-      'Prepare release assets',
-      'Attest executable provenance',
-    ]) {
-      const ffmpegMissOnly = new Set([
-        'Set up MSYS2 host environment',
-        'Build and verify pinned FFmpeg',
-        'Sign and verify inner FFmpeg',
-        'Package and verify signed FFmpeg payload',
-      ]);
-      expect(steps[stepIndex(steps, name)]?.if, `${name} must be skipped for repair`)
-        .toBe(ffmpegMissOnly.has(name)
-          ? "env.RELEASE_EXISTS != 'true' && env.FFMPEG_COMPONENT_EXISTS != 'true'"
-          : "env.RELEASE_EXISTS != 'true'");
-    }
-    expect(steps[build]?.if).toBe("env.RELEASE_EXISTS != 'true'");
-    expect(steps[sign]?.if).toBe("env.RELEASE_EXISTS != 'true'");
-    expect(steps[create]?.if).toBe("env.RELEASE_EXISTS != 'true'");
-    expect(steps[create]?.run).not.toContain('--clobber');
-    expect(steps[create]?.run).toContain(
-      'gh release upload $env:RELEASE_TAG dist/gift-panel-windows-x64.exe dist/gift-panel-windows-x64.exe.sha256',
-    );
-    expect(steps[create]?.run).toContain('dist/gift-panel-update.json');
-    expect(steps[create]?.run).toContain('dist/gift-panel-changelog.json');
-    expect(steps[prepare]?.run).toContain(
-      'https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/gift-panel-windows-x64.exe',
-    );
-    expect(create).toBeLessThan(validate);
-    expect(steps[validate]?.run).toContain(
-      'Get-AuthenticodeSignature -LiteralPath dist/gift-panel-windows-x64.exe',
-    );
-    expect(steps[validate]?.run).toContain('$signature.SignerCertificate.Subject -cne $env:EVSIGN_EXPECTED_SUBJECT');
-    expect(steps[validate]?.run).toContain('Get-FileHash -Algorithm SHA256 -LiteralPath dist/gift-panel-windows-x64.exe');
-    expect(steps[validate]?.run).toContain('gift-panel-windows-x64.exe.sha256');
-    expect(steps[validate]?.run).toContain('dist/gift-panel-update.json');
-    expect(validate).toBe(steps.length - 1);
-  });
-
-  it('accepts the exact typed fallback update manifest contract', () => {
-    const result = runPublishedReleaseValidation(publishedManifestFixture());
-
-    expect(result.status, result.stderr).toBe(0);
-  });
-
-  it('validates a separately downloadable signed FFmpeg during release repair', () => {
-    const result = runPublishedReleaseValidation(publishedManifestFixture(), undefined, {});
-
-    expect(result.status, result.stderr).toBe(0);
-  });
-
-  it('rejects a standalone FFmpeg whose checksum does not match', () => {
-    const result = runPublishedReleaseValidation(publishedManifestFixture(), undefined, {
-      checksum: `${'0'.repeat(64)}  ffmpeg-windows-x64.exe`,
+      'gift-panel-publisher-policy.json', 'gift-panel-publisher-policy.audit.json', 'gift-panel-publisher-policy.commit.json',
+      'policy.json', 'audit.json', 'commit.json',
+    ]) expect(fetch?.run).toContain(name);
+    expect(fetch?.run).toContain('scripts/bounded-github-asset.mjs');
+    expect(fetch?.run).toContain('--content-type application/octet-stream');
+    expect(fetch?.run).not.toContain('--content-type application/json');
+    expect(fetch?.run).toContain('import-bundle');
+    expect(fetch?.env).toEqual({
+      GH_TOKEN: '${{ github.token }}',
+      PUBLISHER_CANDIDATE_EPOCH: '${{ inputs.candidate_epoch }}',
     });
 
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('Published standalone FFmpeg does not match its checksum');
-  });
-
-  it('rejects a self-consistent standalone FFmpeg that differs from the fixed component manifest', () => {
-    const result = runPublishedReleaseValidation(publishedManifestFixture(), undefined, {
-      componentHash: '0'.repeat(64),
+    const advance = steps[stepIndex(steps, 'Advance discovery from immutable bundle')];
+    expect(advance?.env).toMatchObject({
+      GH_TOKEN: '${{ github.token }}',
+      TENCENTCLOUD_SECRET_ID: '${{ secrets.TENCENT_CLOUD_SECRET_ID }}',
+      TENCENTCLOUD_SECRET_KEY: '${{ secrets.TENCENT_CLOUD_SECRET_KEY }}',
+      PUBLISHER_MODE: 'advance-discovery',
+      PUBLISHER_EXPECTED_PREVIOUS_EPOCH: '${{ inputs.expected_previous_epoch }}',
+      PUBLISHER_ADVANCE_DISCOVERY: 'true',
     });
+    expect(advance?.env).not.toHaveProperty('PUBLISHER_ROTATION_PRIVATE_KEY_PEM');
+    expect(advance?.run).toBe('node scripts/publish-trust-policy.mjs run');
+  });
+});
 
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('does not match the verified signed component manifest');
+describe('exact RushRush bridge release workflow contract', () => {
+  it('uses fresh build, protected signing, and signer-free publish runners', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;
+    expect(Object.keys(jobs)).toEqual(['bridge-build','bridge-sign','bridge-publish']);
+    expect(jobs['bridge-build']?.environment).toBeUndefined();
+    expect(jobs['bridge-build']?.permissions).toEqual({contents:'read'});
+    expect(semanticCommands(jobs['bridge-build']).join('\n')).not.toMatch(/EVSIGN_|sign-evsign|gh release (?:create|upload|edit)/i);
+    const sign=jobSteps(jobs['bridge-sign']);
+    expect(jobs['bridge-sign']?.environment).toBe('bridge-sign');
+    expect(jobs['bridge-sign']?.permissions).toEqual({contents:'read'});
+    expect(stepIndex(sign,'Download exact unsigned bridge handoff')).toBeLessThan(stepIndex(sign,'Check out reviewed bridge signing tools'));
+    expect(stepIndex(sign,'Validate unsigned bridge handoff')).toBeLessThan(stepIndex(sign,'Check out reviewed bridge signing tools'));
+    expect(semanticCommands(jobs['bridge-sign']).join('\n')).not.toMatch(/npm (?:ci|test|run)|build:exe|gh release (?:create|upload|edit)/i);
+    expect(jobs['bridge-publish']?.environment).toBe('bridge-publish');
+    expect(jobs['bridge-publish']?.permissions).toEqual({contents:'write','id-token':'write',attestations:'write'});
+    expect(semanticCommands(jobs['bridge-publish']).join('\n')).not.toMatch(/EVSIGN_|sign-evsign|build:exe|npm (?:ci|test|run)/i);
   });
 
-  const malformedManifestCases: Array<{
-    name: string;
-    mutate: (manifest: Record<string, unknown>) => unknown;
-    serialize?: (manifest: unknown) => string;
-  }> = [
-    {
-      name: 'an array tag_name',
-      mutate: (manifest) => { manifest.tag_name = ['v1.2.3']; },
-    },
-    {
-      name: 'numeric draft false',
-      mutate: (manifest) => { manifest.draft = 0; },
-    },
-    {
-      name: 'numeric prerelease false',
-      mutate: (manifest) => { manifest.prerelease = 0; },
-    },
-    {
-      name: 'a non-array assets value',
-      mutate: (manifest) => { manifest.assets = (manifest.assets as unknown[])[0]; },
-    },
-    {
-      name: 'an array asset name',
-      mutate: (manifest) => { (manifest.assets as Record<string, unknown>[])[0]!.name = ['gift-panel-windows-x64.exe']; },
-    },
-    {
-      name: 'an array asset download URL',
-      mutate: (manifest) => {
-        (manifest.assets as Record<string, unknown>[])[0]!.browser_download_url =
-          ['https://github.com/example/repository/releases/download/v1.2.3/gift-panel-windows-x64.exe'];
-      },
-    },
-    {
-      name: 'an array asset digest',
-      mutate: (manifest) => {
-        const asset = (manifest.assets as Record<string, unknown>[])[0]!;
-        asset.digest = [asset.digest];
-      },
-    },
-    {
-      name: 'a string asset size',
-      mutate: (manifest) => {
-        const asset = (manifest.assets as Record<string, unknown>[])[0]!;
-        asset.size = String(asset.size);
-      },
-    },
-    {
-      name: 'a decimal-form asset size',
-      mutate: (manifest) => manifest,
-      serialize: (manifest) => {
-        const serialized = JSON.stringify(manifest);
-        const size = ((manifest as Record<string, unknown>).assets as Record<string, unknown>[])[0]!.size;
-        return serialized.replace(`"size":${size}`, `"size":${size}.0`);
-      },
-    },
-    {
-      name: 'an array root',
-      mutate: (manifest) => [manifest],
-    },
-    {
-      name: 'an unknown root property',
-      mutate: (manifest) => { manifest.extra = true; },
-    },
-  ];
+  it('is manual, exact-tagged, read-only until its dedicated publisher', () => {
+    const workflow=bridgeReleaseWorkflow();const jobs=workflow.jobs as Record<string,WorkflowJob>;
+    expect(Object.keys(workflow.on??{})).toEqual(['workflow_dispatch']);
+    expect(workflow.permissions).toEqual({contents:'read'});
+    expect(workflow.concurrency).toEqual({group:'gift-panel-bridge-v0.4.11','cancel-in-progress':false});
+    expect(jobs['bridge-build']?.env).toEqual({BRIDGE_TAG:'v0.4.11'});
+    const build=jobSteps(jobs['bridge-build']);
+    expect(build[stepIndex(build,'Check out exact bridge tag')]?.with).toMatchObject({ref:'refs/tags/v0.4.11','persist-credentials':false});
+    expect(stepIndex(build,'Build reviewed bridge security tools')).toBeLessThan(stepIndex(build,'Check out exact bridge tag'));
+  });
 
-  it.each(malformedManifestCases)(
-    'rejects fallback manifests with $name during GitHub Release repair',
-    ({ mutate, serialize }) => {
-      const manifest = publishedManifestFixture();
-      const replacement = mutate(manifest);
-      const candidate = replacement ?? manifest;
-      const result = runPublishedReleaseValidation(candidate, serialize?.(candidate));
+  it('maps the Task9 three-asset Release into a higher exact-hash authorization bundle', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const build=jobSteps(jobs['bridge-build']);
+    const fetch=build[stepIndex(build,'Fetch immutable production trust binding')]?.run??'';
+    for(const name of ['gift-panel-publisher-policy.json','gift-panel-publisher-policy.audit.json','gift-panel-publisher-policy.commit.json','policy.json','audit.json','commit.json'])expect(fetch).toContain(name);
+    expect(fetch).toContain('--content-type application/octet-stream');expect(fetch).not.toContain('--content-type application/json');
+    expect(fetch).toContain('import-bundle');expect(fetch).toContain('verify-bundle');
+    expect(fetch).toContain('BRIDGE_AUTHORIZATION_POLICY_EPOCH');expect(fetch).toContain('BRIDGE_BOOTSTRAP_POLICY_EPOCH');
+    expect(fetch).toContain('authorization-evidence.json');expect(fetch).not.toContain('Bootstrap policy bytes do not match');
+    const readiness=build[stepIndex(build,'Verify reviewed bridge readiness')]?.run??'';
+    for(const flag of ['--bootstrap-policy','--authorization-policy','--authorization-evidence'])expect(readiness).toContain(flag);
+  });
 
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain('Published fallback update manifest');
-    },
-  );
+  it('executes target code only in the unprivileged build job before unsigned handoff', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const build=jobSteps(jobs['bridge-build']);
+    expect(stepIndex(build,'Run repository tests')).toBeLessThan(stepIndex(build,'Build bridge executable'));
+    expect(stepIndex(build,'Build bridge executable')).toBeLessThan(stepIndex(build,'Prepare closed unsigned bridge handoff'));
+    expect(stepIndex(build,'Prepare closed unsigned bridge handoff')).toBeLessThan(stepIndex(build,'Upload exact unsigned bridge handoff'));
+    const commands=semanticCommands(jobs['bridge-build']).join('\n');
+    expect(commands).toContain('npm test');expect(commands).toContain('go test');expect(commands).toContain('npm run build:exe');
+    expect(commands).not.toMatch(/secrets\.|EVSIGN_/i);
+  });
 
-  it('checks every gh command immediately so publication failures cannot be masked', () => {
-    const { steps } = releaseWorkflow();
-    const ghRuns = steps
-      .map((step) => step.run)
-      .filter((run): run is string => typeof run === 'string' && /\bgh (?:api|release|attestation)\b/.test(run));
-    expect(ghRuns.length).toBeGreaterThan(0);
+  it('final-inspects embedded bootstrap and external authorization on the protected runner', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const sign=jobSteps(jobs['bridge-sign']);
+    const final=sign[stepIndex(sign,'Seal and close signed bridge candidate')]?.run??'';
+    for(const value of ['verify-artifact','--bootstrap-policy','--authorization-policy','--authorization-policy-epoch','--stable-artifact','authorizationPolicyEpoch -le','link-sealed-executable'])expect(final).toContain(value);
+    expect(final).not.toContain('npm');
+    const secretStep=sign[stepIndex(sign,'Sign RushRush bridge executable on protected runner')];
+    expect(Object.keys(secretStep?.env??{}).sort()).toEqual(['EVSIGN_BRIDGE_CERTIFICATE','EVSIGN_BRIDGE_PUBLISHER_IDENTITY','EVSIGN_KEY','EVSIGN_PASSWORD']);
+    expect(JSON.stringify(jobs['bridge-build'])).not.toMatch(/EVSIGN_|secrets\./);
+    expect(JSON.stringify(jobs['bridge-publish'])).not.toMatch(/EVSIGN_|secrets\./);
+  });
 
-    for (const run of ghRuns) {
-      const lines = run.split(/\r?\n/);
-      for (let index = 0; index < lines.length; index += 1) {
-        if (!/\bgh (?:api|release|attestation)\b/.test(lines[index] ?? '')) continue;
-        const guard = lines[index + 1]?.trim() ?? '';
-        if (lines[index]?.includes('/git/refs')) {
-          expect(guard, `unchecked gh command: ${lines[index]?.trim()}`).toBe('if ($LASTEXITCODE -ne 0) {');
-          expect(run).toContain('Another publisher created the FFmpeg component');
-          expect(run).toContain('Invoke-RestMethod');
-        } else {
-          expect(guard, `unchecked gh command: ${lines[index]?.trim()}`)
-            .toMatch(/^if \(\$LASTEXITCODE -ne 0\) \{ throw /);
-        }
-      }
-    }
+  it('executes the handoff gate and rejects PATH, GITHUB_ENV, or tool poisoning', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const steps=jobSteps(jobs['bridge-sign']);
+    const gate=steps[stepIndex(steps,'Validate unsigned bridge handoff')];const root=mkdtempSync(join(tmpdir(),'bridge-poison-'));
+    try{
+      const handoff=join(root,'handoff');const bundle=join(handoff,'readiness','private-bundle','bundle');mkdirSync(bundle,{recursive:true});
+      const unsigned=Buffer.from('unsigned-bridge');const digest=createHash('sha256').update(unsigned).digest('hex');writeFileSync(join(handoff,digest+'.exe'),unsigned);
+      for(const name of ['ffmpeg.zip','manifest.json','ffmpeg-windows-x64.exe','ffmpeg-component-manifest.json','gift-panel-changelog.json'])writeFileSync(join(handoff,name),name);
+      for(const name of ['root-spki.der','bootstrap-policy.json','stable-artifact.exe','readiness.json','authorization-evidence.json','policy-release.json','stable-release.json','observation-evidence.json','trust-attestation.json','verified-bundle.json'])writeFileSync(join(handoff,'readiness',name),name);
+      for(const name of ['policy.json','audit.json','commit.json'])writeFileSync(join(bundle,name),name);
+      writeFileSync(join(handoff,'handoff.json'),JSON.stringify({schemaVersion:1,tag:'v0.4.11',version:'0.4.11',commit:'a'.repeat(40),unsignedSha256:digest,unsignedSize:unsigned.length,rootSpkiSha256:'b'.repeat(64),bootstrapPolicySha256:'c'.repeat(64),bootstrapPolicyEpoch:1,authorizationPolicySha256:'d'.repeat(64),authorizationPolicyEpoch:2}));
+      const githubEnv=join(root,'fresh-env');const poison=join(root,'poison');mkdirSync(poison);
+      const execute=()=>spawnSync('pwsh',['-NoLogo','-NoProfile','-NonInteractive','-File','-'],{cwd:root,encoding:'utf8',env:{...process.env,PATH:poison+';'+(process.env.PATH??''),GITHUB_ENV:githubEnv,EXPECTED_UNSIGNED_SHA256:digest,EXPECTED_UNSIGNED_SIZE:String(unsigned.length),BRIDGE_REVIEWED_COMMIT_SHA:'a'.repeat(40)},input:"$ErrorActionPreference='Stop'\n"+(gate?.run??'')});
+      writeFileSync(join(handoff,'GITHUB_ENV.cmd'),'target controlled');const poisoned=execute();expect(poisoned.status!==0||poisoned.stderr.includes('handoff closure'),poisoned.stderr).toBe(true);
+      rmSync(join(handoff,'GITHUB_ENV.cmd'));const valid=execute();expect(valid.status,valid.stderr).toBe(0);expect(readFileSync(githubEnv,'utf8')).not.toContain(poison);
+    }finally{rmSync(root,{recursive:true,force:true});}
+  });
+
+  it('publishes one exact eight-asset non-latest closure without signer capability', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const publish=jobSteps(jobs['bridge-publish']);
+    const validate=publish[stepIndex(publish,'Validate signed bridge publication handoff')]?.run??'';
+    for(const name of ['gift-panel-windows-x64.exe','gift-panel-windows-x64.exe.sha256','gift-panel-update.json','ffmpeg-windows-x64.exe','gift-panel-changelog.json','ffmpeg-component-manifest.json','bridge-release-evidence.json','SHA256SUMS.txt'])expect(validate).toContain(name);
+    expect(publish[stepIndex(publish,'Create immutable-shaped bridge draft')]?.run).toContain('--latest=false');
+    expect(publish[stepIndex(publish,'Publish bridge as non-latest')]?.run).toContain('--latest=false');
+    expect(semanticCommands(jobs['bridge-publish']).join('\n')).not.toMatch(/EVSIGN_|SignByAsymmetricKey|channels\/|COS_|--latest(?:\s|$)(?!false)/i);
+  });
+
+  it('rechecks the raw and peeled reviewed bridge tag in the signer-free publisher', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;const publish=jobSteps(jobs['bridge-publish']);
+    const recheck=publish[stepIndex(publish,'Recheck reviewed bridge tag through GitHub API')];
+    expect(recheck?.env).toMatchObject({BRIDGE_REVIEWED_COMMIT_SHA:'${{ vars.BRIDGE_REVIEWED_COMMIT_SHA }}',BRIDGE_REVIEWED_TAG_OBJECT_SHA:'${{ vars.BRIDGE_REVIEWED_TAG_OBJECT_SHA }}'});
+    expect(recheck?.run).toContain('/git/tags/');
+    expect(recheck?.run).toContain('BRIDGE_REVIEWED_COMMIT_SHA');
+    expect(recheck?.run).toContain("object.type -ceq 'tag'");
+  });
+
+  it('pins every external Action and cannot mutate stable, legacy, COS, or KMS state', () => {
+    const jobs=bridgeReleaseWorkflow().jobs as Record<string,WorkflowJob>;
+    for(const job of Object.values(jobs))for(const step of jobSteps(job))if(step.uses)expect(step.uses).toMatch(/^[^@]+@[0-9a-f]{40}$/);
+    expect(Object.values(jobs).flatMap(semanticCommands).join('\n')).not.toMatch(/channels\/stable|channels\/legacy-rushrush|SignByAsymmetricKey|TENCENTCLOUD_|COS_/i);
   });
 });

@@ -1,0 +1,120 @@
+package main
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"bilibili-live-gift-panel/internal/certidentity"
+)
+
+func TestFFmpegClosureCommandsFailClosedOnMissingExplicitPaths(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "seal-ffmpeg", want: "FFmpeg seal arguments"},
+		{command: "publish-ffmpeg", want: "FFmpeg publication arguments"},
+		{command: "verify-enrollment", want: "enrollment arguments"},
+		{command: "verify-enrollment-policies", want: "enrollment policy arguments"},
+		{command: "link-sealed-executable", want: "sealed executable link arguments"},
+		{command: "verify-enrollment-candidate", want: "enrollment candidate arguments"},
+		{command: "inspect-authenticode", want: "Authenticode inspection arguments"},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			err := run([]string{test.command}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestCertificateCommandUsesGeneratedDERSerialNumberIdentity(t *testing.T) {
+	der := commandCertificate(t, false)
+	path := filepath.Join(t.TempDir(), "certificate.der")
+	if err := os.WriteFile(path, der, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := run([]string{"certificate", "--der", path, "--country", "CN", "--organization", "RushRush Network Technology Ltd", "--organization-id", "91450900MADM3GLG5P"}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`"organizationId":"91450900MADM3GLG5P"`)) {
+		t.Fatalf("output = %s", output.Bytes())
+	}
+}
+
+func TestCertificateCommandRejectsOrganizationIdentifierOIDDecoy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "certificate.der")
+	if err := os.WriteFile(path, commandCertificate(t, true), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"certificate", "--der", path, "--country", "CN", "--organization", "RushRush Network Technology Ltd", "--organization-id", "91450900MADM3GLG5P"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("2.5.4.97 decoy accepted")
+	}
+}
+
+func TestInspectAuthenticodeCommandEmitsOnlyHashAndStructuredIdentity(t *testing.T) {
+	der := commandCertificate(t, false)
+	identity := certidentity.Identity{Country: "CN", Organization: "RushRush Network Technology Ltd", OrganizationID: "91450900MADM3GLG5P"}
+	var output bytes.Buffer
+	err := runInspectAuthenticode([]string{"--file", `C:\release path\signed.exe`}, &output, func(path string) (certidentity.Certificate, error) {
+		if path != `C:\release path\signed.exe` {
+			t.Fatalf("path = %q", path)
+		}
+		return certidentity.Certificate{DER: der, Identity: identity}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(der)
+	want := fmt.Sprintf(`{"status":"Valid","certificateDerSha256":"%x","identity":{"country":"CN","organization":"RushRush Network Technology Ltd","organizationId":"91450900MADM3GLG5P"}}`+"\n", digest)
+	if output.String() != want {
+		t.Fatalf("output = %s, want %s", output.String(), want)
+	}
+	if bytes.Contains(output.Bytes(), []byte(base64.StdEncoding.EncodeToString(der))) || bytes.Contains(output.Bytes(), []byte(`C:\release path`)) {
+		t.Fatalf("output leaked DER or path: %s", output.Bytes())
+	}
+}
+
+func commandCertificate(t testing.TB, decoy bool) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	organizationIDOid := asn1.ObjectIdentifier{2, 5, 4, 5}
+	if decoy {
+		organizationIDOid = asn1.ObjectIdentifier{2, 5, 4, 97}
+	}
+	rdns := pkix.RDNSequence{
+		{{Type: asn1.ObjectIdentifier{2, 5, 4, 6}, Value: "CN"}},
+		{{Type: asn1.ObjectIdentifier{2, 5, 4, 10}, Value: "RushRush Network Technology Ltd"}},
+		{{Type: organizationIDOid, Value: "91450900MADM3GLG5P"}},
+	}
+	rawSubject, err := asn1.Marshal(rdns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), RawSubject: rawSubject, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}

@@ -2297,13 +2297,13 @@ describe('single-page configuration rendering', () => {
     const dialog = root.querySelector('.changelog-dialog');
     expect(dialog).not.toBeNull();
     expect(textOf(dialog!)).toContain('这次更新了什么？');
-    expect(textOf(dialog!)).toContain('增强礼物诊断与加班机摘要');
-    expect(textOf(dialog!)).toContain('普通礼物解析失败时，运行日志会记录脱敏后的命令、失败阶段和字段类型，便于继续定位 B 站消息变化；同时修正加班机调整时长后规则卡片仍显示旧分钟数的问题。主程序仍内嵌固定 FFmpeg 9.0，发布页另提供经过签名和校验的 ffmpeg-windows-x64.exe 及 SHA-256 作为可选下载，主程序用户无需另行下载。日志不会记录 UID、昵称、消息内容或原始礼物数据。');
+    expect(textOf(dialog!)).toContain('缩小安装包并简化安全发布');
+    expect(textOf(dialog!)).toContain('完整保留 v0.4.12 的礼物兼容、安全更新与内嵌 FFmpeg 功能');
     expect(root.querySelectorAll('.changelog-visual')).toHaveLength(0);
     expect(textOf(dialog!)).not.toContain('训练中心');
     (root.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
 
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.10'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.13'));
     expect(root.querySelector('.changelog-dialog')).toBeNull();
   });
 
@@ -2344,7 +2344,7 @@ describe('single-page configuration rendering', () => {
         return Response.json({
           code: 0,
           update: {
-            state: 'up-to-date', currentVersion: '0.4.10', latestVersion: '0.4.10',
+            state: 'up-to-date', currentVersion: '0.4.13', latestVersion: '0.4.13',
             message: '当前已经是最新版本。', autoUpdate: true, restartRequired: false,
           },
         });
@@ -2362,7 +2362,7 @@ describe('single-page configuration rendering', () => {
     mountConfig(firstRoot as unknown as HTMLElement);
     await vi.waitFor(() => expect(firstRoot.querySelector('.changelog-dialog')).not.toBeNull());
     (firstRoot.querySelector('.changelog-close') as TestElement | null)?.onclick?.();
-    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.10'));
+    await vi.waitFor(() => expect(loadState().settings.lastSeenChangelogVersion).toBe('0.4.13'));
 
     const secondRoot = new TestElement('div');
     mountConfig(secondRoot as unknown as HTMLElement);

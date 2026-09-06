@@ -59,9 +59,11 @@ type LatestResult struct {
 	Release     RemoteRelease
 }
 
-// ReleaseSource obtains the latest public release, conditionally by ETag.
+// ReleaseSource obtains either the latest public release or one exact tag,
+// conditionally by the ETag owned by that channel.
 type ReleaseSource interface {
 	Latest(context.Context, string) (LatestResult, error)
+	ByTag(context.Context, string, string) (LatestResult, error)
 }
 
 // GitHubReleaseSource reads the latest release from the fixed public repository.
@@ -83,7 +85,22 @@ func newGitHubReleaseSource(client *http.Client, apiBase string) *GitHubReleaseS
 }
 
 func (source *GitHubReleaseSource) Latest(ctx context.Context, etag string) (LatestResult, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.apiBase+"/repos/"+githubRepository+"/releases/latest", nil)
+	return source.get(ctx, "/repos/"+githubRepository+"/releases/latest", etag)
+}
+
+// ByTag retrieves one exact canonical GitHub release tag and never consults latest.
+func (source *GitHubReleaseSource) ByTag(ctx context.Context, tag, etag string) (LatestResult, error) {
+	if _, err := release.ParseStableTag(tag); err != nil {
+		return LatestResult{}, errors.New("GitHub release tag is not canonical")
+	}
+	return source.get(ctx, "/repos/"+githubRepository+"/releases/tags/"+url.PathEscape(tag), etag)
+}
+
+func (source *GitHubReleaseSource) get(ctx context.Context, endpoint, etag string) (LatestResult, error) {
+	if etag != "" && !isConditionalETag(etag) {
+		return LatestResult{}, errors.New("GitHub conditional ETag is invalid")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.apiBase+endpoint, nil)
 	if err != nil {
 		return LatestResult{}, errors.New("could not create GitHub release request")
 	}
@@ -101,13 +118,17 @@ func (source *GitHubReleaseSource) Latest(ctx context.Context, etag string) (Lat
 	defer response.Body.Close()
 
 	if response.StatusCode == http.StatusNotModified {
+		if !isConditionalETag(etag) {
+			return LatestResult{}, errors.New("GitHub returned not modified without a conditional ETag")
+		}
 		return LatestResult{NotModified: true}, nil
 	}
 	if response.StatusCode != http.StatusOK {
 		return LatestResult{}, fmt.Errorf("unexpected GitHub release response status %d", response.StatusCode)
 	}
-	if response.Header.Get("ETag") == "" {
-		return LatestResult{}, errors.New("GitHub release response is missing ETag")
+	responseETag := response.Header.Get("ETag")
+	if !isConditionalETag(responseETag) {
+		return LatestResult{}, errors.New("GitHub release response ETag is invalid")
 	}
 
 	releasePayload, err := decodeGitHubRelease(response.Body)
@@ -118,7 +139,7 @@ func (source *GitHubReleaseSource) Latest(ctx context.Context, etag string) (Lat
 	if err != nil {
 		return LatestResult{}, err
 	}
-	return LatestResult{ETag: response.Header.Get("ETag"), Release: trustedRelease}, nil
+	return LatestResult{ETag: responseETag, Release: trustedRelease}, nil
 }
 
 type githubReleasePayload struct {

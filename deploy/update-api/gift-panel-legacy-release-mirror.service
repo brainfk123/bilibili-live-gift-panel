@@ -1,0 +1,26 @@
+[Unit]
+Description=Gift Panel dormant legacy RushRush Release mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gift-panel-legacy-mirror
+Group=gift-panel-legacy-mirror
+EnvironmentFile=/etc/gift-panel-legacy-release-mirror.env
+ExecStart=/opt/gift-panel-release-mirror/current/gift-panel-release-mirror --channel legacy-rushrush --tag v0.4.11 --state-dir /var/lib/gift-panel-legacy-release-mirror
+StateDirectory=gift-panel-legacy-release-mirror
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LogNamespace=gift-panel-legacy-release-mirror
+UMask=0077

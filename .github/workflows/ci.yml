@@ -44,6 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -57,9 +58,9 @@ jobs:
             updateapi/go.sum
       - run: npm ci
       - run: npm exec -- playwright install --with-deps chromium
+      - run: npm run build:ui
       - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run typecheck
-      - run: npm run build:ui
       - run: npm run prepare:go-assets
       - run: npm run verify:go-linux-compile
       - run: npm run build:hosted
@@ -94,6 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -103,10 +105,31 @@ jobs:
         with:
           go-version-file: goserver/go.mod
           cache-dependency-path: goserver/go.sum
+      - name: Prepare canonical Windows test temp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:USERPROFILE "AppData\Local\Temp\gift-panel-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $item = Get-Item -LiteralPath $root -Force
+          if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Windows test temp must not be a reparse point.'
+          }
+          $resolved = [string](& node -e "const fs=require('node:fs');process.stdout.write(fs.realpathSync(process.argv[1]))" $item.FullName)
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($resolved)) {
+            throw 'Windows test temp realpath resolution failed.'
+          }
+          $expected = [IO.Path]::GetFullPath($item.FullName)
+          $actual = [IO.Path]::GetFullPath($resolved)
+          if (-not [StringComparer]::OrdinalIgnoreCase.Equals($expected, $actual)) {
+            throw 'Windows test temp contains a reparse traversal.'
+          }
+          "TEMP=$actual" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$actual" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: npm ci
       - run: npm exec -- playwright install chromium
-      - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run build:ui
+      - run: npm test -- --reporter=dot --minWorkers=2 --maxWorkers=2
       - run: npm run prepare:go-assets
       - run: go -C goserver test ./... -race -count=1
       - name: Build unsigned CI executable

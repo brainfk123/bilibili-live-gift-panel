@@ -29,8 +29,12 @@ type fakeReleaseService struct {
 	changeErr error
 }
 
-func (service *fakeReleaseService) Latest(context.Context) (release.PublicRelease, error) {
+func (service *fakeReleaseService) Latest(context.Context, release.Channel) (release.PublicRelease, error) {
 	return service.latest, service.latestErr
+}
+
+func (service *fakeReleaseService) PublisherPolicy(context.Context) ([]byte, error) {
+	return nil, nil
 }
 
 func (service *fakeReleaseService) Changelog(context.Context) (service.Document, error) {
@@ -49,13 +53,23 @@ func (logger *captureLogger) Error(requestID, code string, cause error) {
 	logger.entries = append(logger.entries, loggedError{requestID: requestID, code: code, cause: cause})
 }
 
+func newTestHandler(releaseService httpapi.ReleaseService, requestID func() string, logger httpapi.Logger) http.Handler {
+	return httpapi.New(releaseService, service.ChannelRouter{}, requestID, logger, nil)
+}
+
+func newLatestRequest(method, target string) *http.Request {
+	request := httptest.NewRequest(method, target, nil)
+	request.Header.Set("User-Agent", "bilibili-live-gift-panel/0.4.12")
+	return request
+}
+
 func TestLatestServesReleaseForGetAndHead(t *testing.T) {
 	service := &fakeReleaseService{latest: testRelease()}
-	handler := httpapi.New(service, func() string { return generatedID }, &captureLogger{})
+	handler := newTestHandler(service, func() string { return generatedID }, &captureLogger{})
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		t.Run(method, func(t *testing.T) {
-			request := httptest.NewRequest(method, latestPath, nil)
+			request := newLatestRequest(method, latestPath)
 			request.Header.Set("X-Request-ID", validRequest)
 			response := httptest.NewRecorder()
 
@@ -91,7 +105,7 @@ func TestChangelogServesDocumentForGetAndHead(t *testing.T) {
 		Body: []byte(`{"schemaVersion":1,"releases":[{"version":"0.4.4"}]}`),
 		ETag: `"changelog-etag"`,
 	}}
-	handler := httpapi.New(service, func() string { return generatedID }, &captureLogger{})
+	handler := newTestHandler(service, func() string { return generatedID }, &captureLogger{})
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		t.Run(method, func(t *testing.T) {
@@ -131,11 +145,17 @@ func TestHeadResponsesDeclareTheSameContentLengthAsGet(t *testing.T) {
 		{"service error", latestPath, &fakeReleaseService{latestErr: service.ErrReleaseUnavailable}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			handler := httpapi.New(test.service, func() string { return generatedID }, &captureLogger{})
+			handler := newTestHandler(test.service, func() string { return generatedID }, &captureLogger{})
 			get := httptest.NewRecorder()
-			handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, test.path, nil))
+			getRequest := httptest.NewRequest(http.MethodGet, test.path, nil)
+			headRequest := httptest.NewRequest(http.MethodHead, test.path, nil)
+			if test.path == latestPath {
+				getRequest.Header.Set("User-Agent", "bilibili-live-gift-panel/0.4.12")
+				headRequest.Header.Set("User-Agent", "bilibili-live-gift-panel/0.4.12")
+			}
+			handler.ServeHTTP(get, getRequest)
 			head := httptest.NewRecorder()
-			handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, test.path, nil))
+			handler.ServeHTTP(head, headRequest)
 
 			want := strconv.Itoa(get.Body.Len())
 			if got := get.Header().Get("Content-Length"); got != want {
@@ -164,10 +184,10 @@ func TestServiceErrorsAreTypedPrivateAndLoggedWithoutSensitiveData(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			logger := &captureLogger{}
-			handler := httpapi.New(&fakeReleaseService{latestErr: test.err}, func() string { return generatedID }, logger)
+			handler := newTestHandler(&fakeReleaseService{latestErr: test.err}, func() string { return generatedID }, logger)
 			response := httptest.NewRecorder()
 
-			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, latestPath+"?token=do-not-reflect", nil))
+			handler.ServeHTTP(response, newLatestRequest(http.MethodGet, latestPath+"?token=do-not-reflect"))
 
 			if response.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", response.Code)
@@ -191,10 +211,10 @@ func TestServiceErrorsAreTypedPrivateAndLoggedWithoutSensitiveData(t *testing.T)
 
 func TestInvalidManifestLogsOnlyItsSanitizedReasonCode(t *testing.T) {
 	logger := &captureLogger{}
-	handler := httpapi.New(&fakeReleaseService{latestErr: reasonedReleaseInvalid{cause: errors.New("releases/v0.4.4/private.json?signature=secret")}}, func() string { return generatedID }, logger)
+	handler := newTestHandler(&fakeReleaseService{latestErr: reasonedReleaseInvalid{cause: errors.New("releases/v0.4.4/private.json?signature=secret")}}, func() string { return generatedID }, logger)
 	response := httptest.NewRecorder()
 
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, latestPath, nil))
+	handler.ServeHTTP(response, newLatestRequest(http.MethodGet, latestPath))
 
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", response.Code)
@@ -216,7 +236,7 @@ func (reasoned reasonedReleaseInvalid) Is(target error) bool {
 func (reasoned reasonedReleaseInvalid) InvalidReason() string { return "manifest_tag" }
 
 func TestUnknownAndUnsupportedRequestsUseStableJSONErrors(t *testing.T) {
-	handler := httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{})
+	handler := newTestHandler(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{})
 
 	t.Run("unknown path", func(t *testing.T) {
 		response := httptest.NewRecorder()
@@ -245,7 +265,7 @@ func TestUnknownAndUnsupportedRequestsUseStableJSONErrors(t *testing.T) {
 }
 
 func TestRequestIDAcceptsOnlyLowercaseHex(t *testing.T) {
-	handler := httpapi.New(&fakeReleaseService{latest: testRelease()}, func() string { return generatedID }, &captureLogger{})
+	handler := newTestHandler(&fakeReleaseService{latest: testRelease()}, func() string { return generatedID }, &captureLogger{})
 
 	for _, test := range []struct {
 		name  string
@@ -258,7 +278,7 @@ func TestRequestIDAcceptsOnlyLowercaseHex(t *testing.T) {
 		{"not hexadecimal", "gggggggggggggggggggggggggggggggg", generatedID},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodGet, latestPath, nil)
+			request := newLatestRequest(http.MethodGet, latestPath)
 			request.Header.Set("X-Request-ID", test.input)
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
@@ -269,7 +289,7 @@ func TestRequestIDAcceptsOnlyLowercaseHex(t *testing.T) {
 	}
 
 	t.Run("multiple values", func(t *testing.T) {
-		request := httptest.NewRequest(http.MethodGet, latestPath, nil)
+		request := newLatestRequest(http.MethodGet, latestPath)
 		request.Header.Add("X-Request-ID", validRequest)
 		request.Header.Add("X-Request-ID", validRequest)
 		response := httptest.NewRecorder()
@@ -281,7 +301,7 @@ func TestRequestIDAcceptsOnlyLowercaseHex(t *testing.T) {
 }
 
 func TestHealthzServesGetAndHead(t *testing.T) {
-	handler := httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{})
+	handler := newTestHandler(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{})
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		t.Run(method, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -304,7 +324,7 @@ func TestHealthzServesGetAndHead(t *testing.T) {
 
 func TestHealthzRejectsUnsupportedMethodsWithGetAndHeadAllow(t *testing.T) {
 	response := httptest.NewRecorder()
-	httpapi.New(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	newTestHandler(&fakeReleaseService{}, func() string { return generatedID }, &captureLogger{}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/healthz", nil))
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", response.Code)
 	}
