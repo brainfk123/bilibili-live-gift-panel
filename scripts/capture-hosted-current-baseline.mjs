@@ -11,6 +11,8 @@ import {buildPopulatedShards} from './exe-populated-fixture.mjs';
 // Capture the shipped Hosted frontend with a deterministic, explicitly synthetic
 // HTTP transport. This does not exercise login, MySQL, or the migration decoder.
 const root=fileURLToPath(new URL('..',import.meta.url));
+const theme=process.env.HOSTED_CAPTURE_THEME??'dark';
+assert.ok(theme==='dark'||theme==='light');
 const fixtureBase='acceptance/exe-hosted-ui/fixtures/';
 const emptyBytes=await readFile(join(root,fixtureBase+'empty-0.4.10.json'));
 const populatedBytes=await readFile(join(root,fixtureBase+'populated-0.4.10.json'));
@@ -50,7 +52,7 @@ const server=await createServer({root,configFile:join(root,'vite.hosted.config.t
   },
 }]});
 let browser;
-const directoryName=`acceptance/exe-hosted-ui/captures/0.4.10/${new Date().toISOString().replace(/[:.]/g,'-')}-hosted-current`;
+const directoryName=`acceptance/exe-hosted-ui/captures/0.4.10/${new Date().toISOString().replace(/[:.]/g,'-')}-hosted-${theme}`;
 const directory=join(root,directoryName),captures=[];
 const sha=value=>createHash('sha256').update(value).digest('hex');
 try {
@@ -69,6 +71,8 @@ try {
     await page.goto(origin+'/hosted.html',{waitUntil:'domcontentloaded'});
     await page.getByRole('heading',{name:'主播账号',exact:true}).waitFor();
     await page.getByText('运行状态：等待选择直播间',{exact:true}).waitFor();
+    await page.getByRole('button',{name:/属性玩法.*2 个/}).waitFor();
+    if(theme==='light')await page.getByRole('button',{name:'切换到浅色模式',exact:true}).click();
     for(const view of ['account','configuration-json']) {
       if(view==='configuration-json') {
         await page.getByRole('button',{name:'在线配置',exact:true}).click();
@@ -84,7 +88,7 @@ try {
     await page.close();
   }
   const report={schema:1,evidenceMode:'actual Hosted frontend with synthetic HTTP/SSE transport; no real login, database or migration validation',
-    commit:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),browser:browser.version(),scriptSHA256:sha(await readFile(fileURLToPath(import.meta.url))),
+    commit:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),browser:browser.version(),theme,scriptSHA256:sha(await readFile(fileURLToPath(import.meta.url))),
     fixtures:[{path:fixtureBase+'empty-0.4.10.json',sha256:sha(emptyBytes)},{path:fixtureBase+'populated-0.4.10.json',sha256:sha(populatedBytes)}],
     projection:'same gameplay IDs, attribute values, activity, target and progress; names converted to IDs for current Hosted DTO',
     unsupportedInCurrentDTO:['global appearance','blind-box appearance','gift target appearance','viewer contributions','gift receipt history'],captures};

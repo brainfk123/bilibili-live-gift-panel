@@ -267,7 +267,7 @@ describe('ordinary Hosted Bilibili login layout in real Chromium', () => {
         expect(metrics.documentWidth, `${state.name} overflow at ${viewport.width}px`).toBe(metrics.innerWidth);
         expect(metrics.cardWidth, `${state.name} card width`).toBeLessThanOrEqual(860);
         expect(metrics.columns, `${state.name} columns at ${viewport.width}px`).toBe(viewport.width === 390 ? 1 : 2);
-        expect(metrics.bodyBackground).toBe('rgb(243, 245, 248)');
+        expect(metrics.bodyBackground).toBe('rgb(20, 21, 26)');
         expect(metrics.actionAlignment).toBe('flex-end');
         for (const button of metrics.buttons) {
           expect(button.justifyContent, `${state.name} button centering`).toBe('center');
@@ -311,12 +311,12 @@ describe('ordinary Hosted Bilibili login layout in real Chromium', () => {
       expect(Math.abs(pending.frameHeight - expired.frameHeight)).toBeLessThan(1);
 
       const expectedBackground = new Map([
-        ['creating', 'rgb(246, 248, 251)'],
-        ['pending', 'rgb(237, 244, 255)'],
-        ['success', 'rgb(239, 250, 243)'],
-        ['warning', 'rgb(255, 248, 223)'],
-        ['expired', 'rgb(255, 241, 239)'],
-        ['error', 'rgb(255, 241, 239)'],
+        ['creating', 'rgb(28, 30, 38)'],
+        ['pending', 'rgba(251, 114, 153, 0.14)'],
+        ['success', 'rgba(74, 222, 128, 0.1)'],
+        ['warning', 'rgba(255, 173, 102, 0.1)'],
+        ['expired', 'rgba(201, 42, 42, 0.1)'],
+        ['error', 'rgba(201, 42, 42, 0.1)'],
       ]);
       for (const state of states) {
         await mountState(page, state.name);
@@ -377,9 +377,9 @@ describe('ordinary Hosted Bilibili login layout in real Chromium', () => {
     const { page, consoleErrors } = await openHarness(browser, baseURL, { width: 390, height: 844 });
     await mountState(page, 'fatal');
     const regenerate = page.getByRole('button', { name: '重新生成' });
-    const beforeHover = await regenerate.evaluate((element) => getComputedStyle(element).backgroundColor);
+    const beforeHover = await regenerate.evaluate((element) => getComputedStyle(element).filter);
     await regenerate.hover();
-    expect(await regenerate.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(beforeHover);
+    expect(await regenerate.evaluate((element) => getComputedStyle(element).filter)).not.toBe(beforeHover);
 
     await page.mouse.move(0, 0);
     await page.keyboard.press('Tab');
@@ -394,16 +394,16 @@ describe('ordinary Hosted Bilibili login layout in real Chromium', () => {
 
     await mountState(page, 'pending');
     const mobileLink = page.getByRole('link', { name: '在本机打开 B 站确认' });
-    const linkBase = await mobileLink.evaluate((element) => getComputedStyle(element).backgroundColor);
+    const linkBase = await mobileLink.evaluate((element) => getComputedStyle(element).filter);
     await mobileLink.hover();
-    const linkHover = await mobileLink.evaluate((element) => getComputedStyle(element).backgroundColor);
+    const linkHover = await mobileLink.evaluate((element) => getComputedStyle(element).filter);
     expect(linkHover).not.toBe(linkBase);
     const box = await mobileLink.boundingBox();
     if (!box) throw new Error('Mobile confirmation link has no layout box.');
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
     const active = await mobileLink.evaluate((element) => ({
-      background: getComputedStyle(element).backgroundColor,
+      background: getComputedStyle(element).filter,
       transform: getComputedStyle(element).transform,
     }));
     expect(active.background).not.toBe(linkHover);
@@ -415,7 +415,7 @@ describe('ordinary Hosted Bilibili login layout in real Chromium', () => {
     await mountState(page, 'creating');
     expect(await page.locator('.hosted-auth-spinner').evaluate((element) => getComputedStyle(element).animationName)).toBe('none');
     expect(await page.locator('.hosted-auth-status').textContent()).toBe('正在创建二维码');
-    expect(await page.locator('.hosted-auth-status').evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgb(246, 248, 251)');
+    expect(await page.locator('.hosted-auth-status').evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgb(28, 30, 38)');
     expect(consoleErrors).toEqual([]);
     await page.evaluate(() => window.__authHarness.cleanup());
     await page.close();

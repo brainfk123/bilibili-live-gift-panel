@@ -12,7 +12,7 @@ import {
 
 describe('versioned changelog', () => {
   it('keeps both changelog columns scrollable inside the viewport', () => {
-    const css = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const css = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     expect(css).toMatch(/\.changelog-layout\s*\{[^}]*flex:\s*1\s+1\s+auto[^}]*overflow:\s*hidden/s);
     expect(css).toMatch(/\.changelog-version-list\s*\{[^}]*overflow-y:\s*auto/s);
     expect(css).toMatch(/\.changelog-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);

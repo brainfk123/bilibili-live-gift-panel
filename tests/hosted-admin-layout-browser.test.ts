@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { chromium, type Browser } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-const css = readFileSync(new URL('../src/hosted/shell.css', import.meta.url), 'utf8');
+const css = readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/hosted/shell.css', import.meta.url), 'utf8');
 
 describe('administrator layout in a real browser', () => {
   let browser: Browser;
@@ -29,13 +29,13 @@ describe('administrator layout in a real browser', () => {
     `);
 
     const first = page.locator('.hosted-admin-resource-card').first();
-    expect(await first.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgb(255, 255, 255)');
-    expect(await first.evaluate((element) => getComputedStyle(element).color)).toBe('rgb(23, 32, 51)');
+    expect(await first.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgb(34, 36, 46)');
+    expect(await first.evaluate((element) => getComputedStyle(element).color)).toBe('rgb(230, 232, 238)');
 
     await first.hover();
     await page.waitForTimeout(200);
-    expect(await first.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgb(43, 104, 234)');
-    expect(await first.evaluate((element) => getComputedStyle(element).color)).toBe('rgb(255, 255, 255)');
+    expect(await first.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgba(251, 114, 153, 0.14)');
+    expect(await first.evaluate((element) => getComputedStyle(element).color)).toBe('rgb(230, 232, 238)');
     await page.close();
   });
 

@@ -698,7 +698,7 @@ describe('simple configuration mode', () => {
   });
 
   it('top-aligns overtime gift controls when the duration preview adds a second row', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const actionRow = configCss.match(/\.config-root \.simple-overtime-action-row\s*\{([^}]*)\}/)?.[1] ?? '';
     const giftColumn = configCss.match(/\.config-root \.simple-action-gift\s*\{([^}]*)\}/)?.[1] ?? '';
 
@@ -707,7 +707,7 @@ describe('simple configuration mode', () => {
   });
 
   it('renders the actual OBS preview in a scaled 16:9 viewport instead of clipping it', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const previewShell = configCss.match(/\.config-root \.simple-real-preview-frame-shell\s*\{([^}]*)\}/)?.[1] ?? '';
     const previewFrame = configCss.match(/\.config-root \.simple-real-preview-frame\s*\{([^}]*)\}/)?.[1] ?? '';
 
@@ -1094,7 +1094,7 @@ describe.skip('legacy configuration wizard rendering', () => {
 
   it('keeps configuration CSS isolated from display mode and exposes readable light variables', () => {
     const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const defaultVariables = configCss.match(/\.config-root \{([\s\S]*?)\n\}/)?.[1] ?? '';
     const lightVariables = configCss.match(/\.config-root\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
@@ -1148,7 +1148,7 @@ describe.skip('legacy configuration wizard rendering', () => {
   });
 
   it('keeps badge and danger button text readable in both themes', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const defaultVariables = configCss.match(/\.config-root \{([\s\S]*?)\n\}/)?.[1] ?? '';
     const lightVariables = configCss.match(/\.config-root\[data-theme="light"\] \{([\s\S]*?)\n\}/)?.[1] ?? '';
 
@@ -1792,7 +1792,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('uses themed scrollbars and keeps focused inputs inside their existing border', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
 
     expect(configCss).toMatch(/\.config-root input:focus-visible,[\s\S]*?outline: none;/);
     expect(configCss).toContain('scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);');
@@ -1802,7 +1802,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('keeps dense gift rows and separates advanced rule controls', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
 
     expect(configCss).toMatch(/\.gift-picker-drawer \.gift-picker-grid \{[^}]*align-content: start;/);
     expect(configCss).toMatch(/\.gift-choice \{[^}]*height: 60px;/);
@@ -1811,13 +1811,13 @@ describe('single-page configuration rendering', () => {
   });
 
   it('separates template rule cards from the timer explanation', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
 
     expect(configCss).toMatch(/\.template-result-no-timer \{[^}]*margin-top: 12px;/);
   });
 
   it('keeps tutorial spotlights above template and attribute workspaces', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
 
     expect(configCss).toMatch(/\.config-root \.tour-prototype \{[\s\S]*?z-index: 130;/);
     expect(configCss).toContain('.config-root .tour-prototype.is-modal-step { z-index: 170; }');
@@ -1838,7 +1838,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('locks non-target cards while the tutorial owns an expanded attribute', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const guideSource = readFileSync(new URL('../src/ui/config/spotlight-guide.ts', import.meta.url), 'utf8');
 
     expect(guideSource).toMatch(/frame\.classList\.toggle\(\s*'is-card-detail-step',\s*context\.lesson === 'enable' \|\| context\.lesson === 'output',?\s*\)/);
@@ -1847,7 +1847,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('keeps expanded cards centered and scene editor fieldsets aligned', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
 
     expect(configCss).toContain('.config-root .attribute-card.is-detail-persisted > .attribute-card-title');
@@ -4540,7 +4540,7 @@ describe('single-page configuration rendering', () => {
   });
 
   it('reserves enough horizontal space for the complete blind-box scope name', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
 
     expect(configCss).toMatch(/\.blind-box-scope-bar\s*\{[^}]*grid-template-columns:\s*max-content minmax\(0, 1fr\);/);
     expect(configCss).toMatch(/\.blind-box-scope-field\s*\{[^}]*grid-template-columns:\s*auto max-content;[^}]*width:\s*max-content;/);
@@ -4694,7 +4694,7 @@ describe('single-page configuration rendering', () => {
     interactiveCard.onpointerenter?.();
     expect(card?.className.split(' ')).toContain('is-detail-above');
 
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     expect(configCss).toContain('perspective(1100px)');
     expect(configCss).toContain('@media (hover: hover)');
     expect(configCss).toContain('.config-root .hover-detail-card:hover .hover-detail-panel');
@@ -6595,7 +6595,7 @@ describe('OBS attribute display', () => {
   });
 
   it('keeps KPI gift choices at their content height inside the scrolling editor', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     const configSource = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
     const giftPickerSource = readFileSync(new URL('../src/ui/config/gift-picker.ts', import.meta.url), 'utf8');
     const activitySource = readFileSync(new URL('../src/ui/config/activity-workspace.ts', import.meta.url), 'utf8');
@@ -6628,7 +6628,7 @@ describe('OBS attribute display', () => {
   });
 
   it('fills attribute detail cards symmetrically with gift rules', () => {
-    const configCss = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+    const configCss = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
     expect(configCss).toMatch(/\.attribute-formulas\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/);
     expect(configCss).toMatch(/\.hover-detail-card\s*\{[^}]*--card-visual-surface-depth:\s*0px;[^}]*--card-detail-icon-depth:\s*0px;/);
     expect(configCss).toMatch(/\.hover-detail-card\.is-detail-persisted\s*\{[^}]*--card-visual-surface-depth:\s*8px;[^}]*--card-detail-icon-depth:\s*10px;/);
