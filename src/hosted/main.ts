@@ -5,7 +5,7 @@ import { mountAuthView } from './auth';
 import { mountConfigurationView } from './configuration';
 import { mountInvitationView } from './invitations';
 import { mountMigrationView } from './migration';
-import { mountRoomControls } from './room';
+import { mountAccountView } from './account';
 import { createHostedApplicationLifecycle, createHostedRuntimePresence, type HostedRuntimePresence } from './runtime';
 import { createHostedViewHost, isAdminEntryHash, renderHostedShell, type HostedSession, type HostedView } from './shell';
 
@@ -29,21 +29,12 @@ const ensureRuntimePresence = (): HostedRuntimePresence => {
   return runtimePresence;
 };
 const disposeRuntimePresence = (): void => { runtimePresence?.dispose(); runtimePresence = undefined; };
-const mountAccountView = (api: HostedAPI): HostedView => {
-  const document = root.ownerDocument;
-  const panel = document.createElement('main'); panel.className = 'hosted-shell hosted-panel';
-  const title = document.createElement('h1'); title.textContent = '主播账号';
-  const status = document.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-  const configuration = document.createElement('button'); configuration.type = 'button'; configuration.textContent = '在线配置'; configuration.addEventListener('click', () => showConfiguration(api));
-  const migration = document.createElement('button'); migration.type = 'button'; migration.textContent = '迁移本地配置'; migration.addEventListener('click', () => showMigration(api));
-  const invitations = document.createElement('button'); invitations.type = 'button'; invitations.textContent = '我的邀请码'; invitations.addEventListener('click', () => { observeViewOperation(viewHost.replace(() => mountInvitationView(root, api, undefined, () => returnToAccount(api), () => returnToSignedOut(api)))); });
-  const room = document.createElement('div');
-  const roomView = mountRoomControls(room, api, ensureRuntimePresence());
-  const logout = document.createElement('button'); logout.type = 'button'; logout.textContent = '退出登录'; logout.addEventListener('click', () => { void api.logout().then(() => returnToSignedOut(api)).catch(() => applicationLifecycle.run(() => { status.textContent = '退出失败，请稍后重试'; })); });
-  panel.append(title, status, room, configuration, migration, invitations, logout); root.replaceChildren(panel);
-  return { dispose: () => { roomView.dispose(); root.replaceChildren(); } };
-};
-const showAccount = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountAccountView(api))); };
+const showAccount = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountAccountView(root, api, ensureRuntimePresence(), {
+  onConfiguration: () => showConfiguration(api),
+  onMigration: () => showMigration(api),
+  onInvitations: () => { observeViewOperation(viewHost.replace(() => mountInvitationView(root, api, undefined, () => returnToAccount(api), () => returnToSignedOut(api)))); },
+  onSignedOut: () => returnToSignedOut(api),
+}))); };
 const showConfiguration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountConfigurationView(root, api, { onMigration: () => showMigration(api), onExit: () => showAccount(api) }))); };
 const showMigration = (api: HostedAPI): void => { observeViewOperation(viewHost.replace(() => mountMigrationView(root, api, { onConfiguration: () => showConfiguration(api) }))); };
 const mountShell = (api: HostedAPI, serviceStatus: HostedSession['serviceStatus']): HostedView => {

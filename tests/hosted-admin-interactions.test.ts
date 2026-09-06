@@ -97,6 +97,6 @@ describe('administrator interaction primitives', () => {
     expect(rule('.hosted-admin-content select')).toContain('appearance: none');
     expect(rule('.hosted-admin-content select')).toContain('data:image/svg+xml');
     expect(rule('.hosted-admin-content input[type=checkbox]')).toContain('appearance: none');
-    expect(rule('.hosted-admin-content input[type=checkbox]:checked')).toContain('background: #246bce');
+    expect(rule('.hosted-admin-content input[type=checkbox]:checked')).toContain('background: var(--button-bg)');
   });
 });

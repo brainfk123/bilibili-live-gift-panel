@@ -147,7 +147,8 @@ function unresolvedRelativeTypeScriptImports(root: string): string[] {
       ...source.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g),
     ].map((match) => match[1]).filter((specifier) => specifier.startsWith('.'));
     for (const specifier of specifiers) {
-      const target = resolve(root, relative, '..', specifier);
+      // Vite's raw import still requires the underlying asset in the context.
+      const target = resolve(root, relative, '..', specifier.replace(/\?raw$/, ''));
       const candidates = [target, `${target}.ts`, `${target}.json`, resolve(target, 'index.ts')];
       if (!candidates.some((candidate) => existsSync(candidate))) {
         unresolved.push(`${relative} -> ${specifier}`);
@@ -607,6 +608,8 @@ describe('hosted single-host deployment contract', () => {
       expect(existsSync(resolve(context, 'package-lock.json'))).toBe(true);
       expect(existsSync(resolve(context, 'goserver/internal/hosted/store/mysqlstore/migrations/0001_foundation.sql'))).toBe(true);
       expect(existsSync(resolve(context, 'src/hosted/main.ts'))).toBe(true);
+      expect(existsSync(resolve(context, 'src/ui/theme.css'))).toBe(true);
+      expect(existsSync(resolve(context, 'assets/brand.svg'))).toBe(true);
       expect(unresolvedRelativeTypeScriptImports(context)).toEqual([]);
       expect(existsSync(resolve(context, '.git'))).toBe(false);
       expect(existsSync(resolve(context, 'src/main.ts'))).toBe(false);

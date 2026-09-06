@@ -8,6 +8,8 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 COPY hosted.html obs.html vite.hosted.config.ts ./
 COPY src/hosted ./src/hosted
+COPY src/ui/theme.css src/ui/brand.ts ./src/ui/
+COPY assets/brand.svg ./assets/brand.svg
 COPY src/gameplay-templates.ts src/display-themes.ts src/format.ts src/types.ts src/duration.ts src/gift-rule-operations.ts ./src/
 RUN npm ci && npm run build:hosted
 

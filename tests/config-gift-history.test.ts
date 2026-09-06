@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 
 describe('gift receipt presentation', () => {
   const source = readFileSync(new URL('../src/ui/config/config.ts', import.meta.url), 'utf8');
-  const css = readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8');
+  const css = (readFileSync(new URL('../src/ui/theme.css', import.meta.url), 'utf8') + '\n' + readFileSync(new URL('../src/ui/config/config.css', import.meta.url), 'utf8'));
 
   it('loads Bilibili gift icons without sending the localhost referrer', () => {
     expect(source).toMatch(/class: 'gift-history-gift-image',[^}]*referrerPolicy: 'no-referrer'/);
