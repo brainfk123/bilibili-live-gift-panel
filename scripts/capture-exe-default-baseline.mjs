@@ -58,7 +58,7 @@ try {
         const response = await page.goto(new URL(`/?mode=config&page=${route}`,base).href,{waitUntil:'domcontentloaded'});
         assert.equal(response.status(),200);
         await page.locator(section).waitFor({state:'visible'});
-        await page.evaluate(() => document.fonts.ready);
+        await page.waitForFunction(() => document.fonts.status === 'loaded', null, {timeout:10_000});
         assert.equal(await page.locator('.overlay:visible,.tour-bubble:visible').count(),0,'An overlay invalidates the empty-state capture');
         const filename = `exe-${feature}-empty-${viewport.id}.png`;
         // Exclude environment-specific OBS URL fields, not page content or controls.
