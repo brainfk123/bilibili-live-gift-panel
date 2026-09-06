@@ -4,13 +4,25 @@
 
 ## Mac prerequisites
 
-在 Mac checkout 中安装与仓库锁定版本相容的 Node.js、Go 和 Git。部署契约测试使用 Bash 4.2+，Apple 自带的 `/bin/bash` 不满足要求；安装 Homebrew Bash，并在运行测试前显式选择它：
+在 Mac checkout 中安装与仓库锁定版本相容的 Node.js、Go 和 Git。部署契约测试使用 Bash 4.2+，Apple 自带的 `/bin/bash` 不满足要求；安装 Homebrew Bash，并在运行测试前显式选择它。Hosted 部署合同依赖 Linux GNU 工具语义，macOS 上通过 Colima 的 Docker runtime 在固定的 Linux contract-test 镜像中执行，不要用 BSD `date`、`find`、`stat` 或 `tar` 冒充 Linux 验证：
 
 ```bash
-brew install bash
+brew install bash colima docker docker-compose docker-buildx
+mkdir -p "$HOME/.docker/cli-plugins"
+ln -sfn "$(brew --prefix)/lib/docker/cli-plugins/docker-compose" "$HOME/.docker/cli-plugins/docker-compose"
+ln -sfn "$(brew --prefix)/lib/docker/cli-plugins/docker-buildx" "$HOME/.docker/cli-plugins/docker-buildx"
+colima start --runtime docker --vm-type vz
 export BASH_BIN="$(brew --prefix)/bin/bash"
+# 安全文件测试拒绝路径中的符号链接；macOS 的 /var 是 /private/var 别名。
+export TMPDIR="$(node -e 'process.stdout.write(require("node:fs").realpathSync(require("node:os").tmpdir()))')"
+docker version
+docker compose version
 npm ci
 ```
+
+`npm test` 在 macOS 上会把 `tests/hosted-deploy.test.ts` 路由到固定 digest 的 Node 22 Debian 镜像；其他测试仍原生运行。Linux 和 Windows CI 继续直接运行原始部署合同。Colima 不需要设为开机服务，不使用时可执行 `colima stop`。
+
+`npm run build:hosted-server` 使用原生 `$BUILDPLATFORM` Node/Go builder，再由 Go 交叉编译 `linux/amd64` 服务并组装最终 amd64 镜像；不要安装 Rosetta 或让 amd64 Go 工具链在 QEMU 中运行来绕过构建失败。
 
 不要把凭据写入仓库、镜像或 snapshot。Hosted 本地运行所需的环境变量从受保护的本机配置注入，并保持在 checkout 之外。
 
@@ -38,7 +50,7 @@ npm run test:update-api
 
 - [ ] 从受信任远程创建全新的 checkout，记录 commit SHA，且不复用旧 `node_modules`、Go build cache 或生成资产。
 - [ ] 记录 `uname -m` 输出为 `arm64`，以及 macOS、Xcode command-line tools、Git、Node.js 和 Go 版本。
-- [ ] 执行 `brew install bash`，导出 `BASH_BIN="$(brew --prefix)/bin/bash"`，并记录所选 Bash 版本不低于 4.2。
+- [ ] 安装 Homebrew Bash、Colima、Docker CLI、Compose 和 Buildx，启动 Docker runtime；记录所选 Bash 版本不低于 4.2、`colima status`、`docker version` 与 `docker compose version`。
 - [ ] 在 fresh checkout 中执行 `npm ci`，保存锁文件一致性和退出码证据。
 - [ ] 按 Daily Hosted loop 的原始顺序执行全部命令，保存每条命令、退出码和非敏感日志指针。
 - [ ] 确认测试后没有意外 tracked 修改，且构建产物未混入凭据、本机绝对路径或缓存。
@@ -79,6 +91,8 @@ Windows x64 只在需要验证真实目标行为时运行：例如 Windows 专�
 修复在 Mac checkout 中完成，提交后由 CI 重新构建、重新上传和复验；不要在 VM 或下载的 artifact 中直接编辑代码。无法复现时也要回传上述证据，而不是只报告“本地正常”。
 
 ## Windows 11 ARM snapshot rules
+
+已安装 VM 的启动、受限转发、快照与固定 EXE 版本见 [Windows ARM UI 开发环境](windows-arm-ui-environment.md)。
 
 Windows 11 ARM snapshot 可用于检查安装、启动、窗口交互、Hosted 页面、文件路径和软件编码等 ARM 行为。snapshot 必须注明系统架构、镜像版本、测试 commit 和测试范围，不包含发布凭据。
 

@@ -1,0 +1,18 @@
+
+> bilibili-live-gift-panel@0.4.10 build:hosted
+> vite build --config vite.hosted.config.ts
+
+vite v5.4.21 building for production...
+transforming...
+✓ 49 modules transformed.
+rendering chunks...
+computing gzip size...
+goserver/cmd/hosted/dist/hosted.html                                  0.55 kB │ gzip:  0.35 kB
+goserver/cmd/hosted/dist/obs.html                                     0.55 kB │ gzip:  0.36 kB
+goserver/cmd/hosted/dist/.vite/manifest.json                          0.64 kB │ gzip:  0.23 kB
+goserver/cmd/hosted/dist/assets/obs-EyHP4izQ.css                      1.52 kB │ gzip:  0.66 kB
+goserver/cmd/hosted/dist/assets/hosted-ClGctFpf.css                  32.14 kB │ gzip:  6.56 kB
+goserver/cmd/hosted/dist/assets/modulepreload-polyfill-B5Qt9EMX.js    0.71 kB │ gzip:  0.40 kB
+goserver/cmd/hosted/dist/assets/obs-CuIrv7Hs.js                       8.07 kB │ gzip:  3.47 kB
+goserver/cmd/hosted/dist/assets/hosted-Htp4TBX1.js                  128.05 kB │ gzip: 39.29 kB
+✓ built in 181ms

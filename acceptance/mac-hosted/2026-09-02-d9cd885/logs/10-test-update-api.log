@@ -1,0 +1,13 @@
+
+> bilibili-live-gift-panel@0.4.10 test:update-api
+> go -C updateapi test ./... -count=1
+
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/mirror	0.595s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/publish	0.792s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/cmd/server	1.179s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/cosstore	1.876s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/httpapi	1.941s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/mirror	4.511s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/publish	2.649s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/release	3.371s
+ok  	github.com/brainfk123/bilibili-live-gift-panel/updateapi/internal/service	2.997s

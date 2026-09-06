@@ -77,6 +77,21 @@ describe('CI scope classification', () => {
     });
   });
 
+  it('keeps the Mac Linux-contract harness in Hosted-only CI scope', () => {
+    expect(classifyChanges([
+      { status: 'A', path: '.dockerignore' },
+      { status: 'M', path: 'deploy/hosted/Dockerfile' },
+      { status: 'M', path: 'docs/development/mac-hosted-workflow.md' },
+      { status: 'M', path: 'tests/hosted-deploy.test.ts' },
+      { status: 'A', path: 'tests/Dockerfile.hosted-deploy' },
+      { status: 'A', path: 'tests/hosted-deploy.contract.ts' },
+    ])).toMatchObject({
+      windowsLevel: 'skip',
+      runWindows: false,
+      runMySQL: false,
+    });
+  });
+
   it.each([
     [['tests/development-workflow.test.ts', 'goserver/internal/gameplay/model.go'], 'shared'],
     [['tests/ui-parity-requirements.test.ts', 'updateapi/server.go'], 'desktop-high-risk'],

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-FROM node:24.18.0-bookworm-slim@sha256:d45d78e7929b46875bbd4e29bea672d5bc48186c6c3588306521c815e78352d6 AS ui-build
+FROM --platform=$BUILDPLATFORM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS ui-build
 ARG SOURCE_DATE_EPOCH=0
 ENV NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false
@@ -11,7 +11,7 @@ COPY src/hosted ./src/hosted
 COPY src/gameplay-templates.ts src/display-themes.ts src/format.ts src/types.ts src/duration.ts src/gift-rule-operations.ts ./src/
 RUN npm ci && npm run build:hosted
 
-FROM golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f AS server-build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd AS server-build
 ARG SOURCE_DATE_EPOCH=0
 WORKDIR /build/goserver
 COPY goserver/go.mod goserver/go.sum ./

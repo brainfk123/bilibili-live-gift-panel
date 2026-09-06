@@ -1,0 +1,15 @@
+pr_url=https://github.com/brainfk123/bilibili-live-gift-panel/pull/4
+run_url=https://github.com/brainfk123/bilibili-live-gift-panel/actions/runs/33604159570
+head_sha=188fca7b9be2c218019d90eb09bf23cbe285d1a5
+scope=SUCCESS
+hosted=SUCCESS
+hosted_mysql=SKIPPED
+windows_compat=SUCCESS
+ci_gate=SUCCESS
+artifact_name=windows-compat-5b5ad1accff47f822dda02d6439cd98c4777c366
+artifact_size_bytes=7443524
+exe_sha256=071e31a170c289b6606847c875946b83ba60a52e23bca05346eb10337fcae4e6
+evidence_sha256=6faa60309d62c59230e3ba756e3f3ad437312f75600b54ac0c8f16556f3a2cfc
+smoke_routes=config,display,api-config
+smoke_started_at=2026-09-02T07:43:31.254Z
+smoke_completed_at=2026-09-02T07:43:31.524Z

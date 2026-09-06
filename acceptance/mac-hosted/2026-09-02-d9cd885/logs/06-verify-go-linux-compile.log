@@ -1,0 +1,9 @@
+
+> bilibili-live-gift-panel@0.4.10 verify:go-linux-compile
+> node scripts/verify-go-linux-compile.mjs
+
+go: downloading github.com/gorilla/websocket v1.5.3
+go: downloading github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+go: downloading golang.org/x/text v0.41.0
+go: downloading google.golang.org/protobuf v1.36.12
+Verified GOOS=linux GOARCH=amd64 compile-only gate.
