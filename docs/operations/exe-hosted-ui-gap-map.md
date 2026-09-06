@@ -2,6 +2,8 @@
 
 ## 基准和已完成工作
 
+新增 Hosted 功能同样遵循 [EXE 风格继承约束](../development/hosted-ui-style-contract.md)，包括账号、邀请码、迁移、权限和管理功能；不能把 Hosted 独有内容当成改用另一套视觉体系的理由。
+
 参考 EXE 为正式 v0.4.10；Hosted 代码起点为 `7abf973`（随后已随 PR #4 合入 master）。当前阶段按维护者决定，在同一个 macOS Chromium 中比较两端，不比较浏览器平台差异。
 
 已实际运行 Windows ARM 中的 EXE，使用固定空夹具采集六工作区 × 三视口。该批证据只覆盖 `empty` 状态，不等于 requirements.json 中全部状态通过；OBS 空配置仍有内置盲盒排行榜入口，不能把此入口删去以求“全空”。
@@ -47,7 +49,7 @@ PNG 与本次 manifest 写入忽略的 `acceptance/exe-hosted-ui/captures/0.4.10
 ## 当前未完成的证据
 
 - Hosted 对应状态的真实渲染截图及并排对比。
-- populated、编辑/验证错误、焦点、弹窗、加载/故障、只读/禁用、活动转换等状态。
+- 状态逐项覆盖见 `acceptance/exe-hosted-ui/reports/2026-09-06-coverage.json`：99 个合同状态组合已采集，69 个待补。不要把第二批 102 张截图数当作合同通过数。
 - 与最终 Hosted 模型一致的有数据夹具和可复跑交互步骤。
 - 2026-09-06 npm audit 仍报告 7 项（4 moderate、2 high、1 critical）；Vite/Vitest 修复建议涉及主版本升级，应独立回归。
 
@@ -68,3 +70,13 @@ PNG 与本次 manifest 写入忽略的 `acceptance/exe-hosted-ui/captures/0.4.10
 - 当前排行榜行未提供独立观众详情入口；OBS 本地链接按配置生成，没有 Hosted 式凭据重置按钮。不能凭空生成 open-viewer 或 reset-link 的 EXE 截图。
 
 这些观察不作为 Hosted 需要复刻的缺陷，也不视为自动批准合同豁免；下一阶段应把可见错误、稳定布局和 Hosted 账号隔离语义写入迁移验收。
+
+## 当前 Hosted 对比与协议缺口
+
+`node scripts/capture-hosted-current-baseline.mjs` 运行实际 Hosted 前端，通过临时的 localhost HTTP/SSE 合成接口提供对应的属性、活动、目标和进度。三个视口各采集账号页与 JSON 配置页，共六张。该命令不进行真实账号登录，也不验证 MySQL 或导入器。夹具投影明确列出当前 DTO 不支持的全局/盲盒/目标外观及观众历史。
+
+`src/migration.ts` 的 `createOnlineMigration` 输出 migrationVersion 2；`goserver/internal/hosted/migration/envelope_test.go` 的 `wrong migration version` 用例明确要求拒绝版本 2。全局外观、盲盒外观和组合外观字段也在 decoder schema 中被过滤。故现阶段不能宣称同一个完整 EXE 导出包已经成功导入 Hosted。
+
+`node scripts/build-ui-baseline-comparison.mjs` 从三份已记录 manifest 生成本地 `captures/0.4.10/comparison-2026-09-06.html`。概览/属性与 Hosted 对应页面的直接截图显示明显结构差异；完整六工作区对齐仍未通过。
+
+后续实现的前置任务是为 v2 导出包建立真实 Go decoder 的兼容测试，明确接纳外观和依赖声明的白名单与独立验证；完成后再按原顺序推进概览、属性、活动、目标、OBS、数据中心的可视化迁移，保留现有账号隔离和版本冲突机制。

@@ -4,6 +4,8 @@
 
 ## 范围
 
+所有 Hosted 新增功能也必须延续 EXE 风格，详见 [Hosted UI 风格约束](../development/hosted-ui-style-contract.md)。Hosted 独有功能按参考组件进行风格继承验收，已有 EXE 功能继续进行逐状态直接截图对比。
+
 合同定义六个工作区：overview、attributes、activities、gift-targets、obs、analytics；三个视口：desktop-1440x900、narrow-1024x768、mobile-390x844。每一项均按合同中的全部状态和交互采集。截图仅可位于 `acceptance/exe-hosted-ui/captures/<exe-version>/`；不得记录绝对路径、localhost URL 或带 token 的 URL。
 
 ## 操作顺序
